@@ -34,11 +34,14 @@ override_dh_auto_build:
 
 override_dh_auto_install:
 	DESTDIR=$(DESTDIR) rake install
-	mkdir -p debian/rubinius-doc/usr/share/doc/rubinius
-	mv debian/rubinius/usr/lib/rubinius/2.0/lib/rubinius/documentation debian/rubinius-doc/usr/share/doc/rubinius/html
-	dh_link -p rubinius-doc usr/share/doc/rubinius/html usr/lib/rubinius/2.0/lib/rubinius/documentation
+
+	# install manpage
 	mkdir -p $(DESTDIR)/usr/share/man/man1
 	pod2man --center "" --release "" --name Rubinius --utf8 debian/rubinius.1.pod $(DESTDIR)/usr/share/man/man1/rbx.1
+
+	# install docs
+	mkdir -p debian/rubinius-doc/usr/share/doc/rubinius
+	cp -dpR web debian/rubinius-doc/usr/share/doc/rubinius/html
 
 override_dh_auto_clean: override_dh_auto_configure
 	dh_auto_clean
