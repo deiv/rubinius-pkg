@@ -1,9 +1,9 @@
 require 'erb'
 require File.expand_path('../../../spec_helper', __FILE__)
 
-describe 'ERB#def_module' do
+describe "ERB#def_module" do
 
-  it "return unnamed module which has instance method to render eRuby" do
+  it "returns unnamed module which has instance method to render eRuby" do
     input = <<'END'
 arg1=<%= arg1.inspect %>
 arg2=<%= arg2.inspect %>

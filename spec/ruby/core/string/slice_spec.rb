@@ -1,3 +1,5 @@
+# -*- encoding: utf-8 -*-
+
 require File.expand_path('../../../spec_helper', __FILE__)
 require File.expand_path('../fixtures/classes.rb', __FILE__)
 require File.expand_path('../shared/slice.rb', __FILE__)
@@ -83,6 +85,16 @@ describe "String#slice! with index" do
     def obj.method_missing(name, *) name == :to_int ? 1 : super; end
     "hello".slice!(obj).should == ?e
   end
+
+  with_feature :encoding do
+
+    it "returns the character given by the character index" do
+      "hellö there".send(@method, 1).should == "e"
+      "hellö there".send(@method, 4).should == "ö"
+      "hellö there".send(@method, 6).should == "t"
+    end
+
+  end
 end
 
 describe "String#slice! with index, length" do
@@ -148,8 +160,23 @@ describe "String#slice! with index, length" do
 
   it "returns subclass instances" do
     s = StringSpecs::MyString.new("hello")
-    s.slice!(0, 0).should be_kind_of(StringSpecs::MyString)
-    s.slice!(0, 4).should be_kind_of(StringSpecs::MyString)
+    s.slice!(0, 0).should be_an_instance_of(StringSpecs::MyString)
+    s.slice!(0, 4).should be_an_instance_of(StringSpecs::MyString)
+  end
+
+  with_feature :encoding do
+
+    it "returns the substring given by the character offsets" do
+      "hellö there".send(@method, 1,0).should == ""
+      "hellö there".send(@method, 1,3).should == "ell"
+      "hellö there".send(@method, 1,6).should == "ellö t"
+      "hellö there".send(@method, 1,9).should == "ellö ther"
+    end
+
+    it "treats invalid bytes as single bytes" do
+      "a\xE6\xCBb".send(@method, 1, 2).should == "\xe6\xcb"
+    end
+
   end
 end
 
@@ -187,8 +214,8 @@ describe "String#slice! Range" do
 
   it "returns subclass instances" do
     s = StringSpecs::MyString.new("hello")
-    s.slice!(0...0).should be_kind_of(StringSpecs::MyString)
-    s.slice!(0..4).should be_kind_of(StringSpecs::MyString)
+    s.slice!(0...0).should be_an_instance_of(StringSpecs::MyString)
+    s.slice!(0..4).should be_an_instance_of(StringSpecs::MyString)
   end
 
   it "calls to_int on range arguments" do
@@ -223,6 +250,20 @@ describe "String#slice! Range" do
     range_incl = StringSpecs::MyRange.new(1, 2)
 
     a.slice!(range_incl).should == "OO"
+  end
+
+  with_feature :encoding do
+
+    it "returns the substring given by the character offsets of the range" do
+      "hellö there".send(@method, 1..1).should == "e"
+      "hellö there".send(@method, 1..3).should == "ell"
+      "hellö there".send(@method, 1...3).should == "el"
+      "hellö there".send(@method, -4..-2).should == "her"
+      "hellö there".send(@method, -4...-2).should == "he"
+      "hellö there".send(@method, 5..-1).should == " there"
+      "hellö there".send(@method, 5...-1).should == " ther"
+    end
+
   end
 
   ruby_version_is ""..."1.9" do
@@ -288,8 +329,15 @@ describe "String#slice! with Regexp" do
 
   it "returns subclass instances" do
     s = StringSpecs::MyString.new("hello")
-    s.slice!(//).should be_kind_of(StringSpecs::MyString)
-    s.slice!(/../).should be_kind_of(StringSpecs::MyString)
+    s.slice!(//).should be_an_instance_of(StringSpecs::MyString)
+    s.slice!(/../).should be_an_instance_of(StringSpecs::MyString)
+  end
+
+  with_feature :encoding do
+    it "returns the matching portion of self with a multi byte character" do
+      "hëllo there".send(@method, /[ë](.)\1/).should == "ëll"
+      "".send(@method, //).should == ""
+    end
   end
 
   it "sets $~ to MatchData when there is a match and nil when there's none" do
@@ -379,8 +427,20 @@ describe "String#slice! with Regexp, index" do
 
   it "returns subclass instances" do
     s = StringSpecs::MyString.new("hello")
-    s.slice!(/(.)(.)/, 0).should be_kind_of(StringSpecs::MyString)
-    s.slice!(/(.)(.)/, 1).should be_kind_of(StringSpecs::MyString)
+    s.slice!(/(.)(.)/, 0).should be_an_instance_of(StringSpecs::MyString)
+    s.slice!(/(.)(.)/, 1).should be_an_instance_of(StringSpecs::MyString)
+  end
+
+  with_feature :encoding do
+    it "returns the encoding aware capture for the given index" do
+      "hår".send(@method, /(.)(.)(.)/, 0).should == "hår"
+      "hår".send(@method, /(.)(.)(.)/, 1).should == "h"
+      "hår".send(@method, /(.)(.)(.)/, 2).should == "å"
+      "hår".send(@method, /(.)(.)(.)/, 3).should == "r"
+      "hår".send(@method, /(.)(.)(.)/, -1).should == "r"
+      "hår".send(@method, /(.)(.)(.)/, -2).should == "å"
+      "hår".send(@method, /(.)(.)(.)/, -3).should == "h"
+    end
   end
 
   it "sets $~ to MatchData when there is a match and nil when there's none" do
@@ -463,7 +523,7 @@ describe "String#slice! with String" do
     s = StringSpecs::MyString.new("el")
     r = "hello".slice!(s)
     r.should == "el"
-    r.should be_kind_of(StringSpecs::MyString)
+    r.should be_an_instance_of(StringSpecs::MyString)
   end
 
   ruby_version_is ""..."1.9" do

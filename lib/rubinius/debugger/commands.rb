@@ -73,7 +73,7 @@ class Rubinius::Debugger
     # As such, they're grouped by similar action.
 
     class Help < Command
-      pattern "help"
+      pattern "help", "h"
       help "Show information about debugger commands"
 
       def run(args)
@@ -113,19 +113,29 @@ Array on line 33, use:
 
 To breakpoint on class method start of Debugger line 4, use:
   Debugger.start:4
+
+Conditional breakpoints can be created in this way:
+  <breakpoint declaration> if <condition>
+The breakpoint will be triggered only when the evaluation of the specified condition returns true.
       HELP
 
+      # provide this method so it can be overriden for other languages wanting to use this debugger
+      def match_method(method_identifier)
+        /([A-Z]\w*(?:::[A-Z]\w*)*)([.#]|::)([a-zA-Z0-9_\[\]]+[!?=]?)(?:[:](\d+))?(\s+if\s+.*)?/.match(method_identifier)
+      end
+
       def run(args, temp=false)
-        m = /([A-Z]\w*(?:::[A-Z]\w*)*)([.#]|::)([a-zA-Z0-9_\[\]]+[!?=]?)(?:[:](\d+))?/.match(args)
+        m = match_method(args)
         unless m
           error "Unrecognized position: '#{args}'"
           return
         end
 
         klass_name = m[1]
-        which = m[2]
-        name  = m[3]
-        line =  m[4] ? m[4].to_i : nil
+        which      = m[2]
+        name       = m[3]
+        line       = m[4] ? m[4].to_i : nil
+        condition  = m[5] ? m[5].sub(/\A\s+if\s+/, '') : nil
 
         begin
           klass = run_code(klass_name)
@@ -147,7 +157,7 @@ To breakpoint on class method start of Debugger line 4, use:
           return
         end
 
-        bp = @debugger.set_breakpoint_method args.strip, method, line
+        bp = @debugger.set_breakpoint_method args.strip, method, line, condition
 
         bp.set_temp! if temp
 
@@ -336,7 +346,7 @@ at the current position of the caller.
       help "Step into next method call or to next line"
       ext_help <<-HELP
 Behaves like next, but if there is a method call on the current line,
-execption is stopped in the called method.
+execution is stopped in the called method.
       HELP
 
       def run(args)
@@ -535,6 +545,12 @@ Subcommands are:
             @debugger.breakpoints.each_with_index do |bp, i|
               if bp
                 info "%3d: %s" % [i+1, bp.describe]
+                if bp.has_commands?
+                  info "     #{bp.commands}"
+                end
+                if bp.has_condition?
+                  info "     stop only if #{bp.condition}"
+                end
               end
             end
           else
@@ -610,6 +626,118 @@ The optional argument is which variable specificly to show the value of.
           end
         end
 
+      end
+    end
+
+    class Quit < Command
+      pattern "quit", "q", "exit", "ex"
+      help "Quit the debugger"
+      ext_help <<-HELP
+Quits your current session and shuts down the complete process
+      HELP
+
+      def run(args)
+        Process.exit!(1)
+      end
+    end
+
+    class CommandsList < Command
+      pattern "commands", "command"
+      help "execute code every time breakpoint is reached"
+      ext_help <<-HELP
+Set commands to be executed when a breakpoint is hit.
+Give breakpoint number as argument after "commands".
+With no argument, the targeted breakpoint is the last one set.
+The commands themselves follow starting on the next line.
+Type a line containing "end" to indicate the end of them.
+Give "silent" as the first line to make the breakpoint silent;
+then no output is printed when it is hit, except what the commands print.
+      HELP
+
+      def run(args)
+        bp = @debugger.breakpoints[args[:bp_id] - 1]
+        bp.set_commands(args[:code])
+      end
+    end
+
+    class Condition < Command
+      pattern "condition", "cond"
+      help "New condition expression on breakpoint N"
+      ext_help <<-HELP
+Specify breakpoint number N to break only if COND is true.
+Usage is `condition N COND', where N is an integer and COND is an
+expression to be evaluated whenever breakpoint N is reached.
+      HELP
+
+      def run(args)
+        bp_id, condition = args.split(/\s+/, 2)
+        bp_id = bp_id.to_i
+
+        if @debugger.breakpoints.empty?
+          error "No breakpoint set"
+          return
+        elsif bp_id > @debugger.breakpoints.size || bp_id < 1
+          error "Invalid breakpoint number."
+          return
+        end
+
+        bp = @debugger.breakpoints[bp_id - 1]
+        bp.set_condition(condition)
+      end
+    end
+
+    class ListCode < Command
+      pattern "l", "list"
+      help "List code"
+      ext_help <<-HELP
+List specified function or line.
+With no argument, lists ten more lines after or around previous listing.
+"list -" lists the ten lines before a previous ten-line listing.
+One argument specifies a line, and ten lines are listed around that line.
+Two arguments with comma between specify starting and ending lines to list.
+Lines can be specified in these ways:
+  LINENUM, to list around that line in current file,
+  FILE:LINENUM, to list around that line in that file,
+      HELP
+
+      def run(args)
+        path         = nil
+        line         = nil
+        lines_around = 10
+
+        if args =~ /^[\w#{File::Separator}]+(\.rb)?:\d+$/
+          path, line = args.split(':')
+          line = line.to_i
+        elsif args.nil?
+          line = if @debugger.variables[:list_command_history][:center_line]
+            @debugger.variables[:list_command_history][:center_line] + 1 + lines_around
+          else
+            @debugger.current_frame.line.to_i
+          end
+          path = @debugger.variables[:list_command_history][:path] || @debugger.current_frame.method.active_path
+        elsif args == "-"
+          if @debugger.variables[:list_command_history][:center_line].nil? || @debugger.variables[:list_command_history][:path].nil?
+            return
+          else
+            line = @debugger.variables[:list_command_history][:center_line] - lines_around
+            path = @debugger.variables[:list_command_history][:path]
+          end
+        elsif args =~ /^\d+$/
+          line = args.to_i
+          path = @debugger.current_frame.method.active_path
+        elsif match = /^(\d+),(\d+)$/.match(args)
+          start_line = match[1].to_i
+          end_line   = match[2].to_i
+          path       = @debugger.current_frame.method.active_path
+
+          @debugger.list_code_range(path, start_line, end_line, end_line)
+          return
+        else
+          error 'Invalid args for list'
+          return
+        end
+
+         @debugger.list_code_around_line(path, line, lines_around)
       end
     end
   end

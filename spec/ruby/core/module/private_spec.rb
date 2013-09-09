@@ -1,7 +1,10 @@
 require File.expand_path('../../../spec_helper', __FILE__)
 require File.expand_path('../fixtures/classes', __FILE__)
+require File.expand_path('../shared/set_visibility', __FILE__)
 
 describe "Module#private" do
+  it_behaves_like :set_visibility, :private
+
   it "makes the target method uncallable from other types" do
     obj = Object.new
     class << obj
@@ -33,5 +36,13 @@ describe "Module#private" do
                   :module_specs_public_method_on_object_for_kernel_private)
     Object.should_not have_private_instance_method(
                   :module_specs_public_method_on_object_for_kernel_private)
+  end
+
+  it "returns self" do
+    (class << Object.new; self; end).class_eval do
+      def foo; end
+      private(:foo).should equal(self)
+      private.should equal(self)
+    end
   end
 end

@@ -9,10 +9,13 @@
 #include "object_utils.hpp"
 
 #include <tommath.h>
-#include <gdtoa.h>
+#include <double-conversion.h>
+#include <ieee.h>
 
 #include "builtin/array.hpp"
-#include "builtin/compiledmethod.hpp"
+#include "builtin/compiledcode.hpp"
+#include "builtin/encoding.hpp"
+#include "builtin/exception.hpp"
 #include "builtin/fixnum.hpp"
 #include "builtin/float.hpp"
 #include "builtin/iseq.hpp"
@@ -22,21 +25,75 @@
 
 #include "detection.hpp"
 
+#define STACK_BUF_SZ 1024
+
 namespace rubinius {
 
-  using std::endl;
+  Object* UnMarshaller::get_constant() {
+    char stack_data[STACK_BUF_SZ];
+    char *malloc_data = NULL;
+    char *data = stack_data;
+
+    size_t count;
+
+    stream >> count;
+    stream.get();
+
+    if(count >= STACK_BUF_SZ) {
+      malloc_data = (char*)malloc(count + 1);
+      data = malloc_data;
+    }
+
+    stream.read(data, count + 1);
+    data[count] = 0; // clamp
+
+    Object* cls = state->vm()->path2class(data);
+
+    if(malloc_data) {
+      free(malloc_data);
+    }
+    return cls;
+  }
+
+  Object* UnMarshaller::get_encoding() {
+    char stack_data[STACK_BUF_SZ];
+    char *malloc_data = NULL;
+    char *data = stack_data;
+    size_t count;
+
+    stream >> count;
+    stream.get();
+
+    if(count >= STACK_BUF_SZ) {
+      malloc_data = (char*)malloc(count + 1);
+      data = malloc_data;
+    }
+
+    stream.read(data, count + 1);
+    data[count] = 0; // clamp
+
+    if(count > 0) {
+      Encoding* enc = Encoding::find(state, data);
+      if(malloc_data) {
+        free(malloc_data);
+      }
+      return enc;
+    } else {
+      return cNil;
+    }
+  }
 
   Object* UnMarshaller::get_int() {
-    char data[1024];
-
+    std::string data;
     stream >> data;
-    data[sizeof(data) - 1] = '\0';
 
-    return Bignum::from_string(state, data, 16);
+    return Bignum::from_string(state, data.c_str(), 16);
   }
 
   String* UnMarshaller::get_string() {
     size_t count;
+
+    Encoding* enc = try_as<Encoding>(unmarshal());
 
     stream >> count;
     // String::create adds room for a trailing null on its own
@@ -48,26 +105,47 @@ namespace rubinius {
     stream.read(reinterpret_cast<char*>(str->byte_address()), count);
     stream.get(); // read off newline
 
+    if(enc) str->encoding(state, enc);
+
     return str;
   }
 
   Symbol* UnMarshaller::get_symbol() {
-    char data[1024];
+    char stack_data[STACK_BUF_SZ];
+    char *malloc_data = NULL;
+    char *data = stack_data;
     size_t count;
+
+    Encoding* enc = try_as<Encoding>(unmarshal());
 
     stream >> count;
     stream.get();
+
+    if(count >= STACK_BUF_SZ) {
+      malloc_data = (char*)malloc(count + 1);
+      data = malloc_data;
+    }
+
     stream.read(data, count + 1);
     data[count] = 0; // clamp
 
-    return state->symbol(data);
+    String* str = String::create(state, data, count);
+    if(enc) str->encoding(state, enc);
+
+    Symbol* sym = state->symbol(str);
+
+    if(malloc_data) {
+      free(malloc_data);
+    }
+
+    return sym;
   }
 
   Tuple* UnMarshaller::get_tuple() {
     size_t count;
     stream >> count;
 
-    Tuple* tup = Tuple::create(state, count);
+    Tuple* tup = Tuple::create_dirty(state, count);
 
     for(size_t i = 0; i < count; i++) {
       tup->put(state, i, unmarshal());
@@ -79,21 +157,29 @@ namespace rubinius {
 #define FLOAT_EXP_OFFSET    58
 
   Float* UnMarshaller::get_float() {
-    char data[1024];
+    std::string line;
+    const char* data;
 
     // discard the delimiter
     stream.get();
 
-    stream.getline(data, 1024);
+    std::getline(stream, line);
     if(stream.fail()) {
       Exception::type_error(state, "Unable to unmarshal Float: failed to read value");
     }
 
+    data = line.c_str();
     if(data[0] == ' ') {
       double x;
       long   e;
 
-      x = ::ruby_strtod(data, NULL);
+      int flags = double_conversion::StringToDoubleConverter::ALLOW_LEADING_SPACES |
+          double_conversion::StringToDoubleConverter::ALLOW_SPACES_AFTER_SIGN |
+          double_conversion::StringToDoubleConverter::ALLOW_TRAILING_SPACES;
+      double_conversion::StringToDoubleConverter sd(flags, 0.0, double_conversion::Double::NaN(), NULL, NULL);
+
+      int processed;
+      x = sd.StringToDouble(data, FLOAT_EXP_OFFSET - 1, &processed);
       e = strtol(data+FLOAT_EXP_OFFSET, NULL, 10);
 
       // This is necessary because exp2(1024) yields inf
@@ -122,16 +208,22 @@ namespace rubinius {
     }
   }
 
+#define OPCODE_LENGTH 32
+
   InstructionSequence* UnMarshaller::get_iseq() {
     size_t count;
-    long op;
+    char data[OPCODE_LENGTH];
     stream >> count;
+
+    // Read off newline
+    stream.get();
 
     InstructionSequence* iseq = InstructionSequence::create(state, count);
     Tuple* ops = iseq->opcodes();
 
     for(size_t i = 0; i < count; i++) {
-      stream >> op;
+      stream.getline(data, OPCODE_LENGTH);
+      long op = strtol(data, NULL, 10);
       ops->put(state, i, Fixnum::from(op));
     }
 
@@ -140,30 +232,30 @@ namespace rubinius {
     return iseq;
   }
 
-  CompiledMethod* UnMarshaller::get_cmethod() {
+  CompiledCode* UnMarshaller::get_compiled_code() {
     size_t ver;
     stream >> ver;
 
-    CompiledMethod* cm = CompiledMethod::create(state);
+    CompiledCode* code = CompiledCode::create(state);
 
-    cm->metadata(state, unmarshal());
-    cm->primitive(state, (Symbol*)unmarshal());
-    cm->name(state, (Symbol*)unmarshal());
-    cm->iseq(state, (InstructionSequence*)unmarshal());
-    cm->stack_size(state, (Fixnum*)unmarshal());
-    cm->local_count(state, (Fixnum*)unmarshal());
-    cm->required_args(state, (Fixnum*)unmarshal());
-    cm->post_args(state, (Fixnum*)unmarshal());
-    cm->total_args(state, (Fixnum*)unmarshal());
-    cm->splat(state, unmarshal());
-    cm->literals(state, (Tuple*)unmarshal());
-    cm->lines(state, (Tuple*)unmarshal());
-    cm->file(state, (Symbol*)unmarshal());
-    cm->local_names(state, (Tuple*)unmarshal());
+    code->metadata(state, unmarshal());
+    code->primitive(state, force_as<Symbol>(unmarshal()));
+    code->name(state, force_as<Symbol>(unmarshal()));
+    code->iseq(state, force_as<InstructionSequence>(unmarshal()));
+    code->stack_size(state, force_as<Fixnum>(unmarshal()));
+    code->local_count(state, force_as<Fixnum>(unmarshal()));
+    code->required_args(state, force_as<Fixnum>(unmarshal()));
+    code->post_args(state, force_as<Fixnum>(unmarshal()));
+    code->total_args(state, force_as<Fixnum>(unmarshal()));
+    code->splat(state, force_as<Fixnum>(unmarshal()));
+    code->literals(state, force_as<Tuple>(unmarshal()));
+    code->lines(state, force_as<Tuple>(unmarshal()));
+    code->file(state, force_as<Symbol>(unmarshal()));
+    code->local_names(state, force_as<Tuple>(unmarshal()));
 
-    cm->post_marshal(state);
+    code->post_marshal(state);
 
-    return cm;
+    return code;
   }
 
   Object* UnMarshaller::unmarshal() {
@@ -173,11 +265,11 @@ namespace rubinius {
 
     switch(code) {
     case 'n':
-      return Qnil;
+      return cNil;
     case 't':
-      return Qtrue;
+      return cTrue;
     case 'f':
-      return Qfalse;
+      return cFalse;
     case 'I':
       return get_int();
     case 's':
@@ -191,12 +283,16 @@ namespace rubinius {
     case 'i':
       return get_iseq();
     case 'M':
-      return get_cmethod();
+      return get_compiled_code();
+    case 'c':
+      return get_constant();
+    case 'E':
+      return get_encoding();
     default:
       std::string str = "unknown marshal code: ";
       str.append( 1, code );
       Exception::type_error(state, str.c_str());
-      return Qnil;    // make compiler happy
+      return cNil;    // make compiler happy
     }
   }
 }

@@ -2,11 +2,10 @@
 #define RBX_ARRAY_HPP
 
 #include "builtin/object.hpp"
-#include "builtin/fixnum.hpp"
-#include "type_info.hpp"
 
 namespace rubinius {
   class Tuple;
+  class Fixnum;
 
   class Array : public Object {
   public:
@@ -16,7 +15,6 @@ namespace rubinius {
     Fixnum* total_; // slot
     Tuple* tuple_;  // slot
     Fixnum* start_; // slot
-    Object* shared_; // slot
 
   public:
     /* accessors */
@@ -24,17 +22,16 @@ namespace rubinius {
     attr_accessor(total, Fixnum);
     attr_accessor(tuple, Tuple);
     attr_accessor(start, Fixnum);
-    attr_accessor(shared, Object);
 
     /* interface */
 
-    size_t size();
-    static void init(STATE);
-    static Array* create(STATE, size_t size);
+    native_int size();
+    native_int offset();
+    void set_size(native_int size);
+    static Array* create(STATE, native_int size);
+    static Array* create_dirty(STATE, native_int size);
     static Array* from_tuple(STATE, Tuple* tup);
     static Array* to_ary(STATE, Object* obj, CallFrame* frame);
-
-    void   setup(STATE, size_t size);
 
     // Rubinius.primitive :array_allocate
     static Array* allocate(STATE, Object* self);
@@ -45,7 +42,7 @@ namespace rubinius {
     // Rubinius.primitive :array_new_reserved
     Array* new_reserved(STATE, Fixnum* count);
 
-    // Rubinius.primitive :array_aref
+    // Rubinius.primitive+ :array_aref
     Object* aref(STATE, Fixnum* idx);
 
     // Rubinius.primitive :array_aset
@@ -60,8 +57,8 @@ namespace rubinius {
     // Rubinius.primitive :array_pack19
     String* pack19(STATE, String* directives, CallFrame* calling_environment);
 
-    Object* get(STATE, size_t idx);
-    Object* set(STATE, size_t idx, Object* val);
+    Object* get(STATE, native_int idx);
+    Object* set(STATE, native_int idx, Object* val);
     void   unshift(STATE, Object* val);
     Object* shift(STATE);
     Object* append(STATE, Object* val);

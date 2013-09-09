@@ -1,9 +1,16 @@
 #include "builtin/object.hpp"
 #include "builtin/module.hpp"
+#include "builtin/string.hpp"
 #include "builtin/symbol.hpp"
+#include "builtin/autoload.hpp"
+
+#include "configuration.hpp"
 
 #include "helpers.hpp"
 #include "call_frame.hpp"
+#include "exception_point.hpp"
+#include "on_stack.hpp"
+#include "version.h"
 
 #include "capi/capi.hpp"
 #include "capi/18/include/ruby.h"
@@ -26,14 +33,27 @@ extern "C" {
   }
 
   int rb_const_defined_at(VALUE module_handle, ID const_id) {
-    return rb_funcall(module_handle,
-        rb_intern("const_defined?"), 1, ID2SYM(const_id));
+    if(LANGUAGE_18_ENABLED) {
+      return rb_funcall(module_handle,
+          rb_intern("const_defined?"), 1, ID2SYM(const_id));
+    } else {
+      return rb_funcall(module_handle,
+          rb_intern("const_defined?"), 2, ID2SYM(const_id), Qfalse);
+    }
   }
 
   ID rb_frame_last_func() {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
     CallFrame* rcf = env->current_call_frame()->previous->top_ruby_frame();
+
+    return env->get_handle(rcf->name());
+  }
+
+  ID rb_frame_this_func() {
+    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+
+    CallFrame* rcf = env->current_call_frame()->top_ruby_frame();
 
     return env->get_handle(rcf->name());
   }
@@ -45,26 +65,39 @@ extern "C" {
   VALUE rb_const_get_at(VALUE module_handle, ID id_name) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
+    State* state = env->state();
     Symbol* name = reinterpret_cast<Symbol*>(id_name);
     Module* module = c_as<Module>(env->get_object(module_handle));
 
-    bool found = false;
-    Object* val = module->get_const(env->state(), name, &found);
-    if(found) return env->get_handle(val);
+    ConstantMissingReason reason = vNonExistent;
+    Object* val = module->get_const(state, name, G(sym_private), &reason);
 
-    return const_missing(module_handle, id_name);
+    if(reason != vFound) return const_missing(module_handle, id_name);
+
+    if(Autoload* autoload = try_as<Autoload>(val)) {
+      return capi_fast_call(env->get_handle(autoload), rb_intern("call"), 0);
+    }
+
+    return env->get_handle(val);
   }
 
   VALUE rb_const_get_from(VALUE module_handle, ID id_name) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
+    State* state = env->state();
     Symbol* name = reinterpret_cast<Symbol*>(id_name);
     Module* module = c_as<Module>(env->get_object(module_handle));
 
-    bool found = false;
+    ConstantMissingReason reason = vNonExistent;
     while(!module->nil_p()) {
-      Object* val = module->get_const(env->state(), name, &found);
-      if(found) return env->get_handle(val);
+      Object* val = module->get_const(state, name, G(sym_private), &reason);
+      if(reason == vFound) {
+        if(Autoload* autoload = try_as<Autoload>(val)) {
+          return capi_fast_call(env->get_handle(autoload), rb_intern("call"), 0);
+        }
+
+        return env->get_handle(val);
+      }
 
       module = module->superclass();
     }
@@ -75,23 +108,36 @@ extern "C" {
   VALUE rb_const_get(VALUE module_handle, ID id_name) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
+    State* state = env->state();
     Symbol* name = reinterpret_cast<Symbol*>(id_name);
     Module* module = c_as<Module>(env->get_object(module_handle));
 
-    bool found = false;
+    ConstantMissingReason reason = vNonExistent;
     while(!module->nil_p()) {
-      Object* val = module->get_const(env->state(), name, &found);
-      if(found) return env->get_handle(val);
+      Object* val = module->get_const(state, name, G(sym_private), &reason);
+      if(reason == vFound) {
+        if(Autoload* autoload = try_as<Autoload>(val)) {
+          return capi_fast_call(env->get_handle(autoload), rb_intern("call"), 0);
+        }
+
+        return env->get_handle(val);
+      }
 
       module = module->superclass();
     }
 
     // Try from Object as well.
-    module = env->state()->globals().object.get();
+    module = G(object);
 
     while(!module->nil_p()) {
-      Object* val = module->get_const(env->state(), name, &found);
-      if(found) return env->get_handle(val);
+      Object* val = module->get_const(state, name, G(sym_private), &reason);
+      if(reason == vFound) {
+        if(Autoload* autoload = try_as<Autoload>(val)) {
+          return capi_fast_call(env->get_handle(autoload), rb_intern("call"), 0);
+        }
+
+        return env->get_handle(val);
+      }
 
       module = module->superclass();
     }
@@ -174,10 +220,30 @@ extern "C" {
     Module* parent = c_as<Module>(env->get_object(parent_handle));
     Symbol* constant = env->state()->symbol(name);
 
-    Module* module = rubinius::Helpers::open_module(env->state(),
-        env->current_call_frame(), parent, constant);
+    LEAVE_CAPI(env->state());
+    Module* module = NULL;
 
-    return env->get_handle(module);
+    // Create a scope so we know that the OnStack variables are popped off
+    // before we possibly make a longjmp. Making a longjmp doesn't give
+    // any guarantees about destructors being run
+    {
+      GCTokenImpl gct;
+      OnStack<2> os(env->state(), parent, constant);
+
+      module = rubinius::Helpers::open_module(env->state(), gct,
+          env->current_call_frame(), parent, constant);
+    }
+
+    // The call above could have triggered an Autoload resolve, which may
+    // raise an exception, so we have to check the value returned.
+    if(!module) env->current_ep()->return_to(env);
+
+    // Grab the module handle before grabbing the lock
+    // so the Module isn't accidentally GC'ed.
+    VALUE module_handle = env->get_handle(module);
+    ENTER_CAPI(env->state());
+
+    return module_handle;
   }
 
   void rb_include_module(VALUE includer_handle, VALUE includee_handle) {
@@ -189,10 +255,8 @@ extern "C" {
   }
 
   void rb_undef(VALUE handle, ID name) {
-    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
-
     Symbol* sym = reinterpret_cast<Symbol*>(name);
-    rb_undef_method(handle, sym->c_str(env->state()));
+    rb_funcall(handle, rb_intern("undef_method!"), 1, sym);
     // In MRI, rb_undef also calls the undef_method hooks, maybe we should?
   }
 
@@ -220,7 +284,7 @@ extern "C" {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
     Module* module_object = c_as<Module>(env->get_object(module_handle));
 
-    String* str = module_object->name()->to_str(env->state());
+    String* str = module_object->get_name(env->state());
     return RSTRING_PTR(env->get_handle(str));
   }
 }

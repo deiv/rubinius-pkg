@@ -1,3 +1,4 @@
+# -*- encoding: US-ASCII -*-
 require File.expand_path('../../../spec_helper', __FILE__)
 require File.expand_path('../fixtures/methods', __FILE__)
 
@@ -6,22 +7,34 @@ describe "Time#_dump" do
     @local = Time.at(946812800)
     @t = Time.at(946812800)
     @t = @t.gmtime
-    @s = @t._dump
+    @s = @t.send(:_dump)
+  end
+
+  ruby_version_is ""..."2.0" do
+    it "is a public method" do
+      Time.should have_public_instance_method(:_dump, false)
+    end
+  end
+
+  ruby_version_is "2.0" do
+    it "is a private method" do
+      Time.should have_private_instance_method(:_dump, false)
+    end
   end
 
   ruby_bug("http://redmine.ruby-lang.org/issues/show/627", "1.8.7") do
     it "preserves the GMT flag" do
       @t.gmt?.should == true
-      dump = @t._dump.unpack("VV").first
+      dump = @t.send(:_dump).unpack("VV").first
       ((dump >> 30) & 0x1).should == 1
 
       @local.gmt?.should == false
-      dump = @local._dump.unpack("VV").first
+      dump = @local.send(:_dump).unpack("VV").first
       ((dump >> 30) & 0x1).should == 0
     end
 
     it "dumps a Time object to a bytestring" do
-      @s.should be_kind_of(String)
+      @s.should be_an_instance_of(String)
       @s.should == [3222863947, 2235564032].pack("VV")
     end
 
@@ -47,7 +60,7 @@ describe "Time#_dump" do
   it "dumps like MRI's marshaled time format" do
     t = Time.utc(2000, 1, 15, 20, 1, 1, 203).localtime
 
-    t._dump.should == "\364\001\031\200\313\000\020\004"
+    t.send(:_dump).should == "\364\001\031\200\313\000\020\004"
   end
 end
 

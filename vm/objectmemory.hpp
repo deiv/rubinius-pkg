@@ -6,21 +6,24 @@
 
 #include "object_position.hpp"
 
-#include "call_frame_list.hpp"
-
-#include "builtin/object.hpp"
+#include "oop.hpp"
 #include "gc/code_manager.hpp"
 #include "gc/finalize.hpp"
 #include "gc/write_barrier.hpp"
 
+#include "util/immix.hpp"
 #include "util/thread.hpp"
 #include "lock.hpp"
 
+#include "shared_state.hpp"
+
 class TestObjectMemory; // So we can friend it properly
+class TestVM; // So we can friend it properly
 
 namespace rubinius {
 
   class Object;
+  class Integer;
 
   struct CallFrame;
   class GCData;
@@ -30,12 +33,18 @@ namespace rubinius {
   class ImmixGC;
   class InflatedHeaders;
   class Thread;
+  class FinalizerHandler;
+  class ImmixMarker;
 
   namespace gc {
     class Slab;
   }
 
-  typedef std::vector<Object*> ObjectArray;
+  namespace capi {
+    class Handle;
+    class Handles;
+    class GlobalHandle;
+  }
 
   struct YoungCollectStats {
     int bytes_copied;
@@ -67,9 +76,11 @@ namespace rubinius {
     atomic::integer full_collection_count;
 
     atomic::integer total_young_collection_time;
-    atomic::integer total_full_collection_time;
+    atomic::integer total_full_stop_collection_time;
+    atomic::integer total_full_concurrent_collection_time;
     atomic::integer last_young_collection_time;
-    atomic::integer last_full_collection_time;
+    atomic::integer last_full_stop_collection_time;
+    atomic::integer last_full_concurrent_collection_time;
 
     void young_object_allocated(uint64_t size) {
       young_objects_allocated.inc();
@@ -101,9 +112,11 @@ namespace rubinius {
       , young_collection_count(0)
       , full_collection_count(0)
       , total_young_collection_time(0)
-      , total_full_collection_time(0)
+      , total_full_stop_collection_time(0)
+      , total_full_concurrent_collection_time(0)
       , last_young_collection_time(0)
-      , last_full_collection_time(0)
+      , last_full_stop_collection_time(0)
+      , last_full_concurrent_collection_time(0)
     {}
   };
 
@@ -118,7 +131,7 @@ namespace rubinius {
    * MarkSweepGC, which handles large objects.
    *
    * ObjectMemory also manages the memory used for CodeResources, which are
-   * internal objects used for executing Ruby code. This includes VMMethod,
+   * internal objects used for executing Ruby code. This includes MachineCode,
    * various JIT classes, and FFI data.
    *
    * Basic tasks:
@@ -131,6 +144,9 @@ namespace rubinius {
 
   class ObjectMemory : public gc::WriteBarrier, public Lockable {
 
+    utilities::thread::SpinLock allocation_lock_;
+    utilities::thread::SpinLock inflation_lock_;
+
     /// BakerGC used for the young generation
     BakerGC* young_;
 
@@ -140,48 +156,45 @@ namespace rubinius {
     /// ImmixGC used for the mature generation
     ImmixGC* immix_;
 
+    /// ImmixMarker thread used for the mature generation
+    ImmixMarker* immix_marker_;
+
     /// Storage for all InflatedHeader instances.
     InflatedHeaders* inflated_headers_;
+
+    /// Storage for C-API handle allocator, cached C-API handles
+    /// and global handle locations.
+    capi::Handles* capi_handles_;
+    std::list<capi::Handle*> cached_capi_handles_;
+    std::list<capi::GlobalHandle*> global_capi_handle_locations_;
+
+    /// Garbage collector for CodeResource objects.
+    CodeManager code_manager_;
 
     /// The current mark value used when marking objects.
     unsigned int mark_;
 
-    /// Garbage collector for CodeResource objects.
-    CodeManager code_manager_;
-    std::list<FinalizeObject> finalize_;
-    std::list<FinalizeObject*> to_finalize_;
-
+    unsigned int young_gc_while_marking_;
     /// Flag controlling whether garbage collections are allowed
     bool allow_gc_;
-
-    /// List of additional write-barriers that may hold objects with references
-    /// to young objects.
-    std::list<gc::WriteBarrier*> aux_barriers_;
+    /// Flag set when concurrent mature mark is requested
+    bool mature_mark_concurrent_;
+    /// Flag set when a mature GC is already in progress
+    bool mature_gc_in_progress_;
+    /// Flag set when requesting a young gen resize
+    bool young_gc_resize_;
 
     /// Size of slabs to be allocated to threads for lockless thread-local
     /// allocations.
     size_t slab_size_;
 
-    /// True if finalizers are currently being run.
-    bool running_finalizers_;
-
-    /// True if finalizers were added in this GC cycle.
-    bool added_finalizers_;
-
-    /// A mutex which protects running the finalizers
-    rubinius::Mutex finalizer_lock_;
-
-    /// A condition variable used to control access to
-    /// to_finalize_
-    thread::Condition finalizer_var_;
-
     /// Mutex used to manage lock contention
-    thread::Mutex contention_lock_;
+    utilities::thread::Mutex contention_lock_;
 
     /// Condition variable used to manage lock contention
-    thread::Condition contention_var_;
+    utilities::thread::Condition contention_var_;
 
-    TypedRoot<Thread*> finalizer_thread_;
+    SharedState& shared_;
 
   public:
     /// Flag indicating whether a young collection should be performed soon
@@ -198,9 +211,10 @@ namespace rubinius {
     TypeInfo* type_info[(int)LastObjectType];
 
     /* Config variables */
-    /// Threshold size at which an object is considered a large object, and
-    /// therefore allocated in the large object space.
     size_t large_object_threshold;
+    size_t young_max_bytes;
+    int young_autotune_factor;
+    bool young_autotune_size;
 
     GCStats gc_stats;
 
@@ -209,23 +223,19 @@ namespace rubinius {
       return root_state_;
     }
 
-    unsigned int mark() {
+    unsigned int mark() const {
       return mark_;
     }
 
+    const unsigned int* mark_address() const {
+      return &mark_;
+    }
+
     void rotate_mark() {
-      mark_ = (mark_ == 1 ? 2 : 1);
+      mark_ = (mark_ == 2 ? 4 : 2);
     }
 
-    std::list<FinalizeObject>& finalize() {
-      return finalize_;
-    }
-
-    std::list<FinalizeObject*>& to_finalize() {
-      return to_finalize_;
-    }
-
-    bool can_gc() {
+    bool can_gc() const {
       return allow_gc_;
     }
 
@@ -237,46 +247,77 @@ namespace rubinius {
       allow_gc_ = false;
     }
 
-    /**
-     * Adds an additional write-barrier to the auxiliary write-barriers list.
-     */
-    void add_aux_barrier(STATE, gc::WriteBarrier* wb) {
-      SYNC(state);
-      aux_barriers_.push_back(wb);
+    FinalizerHandler* finalizer_handler() const {
+      return shared_.finalizer_handler();
     }
 
-    /**
-     * Removes a write-barrier from the auxiliary write-barriers list.
-     */
-    void del_aux_barrier(STATE, gc::WriteBarrier* wb) {
-      SYNC(state);
-      aux_barriers_.remove(wb);
+    InflatedHeaders* inflated_headers() const {
+      return inflated_headers_;
     }
 
-    std::list<gc::WriteBarrier*>& aux_barriers() {
-      return aux_barriers_;
+    capi::Handles* capi_handles() const {
+      return capi_handles_;
     }
 
-    bool running_finalizers() {
-      return running_finalizers_;
+    ImmixMarker* immix_marker() const {
+      return immix_marker_;
     }
+
+    void set_immix_marker(ImmixMarker* immix_marker) {
+      immix_marker_ = immix_marker;
+    }
+
+    capi::Handle* add_capi_handle(STATE, Object* obj);
+    void make_capi_handle_cached(State*, capi::Handle* handle);
+
+    std::list<capi::Handle*>* cached_capi_handles() {
+      return &cached_capi_handles_;
+    }
+
+    std::list<capi::GlobalHandle*>* global_capi_handle_locations() {
+      return &global_capi_handle_locations_;
+    }
+
+    void add_global_capi_handle_location(STATE, capi::Handle** loc, const char* file, int line);
+    void del_global_capi_handle_location(STATE, capi::Handle** loc);
+
+    ObjectArray* weak_refs_set();
 
   public:
-    ObjectMemory(STATE, Configuration& config);
+    ObjectMemory(VM* state, Configuration& config);
     ~ObjectMemory();
 
-    void on_fork();
+    void on_fork(STATE);
 
+    Object* new_object_typed_dirty(STATE, Class* cls, size_t bytes, object_type type);
     Object* new_object_typed(STATE, Class* cls, size_t bytes, object_type type);
+
+    Object* new_object_typed_mature_dirty(STATE, Class* cls, size_t bytes, object_type type);
     Object* new_object_typed_mature(STATE, Class* cls, size_t bytes, object_type type);
+
+    Object* new_object_typed_enduring_dirty(STATE, Class* cls, size_t bytes, object_type type);
     Object* new_object_typed_enduring(STATE, Class* cls, size_t bytes, object_type type);
 
-    Object* new_object_fast(STATE, Class* cls, size_t bytes, object_type type);
+    template <class T>
+      T* new_object_bytes_dirty(STATE, Class* cls, size_t& bytes) {
+        bytes = ObjectHeader::align(sizeof(T) + bytes);
+        T* obj = static_cast<T*>(new_object_typed_dirty(state, cls, bytes, T::type));
+
+        return obj;
+      }
 
     template <class T>
       T* new_object_bytes(STATE, Class* cls, size_t& bytes) {
         bytes = ObjectHeader::align(sizeof(T) + bytes);
-        T* obj = reinterpret_cast<T*>(new_object_typed(state, cls, bytes, T::type));
+        T* obj = static_cast<T*>(new_object_typed(state, cls, bytes, T::type));
+
+        return obj;
+      }
+
+    template <class T>
+      T* new_object_bytes_mature_dirty(STATE, Class* cls, size_t& bytes) {
+        bytes = ObjectHeader::align(sizeof(T) + bytes);
+        T* obj = static_cast<T*>(new_object_typed_mature_dirty(state, cls, bytes, T::type));
 
         return obj;
       }
@@ -284,7 +325,7 @@ namespace rubinius {
     template <class T>
       T* new_object_bytes_mature(STATE, Class* cls, size_t& bytes) {
         bytes = ObjectHeader::align(sizeof(T) + bytes);
-        T* obj = reinterpret_cast<T*>(new_object_typed_mature(state, cls, bytes, T::type));
+        T* obj = static_cast<T*>(new_object_typed_mature(state, cls, bytes, T::type));
 
         return obj;
       }
@@ -292,28 +333,29 @@ namespace rubinius {
     template <class T>
       T* new_object_variable(STATE, Class* cls, size_t fields, size_t& bytes) {
         bytes = sizeof(T) + (fields * sizeof(Object*));
-        return reinterpret_cast<T*>(new_object_typed(state, cls, bytes, T::type));
+        return static_cast<T*>(new_object_typed(state, cls, bytes, T::type));
       }
 
     template <class T>
       T* new_object_enduring(STATE, Class* cls) {
-        return reinterpret_cast<T*>(
+        return static_cast<T*>(
             new_object_typed_enduring(state, cls, sizeof(T), T::type));
       }
 
+    void inline write_barrier(ObjectHeader* target, ObjectHeader* val) {
+      gc::WriteBarrier::write_barrier(target, val, mark_);
+    }
+
     TypeInfo* find_type_info(Object* obj);
     void set_young_lifetime(size_t age);
-    void collect_young(GCData& data, YoungCollectStats* stats = 0);
-    void collect_mature(GCData& data);
     Object* promote_object(Object* obj);
 
     bool refill_slab(STATE, gc::Slab& slab);
 
     void assign_object_id(STATE, Object* obj);
-    Integer* assign_object_id_ivar(STATE, Object* obj);
     bool inflate_lock_count_overflow(STATE, ObjectHeader* obj, int count);
-    LockStatus contend_for_lock(STATE, ObjectHeader* obj, bool* error, size_t us=0);
-    void release_contention(STATE);
+    LockStatus contend_for_lock(STATE, GCToken gct, CallFrame* call_frame, ObjectHeader* obj, size_t us, bool interrupt);
+    void release_contention(STATE, GCToken gct, CallFrame* call_frame);
     bool inflate_and_lock(STATE, ObjectHeader* obj);
     bool inflate_for_contention(STATE, ObjectHeader* obj);
 
@@ -325,52 +367,60 @@ namespace rubinius {
     void memstats();
 
     void validate_handles(capi::Handles* handles);
-    void prune_handles(capi::Handles* handles, bool check_forwards);
+    void prune_handles(capi::Handles* handles, std::list<capi::Handle*>* cached, BakerGC* young);
+    void clear_fiber_marks(std::list<ManagedThread*>* threads);
 
     ObjectPosition validate_object(Object* obj);
     bool valid_young_object_p(Object* obj);
 
-    size_t mature_bytes_allocated();
+    size_t young_bytes_allocated() const;
+    size_t mature_bytes_allocated() const;
+    size_t code_bytes_allocated() const;
+    size_t symbol_bytes_allocated() const;
+    size_t jit_bytes_allocated() const;
 
-    void collect(STATE, CallFrame* call_frame);
-    void collect_maybe(STATE, CallFrame* call_frame);
+    void collect_maybe(STATE, GCToken gct, CallFrame* call_frame);
 
     void needs_finalization(Object* obj, FinalizerFunction func);
-    void set_ruby_finalizer(Object* obj, Object* fin);
-    void run_finalizers(STATE, CallFrame* call_frame);
-    void run_all_finalizers(STATE);
-    void run_all_io_finalizers(STATE);
-
-    void add_to_finalize(FinalizeObject* fi);
-
-    void find_referers(Object* obj, ObjectArray& result);
-    void print_references(Object* obj);
+    void set_ruby_finalizer(Object* obj, Object* finalizer);
 
     void* young_start();
     void* yound_end();
 
-    void snapshot();
-    void print_new_since_snapshot();
-
     size_t& loe_usage();
+    size_t& young_usage();
     size_t& immix_usage();
     size_t& code_usage();
 
     InflatedHeader* inflate_header(STATE, ObjectHeader* obj);
     void inflate_for_id(STATE, ObjectHeader* obj, uint32_t id);
-
-    void in_finalizer_thread(STATE);
-    void start_finalizer_thread(STATE);
+    void inflate_for_handle(STATE, ObjectHeader* obj, capi::Handle* handle);
 
     /// This only has one use! Don't use it!
     Object* allocate_object_raw(size_t bytes);
+    void collect_mature_finish(STATE, GCData* data);
+    void wait_for_mature_marker(STATE);
+    void clear_mature_mark_in_progress() {
+      mature_gc_in_progress_ = false;
+    }
+
+    immix::MarkStack& mature_mark_stack();
+
+    void young_autotune();
+
+    void print_young_stats(STATE, GCData* data, YoungCollectStats* stats);
+    void print_mature_stats(STATE, GCData* data);
 
   private:
     Object* allocate_object(size_t bytes);
     Object* allocate_object_mature(size_t bytes);
 
+    void collect_young(STATE, GCData* data, YoungCollectStats* stats = 0);
+    void collect_mature(STATE, GCData* data);
+
   public:
     friend class ::TestObjectMemory;
+    friend class ::TestVM;
 
 
     /**

@@ -1,30 +1,14 @@
-#include "gc/gc.hpp"
-
-#include "builtin/packed_object.hpp"
-#include "builtin/object.hpp"
-#include "builtin/lookuptable.hpp"
-#include "builtin/fixnum.hpp"
-#include "builtin/class.hpp"
-#include "builtin/symbol.hpp"
 #include "builtin/array.hpp"
-
-#include "object_utils.hpp"
+#include "builtin/class.hpp"
+#include "builtin/fixnum.hpp"
+#include "builtin/lookuptable.hpp"
+#include "builtin/object.hpp"
+#include "builtin/packed_object.hpp"
+#include "builtin/symbol.hpp"
 #include "objectmemory.hpp"
+#include "object_utils.hpp"
 
 namespace rubinius {
-  Object* PackedObject::get_packed_ivar(STATE, Symbol* sym) {
-    LookupTable* tbl = this->reference_class()->packed_ivar_info();
-    bool found = false;
-
-    Fixnum* which = try_as<Fixnum>(tbl->fetch(state, sym, &found));
-    if(!found) {
-      return get_table_ivar(state, sym);
-    }
-
-    Object* obj = body_as_array()[which->to_native()];
-    if(obj == Qundef) return Qnil;
-    return obj;
-  }
 
   Object* PackedObject::packed_ivar_defined(STATE, Symbol* sym) {
     LookupTable* tbl = this->reference_class()->packed_ivar_info();
@@ -36,22 +20,8 @@ namespace rubinius {
     }
 
     Object* obj = body_as_array()[which->to_native()];
-    if(obj == Qundef) return Qfalse;
-    return Qtrue;
-  }
-
-  Object* PackedObject::set_packed_ivar(STATE, Symbol* sym, Object* val) {
-    LookupTable* tbl = this->reference_class()->packed_ivar_info();
-    bool found = false;
-
-    Fixnum* which = try_as<Fixnum>(tbl->fetch(state, sym, &found));
-    if(!found) {
-      return set_table_ivar(state, sym, val);
-    }
-
-    body_as_array()[which->to_native()] = val;
-    if(val->reference_p()) write_barrier(state, val);
-    return val;
+    if(obj->undef_p()) return cFalse;
+    return cTrue;
   }
 
   Object* PackedObject::packed_ivar_delete(STATE, Symbol* sym, bool* removed) {
@@ -66,7 +36,7 @@ namespace rubinius {
     if(removed) *removed = true;
 
     Object* val = body_as_array()[which->to_native()];
-    body_as_array()[which->to_native()] = Qundef;
+    body_as_array()[which->to_native()] = cUndef;
 
     return val;
   }
@@ -79,7 +49,7 @@ namespace rubinius {
     while(i.advance()) {
       Object* key = i.key();
       if(Fixnum* which = try_as<Fixnum>(tbl->fetch(state, key))) {
-        if(body_as_array()[which->to_native()] != Qundef) {
+        if(!body_as_array()[which->to_native()]->undef_p()) {
           ary->append(state, key);
         }
       }
@@ -97,26 +67,16 @@ namespace rubinius {
   }
 
   void PackedObject::Info::mark(Object* obj, ObjectMark& mark) {
-    PackedObject* po = reinterpret_cast<PackedObject*>(obj);
+    PackedObject* po = static_cast<PackedObject*>(obj);
 
     size_t fields = to_fields(object_size(obj));
     Object** body = po->body_as_array();
 
     for(size_t i = 0; i < fields; i++) {
-      if(Object* tmp = mark.call(body[i])) {
+      Object* tmp = mark.call(body[i]);
+      if(tmp && tmp != body[i]) {
         mark.set(obj, &body[i], tmp);
       }
-    }
-  }
-
-  void PackedObject::Info::visit(Object* obj, ObjectVisitor& visit) {
-    PackedObject* po = reinterpret_cast<PackedObject*>(obj);
-
-    size_t fields = to_fields(object_size(obj));
-    Object** body = po->body_as_array();
-
-    for(size_t i = 0; i < fields; i++) {
-      visit.call(body[i]);
     }
   }
 

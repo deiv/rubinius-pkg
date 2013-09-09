@@ -1,29 +1,24 @@
+# -*- encoding: us-ascii -*-
+
 class Rubinius::NativeFunction
   attr_accessor :return_type
   attr_accessor :argument_types
 end
 
+module Rubinius
 module FFI
   def self.generate_function(ptr, name, args, ret)
     Rubinius.primitive :nativefunction_generate
-    raise PrimitiveFailure, "FFI.generate_function failed"
+    raise PrimitiveFailure, "FFI.generate_function primitive failed"
   end
 
   def self.generate_trampoline(obj, name, args, ret)
     Rubinius.primitive :nativefunction_generate_tramp
-    raise PrimitiveFailure, "FFI.generate_function_tramp failed"
+    raise PrimitiveFailure, "FFI.generate_function_tramp primitive failed"
   end
 
   module Library
-
-    case
-    when Rubinius.windows?
-      LIBC = "msvcrt.dll"
-    when Rubinius.darwin?
-      LIBC = "libc.dylib"
-    else
-      LIBC = "libc#{Rubinius::LIBSUFFIX}.6"
-    end
+    LIBC = Rubinius::LIBC
 
     # Set which library or libraries +attach_function+ should
     # look in. By default it only searches for the function in
@@ -43,7 +38,7 @@ module FFI
 
           x.each do |name|
             begin
-              lib = DynamicLibrary.new(name)
+              lib = DynamicLibrary.new(name, @ffi_lib_flags)
               break
             rescue LoadError
             end
@@ -65,6 +60,30 @@ module FFI
       @ffi_lib or [DynamicLibrary::CURRENT_PROCESS]
     end
     private :ffi_libraries
+
+    # Flags used in {#ffi_lib}.
+    #
+    # This map allows you to supply symbols to {#ffi_lib_flags} instead of
+    # the actual constants.
+    def flags_map
+      {
+        :global => DynamicLibrary::RTLD_GLOBAL,
+        :local => DynamicLibrary::RTLD_LOCAL,
+        :lazy => DynamicLibrary::RTLD_LAZY,
+        :now => DynamicLibrary::RTLD_NOW
+      }
+    end
+
+    # Sets library flags for {#ffi_lib}.
+    #
+    # @example
+    #   ffi_lib_flags(:lazy, :local) # => 5
+    #
+    # @param [Symbol, …] flags (see {FlagsMap})
+    # @return [Fixnum] the new value
+    def ffi_lib_flags(*flags)
+      @ffi_lib_flags = flags.inject(0) { |result, f| result | flags_map[f] }
+    end
 
     # Attach a C function to this module. The arguments can have two forms:
     #
@@ -110,6 +129,63 @@ module FFI
       end
 
       ffi_function_missing cname, mname, args, ret
+    end
+
+    # Attach a C variable to this module. The arguments can have two forms:
+    #
+    #   attach_variable mod_name, type
+    #   attach_variable mod_name, c_name, type
+    #
+    # In the first form, +mod_name+ will also be used for the name of the C variable.
+    # In the second form, the C variable name is +c_name+.
+    #
+    # The +mod_name+ and +c_name+ can be given as Strings or Symbols.
+    #
+    # The final argument, +type+, is the type of the C variable
+    def attach_variable(mname, a1, a2=nil)
+      cname, type = a2 ? [ a1, a2 ] : [ mname.to_s, a1 ]
+      ptr = nil
+
+      ffi_libraries.each do |lib|
+        ptr = lib.find_symbol(cname.to_s)
+        break unless ptr.nil?
+      end
+
+      raise FFI::NotFoundError, "Unable to find '#{cname}'" if ptr.nil? || ptr.null?
+
+      if type.kind_of?(Class) and type.ancestors.include?(FFI::Struct)
+        c = type.new(ptr)
+
+        self.module_eval <<-code, __FILE__, __LINE__
+          @ffi_gvar_#{mname} = c
+          def self.#{mname}
+            @ffi_gvar_#{mname}
+          end
+        code
+
+      else
+        enclosing_module = self
+
+        cs = Class.new(FFI::Struct) do
+          @enclosing_module = enclosing_module
+        end
+
+        cs.layout :gvar, type
+        c = cs.new(ptr)
+
+        self.module_eval <<-code, __FILE__, __LINE__
+          @ffi_gvar_#{mname} = c
+          def self.#{mname}
+            @ffi_gvar_#{mname}[:gvar]
+          end
+          def self.#{mname}=(value)
+            @ffi_gvar_#{mname}[:gvar] = value
+          end
+        code
+
+      end
+
+      return ptr
     end
 
     # Generic error method attached in place of missing foreign functions
@@ -179,26 +255,66 @@ module FFI
 
     def typedef(old, add)
       @typedefs ||= Rubinius::LookupTable.new
-
-      unless old.kind_of? Rubinius::NativeFunction
-        old = find_type(old)
-      end
-
-      @typedefs[add] = old
+      @typedefs[add] = find_type(old)
     end
 
     def find_type(name)
       @typedefs ||= Rubinius::LookupTable.new
 
+      if name.kind_of? Rubinius::NativeFunction or name.kind_of? FFI::Enum
+        return name
+      end
+
       if type = @typedefs[name]
         return type
       end
 
-      if name.kind_of?(Class) and name < FFI::Struct
-        name = :pointer
+      FFI.find_type(name)
+    end
+
+    def enum(*args)
+      @tagged_enums ||= Rubinius::LookupTable.new
+      @anon_enums ||= Array.new
+
+      tag, values = if args[0].kind_of?(Symbol) && args[1].kind_of?(Array)
+        [ args[0], args[1] ]
+      elsif args[0].kind_of?(Array)
+        [ nil, args[0] ]
+      else
+        [ nil, args ]
       end
 
-      FFI.find_type(name)
+      enum = FFI::Enum.new values, tag
+
+      if tag
+        typedef(enum, tag)
+        @tagged_enums[tag] = enum
+      else
+        @anon_enums << enum
+      end
+
+      return enum
+    end
+
+    def enum_type(tag)
+
+      if enum = @tagged_enums[tag]
+        enum
+      else
+        @anon_enums.detect { |enum| enum.symbols.include?(tag) }
+      end
+
+    end
+
+    def enum_value(value)
+
+      if enum = @anon_enums.detect { |enum| enum.symbols.include?(value) }
+        enum
+      else
+       tag,enum = @tagged_enums.detect { |tag,enum| enum.symbols.include?(value) }
+       return enum
+      end
+
     end
   end
 
@@ -243,6 +359,14 @@ module FFI
             @handle = DynamicLibrary.open_library @name, flags
           end
 
+          # Try with a prefix
+          unless @handle
+            FFI::LIB_SUFFIXES.detect do |suffix|
+              @name = "lib#{name}"
+              @handle = DynamicLibrary.open_library @name, flags
+            end
+          end
+
           # Try with suffixes and a prefix
           unless @handle
             FFI::LIB_SUFFIXES.detect do |suffix|
@@ -282,4 +406,4 @@ module FFI
     CURRENT_PROCESS = DynamicLibrary.new(nil)
   end
 end
-
+end

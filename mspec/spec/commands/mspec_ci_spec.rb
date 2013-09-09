@@ -1,4 +1,4 @@
-require File.dirname(__FILE__) + '/../spec_helper'
+require 'spec_helper'
 require 'mspec/runner/mspec'
 require 'mspec/runner/filters/tag'
 require 'mspec/commands/mspec-ci'
@@ -86,11 +86,6 @@ describe MSpecCI, "#options" do
   it "enables the help option" do
     @options.should_receive(:help)
     @script.options
-  end
-
-  it "enables the debug option" do
-    @options.should_receive(:debug)
-    @script.options @argv
   end
 
   it "calls #custom_options" do

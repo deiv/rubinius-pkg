@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   class Sprinter
 
@@ -35,16 +37,16 @@ module Rubinius
     end
 
     def initialize(format)
-      cm = Rubinius::Type.object_singleton_class(self).dynamic_method :call do |g|
+      Rubinius::Type.object_singleton_class(self).dynamic_method :call do |g|
         Builder.new(self, format, g).build
       end
+    end
 
-      if false
-        puts
-        puts format.inspect
-        puts cm.decode
-        puts
-      end
+    def debug_print
+      printer = Compiler::MethodPrinter.new
+      printer.input(method(:call).executable)
+      printer.bytecode = true
+      printer.run
     end
 
     def zero_two_expand_integer(int)
@@ -288,9 +290,9 @@ module Rubinius
 
         @g.local_count = @arg_count + 1
         if @index_mode == :absolute
-          @g.local_names = (0...@arg_count).map {|i| :"#{i + 1}$" } + [:splat]
+          @g.local_names = (0...@arg_count).map { |i| :"#{i + 1}$" } + [:splat]
         else
-          @g.local_names = (0...@arg_count).map {|i| :"arg#{i}" } + [:splat]
+          @g.local_names = (0...@arg_count).map { |i| :"arg#{i}" } + [:splat]
         end
 
         @g.string_build @append_parts
@@ -357,27 +359,6 @@ module Rubinius
         end
       end
 
-      RE = /
-        ([^%]+|%(?:[\n\0]|\z)) # 1
-        |
-        %
-        ( # 2
-          ([0# +-]*) # 3
-          (?:([0-9]+)\$)? # 4
-          ([0# +-]*) # 5
-          (?:
-            (\*(?:([0-9]+)\$)?|([1-9][0-9]*))? # 6 7 8
-            (?:\.(\*(?:([0-9]+)\$)?|([0-9][0-9]*))?)? # 9 10 11
-          )
-          (?:([0-9]+)\$)? # 12
-          ([BbcdEefGgiopsuXx]) # 13
-        )
-        |
-        (%)(?:%|[-+0-9# *.$]+\$[0-9.]*\z) # 14
-        |
-        (%) # 15
-      /x
-
       def append_literal(str)
         @g.push_unique_literal str
         append_str
@@ -388,9 +369,10 @@ module Rubinius
       end
 
       class Atom
-        def initialize(b, g, format_code, flags)
+        def initialize(b, g, format_code, flags, name = nil)
           @b, @g = b, g
           @format_code, @flags = format_code, flags
+          @name = name
 
           @f_alt = flags.index(?#)
           @f_zero = flags.index(?0)
@@ -407,20 +389,20 @@ module Rubinius
         end
 
         def prepend_prefix
-          if @prefix
-            @g.push_literal @prefix
-            @g.string_dup
-            @g.string_append
-          end
+          @g.push_literal @prefix
+          @g.string_dup
+          @g.string_append
         end
 
         def set_value(ref)
-          @field_index = @b.next_index(ref)
+          unless @name
+            @field_index = @b.next_index(ref)
+          end
         end
 
         def set_width(full, ref, static)
           @width_static = static && static.to_i
-          if full && !static
+          if !@name && full && !static
             @width_index = @b.next_index(ref)
           end
 
@@ -429,19 +411,21 @@ module Rubinius
 
         def set_precision(full, ref, static)
           @prec_static = static && static.to_i
-          if full && !static
+          if !@name && full && !static
             @prec_index = @b.next_index(ref)
-          end
-
-          if @format_code == 'g' && @f_alt && !full
-            @prec_static = 4
           end
 
           @has_precision = @prec_static || @prec_index
         end
 
         def push_value
-          @g.push_local @field_index
+          if @name
+            @g.push_local 0
+            @g.push_unique_literal @name
+            @g.send(:fetch, 1)
+          else
+            @g.push_local @field_index
+          end
         end
 
         def push_width_value
@@ -455,21 +439,12 @@ module Rubinius
         end
 
         def push_width(adjust=true)
-          yield if block_given?
           if @width_static
             raise ArgumentError, "width too big" unless @width_static.class == Fixnum
             if adjust && @full_leader_size > 0
               @g.push(@width_static - @full_leader_size)
             else
               @g.push @width_static
-            end
-
-            if block_given?
-              @g.swap
-              @b.if_true do
-                @g.meta_push_1
-                @b.meta_op_minus
-              end
             end
 
           elsif @width_index
@@ -488,30 +463,6 @@ module Rubinius
               end
             end
 
-            n = adjust ? @full_leader_size : 0
-            if block_given?
-              adjusted = @g.new_label
-
-              @g.swap
-              @b.if_true do
-                @g.push n + 1
-                @b.meta_op_minus
-                if n > 0
-                  @g.goto adjusted
-                end
-              end
-
-              if n > 0
-                @g.push n
-                @b.meta_op_minus
-                adjusted.set!
-              end
-
-            elsif n > 0
-              @g.push n
-              @b.meta_op_minus
-            end
-
           else
             raise "push without a width"
 
@@ -527,7 +478,6 @@ module Rubinius
         end
 
         def push_precision
-          yield if block_given?
           if @prec_static
             raise ArgumentError, "precision too big" unless @prec_static.class == Fixnum
             @g.push @prec_static
@@ -552,19 +502,10 @@ module Rubinius
             raise "push without a precision"
 
           end
-
-          if block_given?
-            @g.swap
-            @b.if_true do
-              @g.meta_push_1
-              @b.meta_op_minus
-            end
-          end
         end
 
         def push_format_string
           float_format_code = @format_code
-          float_format_code = 'f' if @format_code == 'g' && @f_alt
 
           leader = "%#{@flags}"
           if !@width_index && !@prec_index
@@ -623,31 +564,24 @@ module Rubinius
           end
         end
 
-        def zero_pad?
-          @has_precision || (@has_width && @f_zero)
-        end
-
-        def zero_pad(pad="0", &readjust)
+        def zero_pad(pad="0")
           if @has_precision
-            push_precision(&readjust)
-            @g.push_literal pad
-            @g.send :rjust, 2
+            push_precision
           elsif @has_width && @f_zero
-            push_width true, &readjust
-            @g.push_literal pad
-            @g.send :rjust, 2
+            push_width true
+          else
+            # exit early if no width has been pushed
+            return
           end
-        end
 
-        def width?
-          @has_width
+          # let the caller adjust the width if needed
+          yield if block_given?
+
+          @g.push_literal pad
+          @g.send :rjust, 2
         end
 
         attr_reader :width_static
-
-        def precision?
-          @has_precision
-        end
 
         def leader?
           @full_leader_size > 0
@@ -666,7 +600,7 @@ module Rubinius
 
           justify_width
 
-          if precision?
+          if @has_precision
             @g.meta_push_0
             push_precision
             @g.send :[], 2
@@ -689,35 +623,6 @@ module Rubinius
           @g.send :inspect, 0
 
           string_justify
-
-          @b.append_str
-        end
-      end
-
-      class CharAtom < Atom
-        def bytecode
-          push_value
-          @b.force_type :Fixnum, :Integer
-
-          chr_range_ok = @g.new_label
-
-          @g.dup
-          @g.push 256
-          @g.meta_send_op_lt @g.find_literal(:<)
-          @b.if_true do
-            @g.dup
-            @g.meta_push_neg_1
-            @g.meta_send_op_gt @g.find_literal(:>)
-            @g.git chr_range_ok
-          end
-
-          @g.push 256
-          @g.send :%, 1
-
-          chr_range_ok.set!
-          @g.send :chr, 0
-
-          justify_width
 
           @b.append_str
         end
@@ -770,17 +675,15 @@ module Rubinius
 
       class IntegerAtom < Atom
         def bytecode
-          # A fast, common case.
-          wid = @width_static
-          if @f_zero and wid and !@f_space and !@f_plus
+          if fast_common_case?
             @g.push :self
 
             push_value
 
-            if wid == 2
+            if @width_static == 2
               @g.send :zero_two_expand_integer, 1
             else
-              @g.push_int wid
+              @g.push_int @width_static
               @g.send :zero_expand_integer, 2
             end
 
@@ -808,7 +711,7 @@ module Rubinius
               @b.append_str
             end
 
-            if precision?
+            if @has_precision
               @g.push :self
               @g.push_stack_local val_idx
 
@@ -816,7 +719,7 @@ module Rubinius
 
               @g.send :digit_expand_precision, 2
 
-              if width?
+              if @has_width
                 @g.push :self
                 @g.swap
                 push_width_value
@@ -830,33 +733,13 @@ module Rubinius
 
               @b.append_str
 
-            elsif width?
+            elsif @has_width
               @g.push :self
               @g.push_stack_local val_idx
 
               push_width_value
 
-              if @f_zero
-                if @f_space or @f_plus
-                  @g.send :zero_expand_leader, 2
-                else
-                  @g.send :zero_expand_integer, 2
-                end
-              else
-                if @f_space or @f_plus
-                  if @f_ljust
-                    @g.send :space_expand_leader_left, 2
-                  else
-                    @g.send :space_expand_leader, 2
-                  end
-                else
-                  if @f_ljust
-                    @g.send :space_expand_integer_left, 2
-                  else
-                    @g.send :space_expand_integer, 2
-                  end
-                end
-              end
+              expand_with_width
 
               @b.append_str
             else
@@ -924,15 +807,7 @@ module Rubinius
             end
 
             padding = format_negative_int(radix)
-
-            if zero_pad?
-              zero_pad padding
-
-            elsif !precision? && !@f_zero
-              @g.push_literal ".."
-              @g.string_dup
-              @g.string_append
-            end
+            pad_negative_int(padding)
 
             have_formatted.set!
           end
@@ -946,7 +821,9 @@ module Rubinius
 
           zero_pad
 
-          prepend_prefix
+          if @prefix
+            prepend_prefix_bytecode
+          end
 
           if @f_plus || @f_space
             append_sign = @g.new_label
@@ -966,7 +843,7 @@ module Rubinius
           end
 
 
-          if precision? || !@f_zero
+          if @has_precision || !@f_zero
             justify_width false
           end
 
@@ -974,92 +851,36 @@ module Rubinius
         end
       end
 
-      class ExtIntegerAtomU < ExtIntegerAtom
-        def format_negative_int(radix)
-          # Now we need to find how many bits we need to
-          # represent the number, starting with a native int,
-          # then incrementing by 32 each round.
+      class LiteralAtom < Atom
+        def set_value(ref)
+          @value = ref
+        end
 
-          more_bits_loop = @g.new_label
-          got_enough_bits = @g.new_label
-
-          # Push a positive version of the number ($N)
-          @g.dup
-          @b.invert
-
-          # Push the baseline ($B), starting from a native int:
-          # 2**32 or 2**64, as appropriate
-          @g.meta_push_1
-          l_native = @g.find_literal(2.size * 8)
-          @g.push_literal_at l_native
-          @g.send :<<, 1
-
-          # Switch to $N
-          @g.swap
-          # For the first time, because it's what we've used
-          # above, we'll shift it by our native int size
-          @g.push_literal_at l_native
-
-          more_bits_loop.set!
-          # Throw out the bits from $N that $B can offset
-          @g.send :>>, 1
-
-          # Check whether $N == 0
-          @g.dup
-          @g.meta_push_0
-          @g.meta_send_op_equal @g.find_literal(:==)
-          @g.git got_enough_bits
-
-          # Switch to $B
-          @g.swap
-          l_32 = @g.find_literal(32)
-          @g.push_literal_at l_32
-          # Add 32 bits
-          @g.send :<<, 1
-          # Switch to $N
-          @g.swap
-          # We'll throw out 32 bits this time
-          @g.push_literal_at l_32
-          @g.goto more_bits_loop
-
-          got_enough_bits.set!
-          # Pop the spare copy of $N, which is 0
-          @g.pop
-
-
-          # Now we're left with $B; we can now use it, by adding
-          # it to the (negative) number still on the stack from
-          # earlier.
-
-          # $B is a Bignum; no point using meta_send_op_plus.
-          @g.send :+, 1
-          @g.send :to_s, 0
-
-          "."
+        def bytecode
+          @b.append_literal(@value)
         end
       end
 
       def push_Kernel
-        @lit_Kernel ||= @g.add_literal(:Kernel)
-        @slot_Kernel ||= @g.add_literal(nil)
-
-        @g.push_const_fast @lit_Kernel, @slot_Kernel
+        @g.push_const :Kernel
       end
 
       def push_Fixnum
-        @lit_Fixnum ||= @g.add_literal(:Fixnum)
-        @slot_Fixnum ||= @g.add_literal(nil)
+        @g.push_const :Fixnum
+      end
 
-        @g.push_const_fast @lit_Fixnum, @slot_Fixnum
+      def push_String
+        @g.push_const :String
+      end
+
+      def push_Hash
+        @g.push_const :Hash
       end
 
       def raise_ArgumentError(msg)
-        @lit_ArgumentError ||= @g.add_literal(:ArgumentError)
-        @slot_ArgumentError ||= @g.add_literal(nil)
-
         @lit_new ||= @g.add_literal(:new)
 
-        @g.push_const_fast @lit_ArgumentError, @slot_ArgumentError
+        @g.push_const :ArgumentError
         @g.push_unique_literal msg
         @g.send_stack @lit_new, 1
         @g.raise_exc
@@ -1076,6 +897,27 @@ module Rubinius
           @g.send method, 1, true
 
           yield if block_given?
+        end
+      end
+
+      def try_type(klass, method)
+
+        @lit_check ||= @g.add_literal(:check_convert_type)
+
+        @g.dup
+        @g.push_const klass
+        @g.swap
+        @g.kind_of
+        if_false do
+          @g.push_type
+          @g.swap
+          @g.push_const klass
+          @g.push_unique_literal method
+          @g.send_stack @lit_check, 3
+          @g.dup
+          if_false do
+            yield if block_given?
+          end
         end
       end
 
@@ -1096,7 +938,6 @@ module Rubinius
       AtomMap = Rubinius::LookupTable.new
       AtomMap[?s] = StringAtom
       AtomMap[?p] = InspectAtom
-      AtomMap[?c] = CharAtom
       AtomMap[?e] = AtomMap[?E] = FloatAtom
       AtomMap[?g] = AtomMap[?G] = FloatAtom
       AtomMap[?f] = FloatAtom
@@ -1104,21 +945,27 @@ module Rubinius
       AtomMap[?b] = AtomMap[?B] = ExtIntegerAtom
       AtomMap[?x] = AtomMap[?X] = ExtIntegerAtom
       AtomMap[?o] = ExtIntegerAtom
-      AtomMap[?u] = ExtIntegerAtomU
 
       def parse
         @arg_count = 0
         @index_mode = nil
 
-        bignum_width = bignum_precision = nil
+        atoms = []
 
+        # Always push an empty string at first for correct
+        # encoding protocols
+        atom = LiteralAtom.new(self, @g, "", "")
+        atom.set_value(encode_value(""))
+
+        atoms << atom
         pos = 0
         while match = RE.match_start(@format, pos)
-          pos = match.end(0)
+          pos = match.full.at(1)
 
           _,
           plain_string,
           whole_format,
+          name_format,
           flags_a,
           field_ref_a,
           flags_b,
@@ -1127,17 +974,33 @@ module Rubinius
           field_ref_b,
           format_code,
           literal_char,
+          name_reference,
           invalid_format = *match
 
+          flags = "#{flags_a}#{flags_b}"
+
+
           if plain_string
-            append_literal plain_string
+            atom = LiteralAtom.new(self, @g, format_code, flags)
+            atom.set_value(plain_string)
+            atoms << atom
           elsif literal_char
-            append_literal literal_char
+            atom = LiteralAtom.new(self, @g, format_code, flags)
+            atom.set_value(literal_char)
+            atoms << atom
           elsif invalid_format || (field_ref_a && field_ref_b)
             raise ArgumentError, "malformed format string: #{@format.inspect}"
           else
             field_ref = field_ref_a || field_ref_b
-            flags = "#{flags_a}#{flags_b}"
+
+            if name_reference
+              format_code = "s"
+              @index_mode = :name
+              name = name_reference[2...-1].to_sym
+            elsif name_format
+              @index_mode = :name
+              name = name_format[1...-1].to_sym
+            end
 
             klass = AtomMap[format_code[0]]
 
@@ -1145,16 +1008,33 @@ module Rubinius
               raise ArgumentError, "unknown format type - #{format_code}"
             end
 
-            atom = klass.new(self, @g, format_code, flags)
+            atom = klass.new(self, @g, format_code, flags, name)
             atom.set_width width_full, width_ref, width_static
             atom.set_precision prec_full, prec_ref, prec_static
             atom.set_value field_ref
-
-            atom.bytecode
+            atoms << atom
           end
         end
 
-        if @index_mode != :absolute
+        if @index_mode == :name
+          exception = @g.new_label
+          continue  = @g.new_label
+
+          @arg_count = 1
+          @g.passed_arg @arg_count
+          @g.git exception
+          push_Hash
+          @g.push_local 0
+          @g.kind_of
+          @g.gif exception
+          @g.goto continue
+
+          exception.set!
+
+          raise_ArgumentError "named format string needs single Hash argument"
+
+          continue.set!
+        elsif @index_mode != :absolute
           no_exception = @g.new_label
 
           # If we've used relative arguments, and $DEBUG is true, we
@@ -1170,6 +1050,10 @@ module Rubinius
           raise_ArgumentError "too many arguments for format string"
 
           no_exception.set!
+        end
+
+        atoms.each do |atom|
+          atom.bytecode
         end
       end
     end

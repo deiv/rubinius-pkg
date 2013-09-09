@@ -1,6 +1,8 @@
 #ifndef RBX_BUILTIN_METHODTABLE_HPP
 #define RBX_BUILTIN_METHODTABLE_HPP
 
+#include "builtin/object.hpp"
+
 namespace rubinius {
   class Tuple;
   class Array;
@@ -48,6 +50,7 @@ namespace rubinius {
     Tuple* values_;   // slot
     Integer* bins_;    // slot
     Integer* entries_; // slot
+    utilities::thread::SpinLock lock_;
 
     void   redistribute(STATE, size_t size);
 
@@ -78,13 +81,13 @@ namespace rubinius {
     MethodTableBucket* find_entry(STATE, Symbol* name);
     MethodTableBucket* find_entry(Symbol* name);
 
-    // Rubinius.primitive :methodtable_lookup
+    // Rubinius.primitive+ :methodtable_lookup
     MethodTableBucket* lookup(STATE, Symbol* name);
 
     // Rubinius.primitive :methodtable_delete
     Executable* remove(STATE, Symbol* name);
 
-    // Rubinius.primitive :methodtable_has_name
+    // Rubinius.primitive+ :methodtable_has_name
     Object* has_name(STATE, Symbol* name);
 
     class Info : public TypeInfo {

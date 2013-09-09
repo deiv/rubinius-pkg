@@ -20,6 +20,15 @@ describe :kernel_load, :shared => true do
     ScratchPad.recorded.should == [:no_rb_ext]
   end
 
+  ruby_version_is "1.9" do
+    it "loads from the current working directory" do
+      Dir.chdir CODE_LOADING_DIR do
+        @object.load("load_fixture.rb").should be_true
+        ScratchPad.recorded.should == [:loaded]
+      end
+    end
+  end
+
   it "loads a file that recursively requires itself" do
     path = File.expand_path "recursive_require_fixture.rb", CODE_LOADING_DIR
     @object.load(path).should be_true
@@ -50,6 +59,14 @@ describe :kernel_load, :shared => true do
     ScratchPad.recorded.should == [:loaded, :loaded]
   end
 
+  it "loads file even after $LOAD_PATH change" do
+    $LOAD_PATH << CODE_LOADING_DIR
+    @object.load("load_fixture.rb").should be_true
+    $LOAD_PATH.unshift CODE_LOADING_DIR + "/gem"
+    @object.load("load_fixture.rb").should be_true
+    ScratchPad.recorded.should == [:loaded, :loaded_gem]
+  end
+
   it "does not cause #require with the same path to fail" do
     @object.load(@path).should be_true
     @object.require(@path).should be_true
@@ -69,8 +86,9 @@ describe :kernel_load, :shared => true do
   it "sets the enclosing scope to an anonymous module if passed true for 'wrap'" do
     path = File.expand_path "wrap_fixture.rb", CODE_LOADING_DIR
     @object.load(path, true).should be_true
+
     Object.const_defined?(:LoadSpecWrap).should be_false
-    ScratchPad.recorded.first.should =~ /::LoadSpecWrap$/
+    ScratchPad.recorded.first.should be_an_instance_of(Class)
   end
 
   describe "(shell expansion)" do

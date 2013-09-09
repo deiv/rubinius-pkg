@@ -1,21 +1,21 @@
 /* A CompiledFile represents a .rbc. This class understands the layout
- * of a .rbc file. It can validate and load the body into a CompiledMethod
+ * of a .rbc file. It can validate and load the body into a CompiledCode
  * object.
  *
  * CompiledFile::execute is a root stack frame in Rubinius. It's where
  * primary execution begins, when the VM loads the loader.rbc and executes
  * it. */
 
-#include "compiled_file.hpp"
-#include "marshal.hpp"
 #include "arguments.hpp"
-#include "call_frame.hpp"
-#include "objectmemory.hpp"
-#include "object_utils.hpp"
-#include "builtin/staticscope.hpp"
-#include "builtin/compiledmethod.hpp"
+#include "builtin/constantscope.hpp"
+#include "builtin/compiledcode.hpp"
 #include "builtin/class.hpp"
 #include "builtin/thread.hpp"
+#include "call_frame.hpp"
+#include "compiled_file.hpp"
+#include "marshal.hpp"
+#include "objectmemory.hpp"
+#include "object_utils.hpp"
 
 namespace rubinius {
   CompiledFile* CompiledFile::load(std::istream& stream) {
@@ -37,16 +37,16 @@ namespace rubinius {
   }
 
   bool CompiledFile::execute(STATE) {
-    TypedRoot<CompiledMethod*> cm(state, as<CompiledMethod>(body(state)));
+    TypedRoot<CompiledCode*> code(state, as<CompiledCode>(body(state)));
 
     state->thread_state()->clear();
 
     Arguments args(state->symbol("script"), G(main), 0, 0);
 
-    cm.get()->scope(state, StaticScope::create(state));
-    cm.get()->scope()->module(state, G(object));
+    code.get()->scope(state, ConstantScope::create(state));
+    code.get()->scope()->module(state, G(object));
 
-    cm->execute(state, NULL, cm.get(), G(object), args);
+    code->execute(state, NULL, code.get(), G(object), args);
 
     return true;
   }

@@ -14,6 +14,7 @@
 # platform.
 
 module Syslog
+  FFI = Rubinius::FFI
 
   module Constants
     @@@
@@ -128,6 +129,8 @@ module Syslog
       raise RuntimeError, "must open syslog before setting log mask"
     end
 
+    @mask_before_reopen = nil
+
     @mask = Rubinius::Type.coerce_to mask, Fixnum, :to_int
 
     Foreign.set_mask(@mask)
@@ -169,8 +172,7 @@ module Syslog
     @open = true
 
     # Calling set_mask twice is the standard way to set the 'default' mask
-    @mask = Foreign.set_mask(0)
-    Foreign.set_mask(@mask)
+    self.mask = @mask_before_reopen || Foreign.set_mask(0)
 
     if block_given?
       begin
@@ -184,6 +186,7 @@ module Syslog
   end
 
   def self.reopen(*args, &block)
+    @mask_before_reopen = mask
     close
     open(*args, &block)
   end
@@ -206,7 +209,7 @@ module Syslog
 
     Foreign.close
     @ident = nil
-    @options = @facility = @mask = -1;
+    @options = @facility = @mask = nil;
     @open = false
   end
 
@@ -219,7 +222,7 @@ module Syslog
   def self.log(pri, format, *args)
     raise "Syslog must be opened before write" unless @open
 
-    pri = Type.coerce_to(pri, Fixnum, :to_i)
+    pri = Rubinius::Type.coerce_to(pri, Fixnum, :to_i)
 
     message = StringValue(format) % args
     Foreign.write(pri, "%s", message)

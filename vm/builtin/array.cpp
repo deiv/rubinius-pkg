@@ -1,18 +1,14 @@
-#include "vm.hpp"
-#include "vm/object_utils.hpp"
-
+#include "arguments.hpp"
 #include "builtin/array.hpp"
+#include "builtin/class.hpp"
+#include "builtin/exception.hpp"
 #include "builtin/fixnum.hpp"
 #include "builtin/tuple.hpp"
-#include "builtin/class.hpp"
-#include "objectmemory.hpp"
-#include "primitives.hpp"
-
-#include "arguments.hpp"
+#include "configuration.hpp"
 #include "dispatch.hpp"
-
-#include <iostream>
-#include <math.h>
+#include "object_utils.hpp"
+#include "ontology.hpp"
+#include "version.h"
 
 /* Implementation certain Array methods. These methods are just
  * the ones the VM requires, not the entire set of all Array methods.
@@ -21,33 +17,47 @@
 
 namespace rubinius {
 
-  void Array::init(STATE) {
-    GO(array).set(state->new_class("Array", G(object)));
-    G(array)->set_object_type(state, ArrayType);
-  }
-
-  size_t Array::size() {
+  native_int Array::size() {
     return total_->to_native();
   }
 
-  Array* Array::create(STATE, size_t idx) {
-    Array* ary;
-    ary = state->new_object<Array>(G(array));
+  void Array::set_size(native_int size) {
+    total_ = Fixnum::from(size);
+  }
 
-    ary->setup(state, idx);
+  native_int Array::offset() {
+    return start_->to_native();
+  }
+
+  Array* Array::create(STATE, native_int size) {
+    Array* ary;
+    ary = state->new_object_dirty<Array>(G(array));
+    ary->tuple(state, Tuple::create(state, size));
+    ary->start(state, Fixnum::from(0));
+    ary->total(state, Fixnum::from(0));
+
+    return ary;
+  }
+
+  Array* Array::create_dirty(STATE, native_int size) {
+    Array* ary;
+    ary = state->new_object_dirty<Array>(G(array));
+    ary->tuple(state, Tuple::create_dirty(state, size));
+    ary->start(state, Fixnum::from(0));
+    ary->total(state, Fixnum::from(0));
 
     return ary;
   }
 
   // 'self' is passed in automatically by the primitive glue
   Array* Array::allocate(STATE, Object* self) {
-    Array* ary = Array::create(state, 0U);
-    ary->klass(state, (Class*)self);
+    Array* ary = Array::create(state, 0);
+    ary->klass(state, as<Class>(self));
     return ary;
   }
 
   Array* Array::new_range(STATE, Fixnum* start, Fixnum* count) {
-    Array* ary = state->new_object<Array>(class_object(state));
+    Array* ary = state->new_object_dirty<Array>(class_object(state));
     ary->total(state, count);
     ary->start(state, Fixnum::from(0));
 
@@ -56,7 +66,7 @@ namespace rubinius {
       ary->total(state, Fixnum::from(0));
       ary->tuple(state, Tuple::create(state, 0));
     } else {
-      Tuple* tup = Tuple::create(state, total);
+      Tuple* tup = Tuple::create_dirty(state, total);
       Tuple* orig = tuple_;
 
       for(native_int i = 0, j = start->to_native(); i < total; i++, j++) {
@@ -69,7 +79,7 @@ namespace rubinius {
   }
 
   Array* Array::new_reserved(STATE, Fixnum* count) {
-    Array* ary = state->new_object<Array>(class_object(state));
+    Array* ary = state->new_object_dirty<Array>(class_object(state));
     ary->start(state, Fixnum::from(0));
     ary->total(state, Fixnum::from(0));
 
@@ -81,7 +91,7 @@ namespace rubinius {
   }
 
   Array* Array::from_tuple(STATE, Tuple* tup) {
-    size_t length = tup->num_fields();
+    native_int length = tup->num_fields();
     Array* ary = Array::create(state, length);
     ary->tuple_->copy_from(state, tup,
         Fixnum::from(0), Fixnum::from(length),
@@ -94,31 +104,27 @@ namespace rubinius {
   Array* Array::to_ary(STATE, Object* value, CallFrame* call_frame) {
     if(Tuple* tup = try_as<Tuple>(value)) {
       return Array::from_tuple(state, tup);
-    } else if(RTEST(value->respond_to(state, state->symbol("to_ary"), Qtrue))) {
-      Arguments args(state->symbol("to_ary"), value, 0, 0);
-      Dispatch dis(args.name());
+    }
 
-      Object* res = dis.send(state, call_frame, args);
+    if(CBOOL(value->respond_to(state, G(sym_to_ary), cTrue))) {
+      Object* res = value->send(state, call_frame, G(sym_to_ary));
       if(!res) return 0;
 
       if(Array* ary = try_as<Array>(res)) {
         return ary;
       }
 
-      Exception::type_error(state, "to_ary should return an Array", call_frame);
-      return 0;
+      if(LANGUAGE_18_ENABLED || !res->nil_p()) {
+        Exception::type_error(state, "to_ary should return an Array", call_frame);
+        return 0;
+      }
 
-    } else {
-      Array* ary = Array::create(state, 1);
-      ary->set(state, 0, value);
-      return ary;
+      // NOTE: On >= 1.9, if res is nil just fall through and return [value]
     }
-  }
 
-  void Array::setup(STATE, size_t size) {
-    this->tuple(state, Tuple::create(state, size));
-    this->start(state, Fixnum::from(0));
-    this->total(state, Fixnum::from(0));
+    Array* ary = Array::create(state, 1);
+    ary->set(state, 0, value);
+    return ary;
   }
 
   // NOTE: We don't use Primitives::failure() here because the wrapper
@@ -138,7 +144,7 @@ namespace rubinius {
     }
 
     // Off either end, return nil
-    if(index >= total || index < start) return Qnil;
+    if(index >= total || index < start) return cNil;
 
     return tuple_->at(state, index);
   }
@@ -157,17 +163,23 @@ namespace rubinius {
   }
 
   Array* Array::concat(STATE, Array* other) {
-    size_t osize = other->size();
+    if(!LANGUAGE_18_ENABLED) {
+      if(is_frozen_p()) return force_as<Array>(Primitives::failure());
+    }
+
+    native_int osize = other->size();
 
     if(osize == 0) return this;
-    if(is_frozen_p()) return force_as<Array>(Primitives::failure());
+    if(LANGUAGE_18_ENABLED) {
+      if(is_frozen_p()) return force_as<Array>(Primitives::failure());
+    }
 
     if(osize == 1) {
       set(state, size(), other->get(state, 0));
       return this;
     }
 
-    size_t new_size = size() + osize;
+    native_int new_size = size() + osize;
     Tuple* nt = Tuple::create(state, new_size);
     nt->copy_from(state, tuple_, start_, total_, Fixnum::from(0));
     nt->copy_from(state, other->tuple(), other->start(), other->total(), total_);
@@ -179,9 +191,9 @@ namespace rubinius {
     return this;
   }
 
-  Object* Array::get(STATE, size_t idx) {
-    if(idx >= (size_t)total_->to_native()) {
-      return Qnil;
+  Object* Array::get(STATE, native_int idx) {
+    if(idx >= total_->to_native()) {
+      return cNil;
     }
 
     idx += start_->to_native();
@@ -189,18 +201,18 @@ namespace rubinius {
     return tuple_->at(state, idx);
   }
 
-  Object* Array::set(STATE, size_t idx, Object* val) {
-    size_t tuple_size = tuple_->num_fields();
-    size_t oidx = idx;
+  Object* Array::set(STATE, native_int idx, Object* val) {
+    native_int tuple_size = tuple_->num_fields();
+    native_int oidx = idx;
     idx += start_->to_native();
 
     if(idx >= tuple_size) {
-      if (oidx < tuple_size) {
+      if(oidx < tuple_size) {
         // There is enough space in the tuple for this element
         tuple_->lshift_inplace(state, start_);
       } else {
         // Uses the same algo as 1.8 to resize the tuple
-        size_t new_size = tuple_size / 2;
+        native_int new_size = tuple_size / 2;
         if(new_size < 3) {
           new_size = 3;
         }
@@ -214,22 +226,22 @@ namespace rubinius {
     }
 
     tuple_->put(state, idx, val);
-    if((size_t)total_->to_native() <= oidx) {
+    if(total_->to_native() <= oidx) {
       total(state, Fixnum::from(oidx+1));
     }
     return val;
   }
 
   void Array::unshift(STATE, Object* val) {
-    size_t new_size = total_->to_native() + 1;
-    size_t lend = start_->to_native();
+    native_int new_size = total_->to_native() + 1;
+    native_int lend = start_->to_native();
 
     if(lend > 0) {
       tuple_->put(state, lend-1, val);
       start(state, Fixnum::from(lend-1));
       total(state, Fixnum::from(new_size));
     } else {
-      Tuple* nt = Tuple::create(state, new_size);
+      Tuple* nt = Tuple::create_dirty(state, new_size);
       nt->copy_from(state, tuple_, start_, total_,
 		    Fixnum::from(1));
       nt->put(state, 0, val);
@@ -241,25 +253,25 @@ namespace rubinius {
   }
 
   Object* Array::shift(STATE) {
-    size_t cnt = total_->to_native();
+    native_int cnt = total_->to_native();
 
-    if(cnt == 0) return Qnil;
+    if(cnt == 0) return cNil;
     Object* obj = get(state, 0);
-    set(state, 0, Qnil);
+    set(state, 0, cNil);
     start(state, Fixnum::from(start_->to_native() + 1));
     total(state, Fixnum::from(cnt - 1));
     return obj;
   }
 
   Object* Array::append(STATE, Object* val) {
-    set(state, (size_t)total_->to_native(), val);
+    set(state, total_->to_native(), val);
     return val;
   }
 
   bool Array::includes_p(STATE, Object* val) {
-    size_t cnt = total_->to_native();
+    native_int cnt = total_->to_native();
 
-    for(size_t i = 0; i < cnt; i++) {
+    for(native_int i = 0; i < cnt; i++) {
       if(get(state, i) == val) return true;
     }
 
@@ -267,19 +279,19 @@ namespace rubinius {
   }
 
   Object* Array::pop(STATE) {
-    size_t cnt = total_->to_native();
+    native_int cnt = total_->to_native();
 
-    if(cnt == 0) return Qnil;
+    if(cnt == 0) return cNil;
     Object *obj = get(state, cnt - 1);
-    set(state, cnt-1, Qnil);
+    set(state, cnt-1, cNil);
     total(state, Fixnum::from(cnt - 1));
     return obj;
   }
 
   void Array::Info::show(STATE, Object* self, int level) {
     Array* ary = as<Array>(self);
-    size_t size = ary->size();
-    size_t stop = size < 5 ? size : 5;
+    native_int size = ary->size();
+    native_int stop = size < 5 ? size : 5;
 
     if(size == 0) {
       class_info(state, self, true);
@@ -289,7 +301,7 @@ namespace rubinius {
     class_info(state, self);
     std::cout << ": " << size << std::endl;
     ++level;
-    for(size_t i = 0; i < stop; i++) {
+    for(native_int i = 0; i < stop; i++) {
       indent(level);
       Object* obj = ary->get(state, i);
       if(obj == ary) {

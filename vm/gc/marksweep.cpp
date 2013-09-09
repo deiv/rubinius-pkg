@@ -9,8 +9,6 @@
 #include "builtin/class.hpp"
 #include "builtin/symbol.hpp"
 
-#include "instruments/stats.hpp"
-
 #include "configuration.hpp"
 
 #include <iostream>
@@ -40,13 +38,7 @@ namespace rubinius {
   }
 
   Object* MarkSweepGC::allocate(size_t bytes, bool *collect_now) {
-    Object* obj;
-
-#ifdef USE_DLMALLOC
-    obj = reinterpret_cast<Object*>(malloc_.allocate(bytes));
-#else
-    obj = reinterpret_cast<Object*>(malloc(bytes));
-#endif
+    Object* obj = reinterpret_cast<Object*>(malloc(bytes));
 
     // If the allocation failed, we return a NULL pointer
     if(unlikely(!obj)) {
@@ -81,11 +73,7 @@ namespace rubinius {
 
     obj->set_zone(UnspecifiedZone);
 
-#ifdef USE_DLMALLOC
-    malloc_.release(reinterpret_cast<void*>(obj));
-#else
     free(reinterpret_cast<void*>(obj));
-#endif
   }
 
   Object* MarkSweepGC::move_object(Object* orig, size_t bytes,
@@ -94,14 +82,8 @@ namespace rubinius {
     Object* obj = allocate(bytes, collect_now);
     memcpy(obj, orig, bytes);
 
-    // If the header is inflated, repoint it.
-    if(obj->inflated_header_p()) {
-      orig->deflate_header();
-      obj->inflated_header()->set_object(obj);
-    }
-
-    obj->flags().zone = MatureObjectZone;
-    obj->flags().age = 0;
+    obj->set_zone(MatureObjectZone);
+    obj->set_age(0);
 
     orig->set_forward(obj);
 
@@ -119,41 +101,11 @@ namespace rubinius {
 
   Object* MarkSweepGC::saw_object(Object* obj) {
     if(obj->marked_p(object_memory_->mark())) return NULL;
-    obj->mark(object_memory_->mark());
+    obj->mark(object_memory_, object_memory_->mark());
 
     // Add the object to the mark stack, to be scanned later.
     mark_stack_.push_back(obj);
     return NULL;
-  }
-
-  void MarkSweepGC::collect(Roots &roots, CallFrameLocationList& call_frames) {
-    Object* tmp;
-
-    Root* root = static_cast<Root*>(roots.head());
-    while(root) {
-      tmp = root->get();
-      if(tmp->reference_p()) {
-        saw_object(tmp);
-      }
-
-      root = static_cast<Root*>(root->next());
-    }
-
-    // Walk all the call frames
-    for(CallFrameLocationList::const_iterator i = call_frames.begin();
-        i != call_frames.end();
-        ++i) {
-      CallFrame** loc = *i;
-      walk_call_frame(*loc);
-    }
-
-    while(!mark_stack_.empty()) {
-      tmp = mark_stack_.back();
-      mark_stack_.pop_back();
-      scan_object(tmp);
-    }
-
-    after_marked();
   }
 
   void MarkSweepGC::after_marked() {
@@ -201,7 +153,7 @@ namespace rubinius {
     {}
   };
 
-  void MarkSweepGC::profile() {
+  void MarkSweepGC::profile(STATE) {
 
     std::map<Class*, PerClass> stats;
 
@@ -209,7 +161,7 @@ namespace rubinius {
         i != entries.end();
         ++i) {
       Object* obj = *i;
-      Class* cls = obj->class_object(object_memory_->state());
+      Class* cls = obj->class_object(state);
 
       std::map<Class*,PerClass>::iterator j = stats.find(cls);
       if(j == stats.end()) {
@@ -229,46 +181,10 @@ namespace rubinius {
     for(std::map<Class*,PerClass>::iterator i = stats.begin();
         i != stats.end();
         ++i) {
-      std::cout << i->first->name()->c_str(object_memory_->state()) << "\n"
+      std::cout << i->first->debug_str(state) << "\n"
                 << "  objects: " << i->second.objects << "\n"
                 << "    bytes: " << i->second.bytes << "\n";
     }
-
-    /*
-    int count = 0;
-
-    for(std::list<Object*>::reverse_iterator i = entries.rbegin();
-        i != entries.rend();
-        i++) {
-      Object* obj = *i;
-      if(ByteArray* ba = try_as<ByteArray>(obj)) {
-        ba->show(object_memory_->state());
-        if(++count == 10) break;
-      }
-    }
-    */
-
-    /*
-    std::list<Object*> sorted = entries;
-    sorted.sort(sort_by_size);
-
-    std::list<Object*>::iterator i;
-
-    std::cout << "Top 30:\n";
-
-    int count = 0;
-
-    for(i = sorted.begin(); i != sorted.end();) {
-      Object* obj = *i;
-
-      size_t sz = obj->size_in_bytes(object_memory_->state());
-
-      std::cout << obj->to_s(object_memory_->state(), true)->c_str() << " bytes=" << sz << "\n";
-      if(++count == 30) break;
-
-      i++;
-    }
-    */
   }
 
   ObjectPosition MarkSweepGC::validate_object(Object* obj) {

@@ -1,9 +1,8 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   class Generator
     include GeneratorMethods
-
-    CALL_FLAG_PRIVATE = 1
-    CALL_FLAG_CONCAT = 2
 
     ##
     # Jump label for the branch instructions. The use scenarios for labels:
@@ -257,6 +256,7 @@ module Rubinius
       @primitive = nil
       @instruction = nil
       @for_block = nil
+      @for_module_body = nil
 
       @required_args = 0
       @post_args = 0
@@ -267,6 +267,7 @@ module Rubinius
 
       @splat_index = nil
       @local_names = nil
+      @block_index = nil
       @local_count = 0
 
       @state = []
@@ -282,8 +283,9 @@ module Rubinius
     attr_reader   :ip, :stream, :iseq, :literals
     attr_accessor :break, :redo, :next, :retry, :file, :name,
                   :required_args, :post_args, :total_args, :splat_index,
-                  :local_count, :local_names, :primitive, :for_block,
-                  :current_block, :detected_args, :detected_locals
+                  :local_count, :local_names, :primitive, :for_block, :for_module_body,
+                  :current_block, :detected_args, :detected_locals,
+                  :block_index
 
     def execute(node)
       node.bytecode self
@@ -312,28 +314,33 @@ module Rubinius
     def package(klass)
       @generators.each { |x| @literals[x] = @literals[x].package klass }
 
-      cm = klass.new
-      cm.iseq           = @iseq
-      cm.literals       = @literals.to_tuple
-      cm.lines          = @lines.to_tuple
+      code = klass.new
+      code.iseq           = @iseq
+      code.literals       = @literals.to_tuple
+      code.lines          = @lines.to_tuple
 
-      cm.required_args  = @required_args
-      cm.post_args      = @post_args
-      cm.total_args     = @total_args
-      cm.splat          = @splat_index
-      cm.local_count    = @local_count
-      cm.local_names    = @local_names.to_tuple if @local_names
+      code.required_args  = @required_args
+      code.post_args      = @post_args
+      code.total_args     = @total_args
+      code.splat          = @splat_index
+      code.block_index    = @block_index
+      code.local_count    = @local_count
+      code.local_names    = @local_names.to_tuple if @local_names
 
-      cm.stack_size     = max_stack_size
-      cm.file           = @file
-      cm.name           = @name
-      cm.primitive      = @primitive
+      code.stack_size     = max_stack_size
+      code.file           = @file
+      code.name           = @name
+      code.primitive      = @primitive
 
       if @for_block
-        cm.add_metadata :for_block, true
+        code.add_metadata :for_block, true
       end
 
-      cm
+      if @for_module_body
+        code.add_metadata :for_module_body, true
+      end
+
+      code
     end
 
     def use_detected
@@ -532,7 +539,15 @@ module Rubinius
     # was used in the compiler before the push_const_fast instruction. Rather
     # than changing the compiler code, this helper was used.
     def push_const(name)
-      push_const_fast find_literal(name), add_literal(nil)
+      push_const_fast find_literal(name)
+    end
+
+    # The find_const instruction itself is unused right now. The instruction
+    # parser does not emit a GeneratorMethods#find_const. This method/opcode
+    # was used in the compiler before the find_const_fast instruction. Rather
+    # than changing the compiler code, this helper was used.
+    def find_const(name)
+      find_const_fast find_literal(name)
     end
 
     def push_local(idx)
@@ -604,7 +619,7 @@ module Rubinius
 
     def send_with_splat(meth, args, priv=false, concat=false)
       val = 0
-      val |= CALL_FLAG_CONCAT  if concat
+      val |= InstructionSet::CALL_FLAG_CONCAT if concat
       set_call_flags val unless val == 0
 
       allow_private if priv

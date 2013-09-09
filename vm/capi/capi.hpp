@@ -12,7 +12,13 @@
 
 #include "object_utils.hpp"
 
+#include "capi/capi_constants.h"
 #include "capi/tag.hpp"
+
+#define ENTER_CAPI(state) (state->vm()->shared.enter_capi(state, __FILE__, __LINE__))
+#define LEAVE_CAPI(state) (state->vm()->shared.leave_capi(state))
+
+#define RSTRING_NOT_MODIFIED 1
 
 namespace rubinius {
   class Integer;
@@ -29,16 +35,22 @@ namespace rubinius {
     Symbol* prefixed_by(STATE, const char prefix, ID name);
 
     /** Return constant name mapping to 'type' */
-    std::string& capi_get_constant_name(int type);
+    std::string capi_get_constant_name(int type);
 
     /** Raise a RuntimeError error */
-    void capi_raise_runtime_error(const char* reason);
+    NORETURN(void capi_raise_runtime_error(const char* reason));
 
     /** Raise a TypeError (convenience method). */
-    void capi_raise_type_error(object_type type, Object* object);
+    NORETURN(void capi_raise_type_error(object_type type, Object* object));
 
     /** Raise backend */
     void capi_raise_backend(Exception* exception);
+
+    void capi_raise_backend(VALUE exception);
+
+    void capi_raise_backend(VALUE klass, const char* reason);
+
+    void capi_raise_break(VALUE obj);
 
     /** Get an Array object for a handle ensuring that any RARRAY data has
      * been flushed. */
@@ -60,6 +72,9 @@ namespace rubinius {
 
     /** Wrap a C function in a Proc */
     Proc* wrap_c_function(void* func, VALUE cb, int arity);
+
+    /** Call a ruby method and ignore cached handles, etc */
+    VALUE capi_fast_call(VALUE receiver, ID method_name, int arg_count, ...);
 
     /** Converts a native type (int, uint, long) to a suitable Integer. */
     template<typename NativeType>

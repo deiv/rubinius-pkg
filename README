@@ -8,8 +8,8 @@ Ruby core library is written almost entirely in Ruby. Rubinius provides the
 same standard libraries as Matz's Ruby implementation (MRI). Rubinius also
 provides C-API compatibility for native C extensions.
 
-Rubinius currently is compatible with Ruby version 1.8.7. Support for Ruby
-version 1.9.2 is coming soon.
+Rubinius currently is compatible with Ruby version 1.8.7. Full support for Ruby
+version 1.9.3 is in progress.
 
 Rubinius runs on Mac OS X and many Unix/Linux operating systems. Support for
 Microsoft Windows is coming soon.
@@ -35,36 +35,24 @@ To install Rubinius, use the following steps:
 When the install process finishes, follow the directions printed to the
 terminal to add the Rubinius executable (bin) directory to your PATH.
 
-For more information about building and running Rubinius, run 'rake docs'.
+See Section 5. Language Modes below for more information about configuring
+Rubinius for different Ruby language versions.
 
 
-4. Installing Rubinius with RVM
-
-Rubinius can be installed using the Ruby Version Manager (RVM) project.
-
-To install Rubinius with RVM, use the following steps:
-
-  1. Ensure the latest RVM is installed
-  2. rvm install rbx-head
-
-To use Rubinius in the current shell session, run:
-
-  rvm use rbx
-
-To make Rubinius the default interpreter in new shells, run:
-
-  rvm use rbx --default
-
-The documentation for RVM is available at:
-
-  https://rvm.beginrescueend.com
-
-
-5. Using RubyGems
+4. Using RubyGems
 
 Rubinius comes with RubyGems built-in. To install a gem, run the following:
 
   rbx -S gem install <gem_name>
+
+
+5. Language Modes
+
+The default language mode is ruby 1.9. You can change the language mode with a configure option.
+
+For example, to compile 2.0 mode, use the following configure options:
+
+  ./configure --enable-version=20
 
 
 6. Documentation
@@ -82,5 +70,5 @@ Please file tickets for bugs or problems. The issue tracker is:
 
 8. Contributing
 
-The Rubinius team welcomes contributions. Run 'rake docs' and see the
-"Contributing" page.
+The Rubinius team welcomes contributions. For more information read the
+CONTRIBUTING file in the root directory of Rubinius.

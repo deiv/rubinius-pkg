@@ -2,10 +2,12 @@
 
 #include "builtin/symbol.hpp"
 #include "builtin/tuple.hpp"
-#include "builtin/global_cache_entry.hpp"
-#include "inline_cache.hpp"
-#include "builtin/cache.hpp"
+#include "builtin/constant_cache.hpp"
+#include "builtin/mono_inline_cache.hpp"
+#include "builtin/poly_inline_cache.hpp"
+#include "builtin/respond_to_cache.hpp"
 #include "builtin/lookuptable.hpp"
+#include "version.h"
 
 #include "llvm/jit_operations.hpp"
 #include "llvm/inline.hpp"
@@ -13,17 +15,13 @@
 
 #include "llvm/stack_args.hpp"
 
+#if RBX_LLVM_API_VER >= 303
+#include <llvm/IR/DerivedTypes.h>
+#else
 #include <llvm/DerivedTypes.h>
+#endif
 
 #include <list>
-
-#ifdef IS_X8664
-#define ADD_WITH_OVERFLOW "llvm.sadd.with.overflow.i63"
-#define SUB_WITH_OVERFLOW "llvm.ssub.with.overflow.i63"
-#else
-#define ADD_WITH_OVERFLOW "llvm.sadd.with.overflow.i31"
-#define SUB_WITH_OVERFLOW "llvm.ssub.with.overflow.i31"
-#endif
 
 namespace rubinius {
   extern "C" Object* invoke_object_class(STATE, CallFrame* call_frame, Object** args, int arg_count);
@@ -35,18 +33,18 @@ namespace rubinius {
     llvm::Function* func_;
 
   public:
-    JITFunction(LLVMState* ls)
-      : Signature(ls, ls->VoidTy)
+    JITFunction(Context* ctx)
+      : Signature(ctx, ctx->VoidTy)
       , func_(0)
     {}
 
-    void resolve(const char* name, const Type* rt) {
+    void resolve(const char* name, Type* rt) {
       ret_type_ = rt;
       func_ = function(name);
     }
 
-    Value* call(Value** start, int size, const char* inst_name, IRBuilder<>& b) {
-      return b.CreateCall(func_, start, start+size, inst_name);
+    Value* call(Value** start, int size, const char* inst_name, IRBuilder& b) {
+      return b.CreateCall(func_, ArrayRef<Value*>(start, size), inst_name);
     }
   };
 
@@ -55,20 +53,20 @@ namespace rubinius {
     JITFunction return_to_here;
     JITFunction clear_raise_value;
 
-    JITFunctions(LLVMState* ls)
-      : return_to_here(ls)
-      , clear_raise_value(ls)
+    JITFunctions(Context* ctx)
+      : return_to_here(ctx)
+      , clear_raise_value(ctx)
     {
       return_to_here
-        << "VM"
+        << "State"
         << "CallFrame";
 
-      return_to_here.resolve("rbx_return_to_here", ls->Int1Ty);
+      return_to_here.resolve("rbx_return_to_here", ctx->Int1Ty);
 
       clear_raise_value
-        << "VM";
+        << "State";
 
-      clear_raise_value.resolve("rbx_clear_raise_value", ls->object());
+      clear_raise_value.resolve("rbx_clear_raise_value", ctx->ObjTy);
     }
   };
 
@@ -78,10 +76,6 @@ namespace rubinius {
 
     bool allow_private_;
     opcode call_flags_;
-
-    // Cached Function*s
-    llvm::Function* rbx_simple_send_;
-    llvm::Function* rbx_simple_send_private_;
 
     // bail out destinations
     llvm::BasicBlock* bail_out_;
@@ -96,19 +90,19 @@ namespace rubinius {
     bool use_full_scope_;
 
     Value* global_serial_pos;
+    Value* check_global_interrupts_pos;
 
     int called_args_;
     int sends_done_;
     bool has_side_effects_;
 
     int current_ip_;
-    int current_block_;
+    JITInlineBlock* current_block_;
     int block_arg_shift_;
-    bool skip_yield_stack_;
 
     JITBasicBlock* current_jbb_;
 
-    Value* vmm_debugging_;
+    Value* machine_code_debugging_;
 
   public:
 
@@ -116,15 +110,13 @@ namespace rubinius {
 
     class Unsupported {};
 
-    JITVisit(LLVMState* ls, JITMethodInfo& info, BlockMap& bm,
+    JITVisit(jit::Builder* builder, JITMethodInfo& info, BlockMap& bm,
              llvm::BasicBlock* start)
-      : JITOperations(ls, info, start)
-      , f(ls)
+      : JITOperations(builder, info, start)
+      , f(builder->ctx_)
       , block_map_(bm)
       , allow_private_(false)
       , call_flags_(0)
-      , rbx_simple_send_(0)
-      , rbx_simple_send_private_(0)
       , method_entry_(info.profiling_entry())
       , args_(info.args())
       , vars_(info.variables())
@@ -133,11 +125,16 @@ namespace rubinius {
       , sends_done_(0)
       , has_side_effects_(false)
       , current_ip_(0)
-      , current_block_(-1)
+      , current_block_(NULL)
       , block_arg_shift_(0)
-      , skip_yield_stack_(false)
       , current_jbb_(0)
     {}
+
+    ~JITVisit() {
+      if(current_block_) {
+        delete current_block_;
+      }
+    }
 
     bool for_inlined_method() {
       return info().for_inlined_method();
@@ -149,7 +146,7 @@ namespace rubinius {
       bail_out_ = new_block("bail_out");
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_
       };
 
@@ -173,7 +170,7 @@ namespace rubinius {
       b().CreateBr(info().return_pad());
 
       set_block(ret_raise_val);
-      Value* crv = f.clear_raise_value.call(&vm_, 1, "crv", b());
+      Value* crv = f.clear_raise_value.call(&state_, 1, "crv", b());
       if(use_full_scope_) flush_scope_to_heap(vars_);
 
       info().add_return_value(crv, current_block());
@@ -184,12 +181,16 @@ namespace rubinius {
       ip_pos_ = b().CreateConstGEP2_32(call_frame_, 0, offset::CallFrame::ip, "ip_pos");
 
       global_serial_pos = b().CreateIntToPtr(
-          clong((intptr_t)ls_->shared().global_serial_address()),
-          llvm::PointerType::getUnqual(ls_->IntPtrTy), "cast_to_intptr");
+          clong((intptr_t)llvm_state()->shared().global_serial_address()),
+          llvm::PointerType::getUnqual(ctx_->Int32Ty), "cast_to_intptr");
+
+      check_global_interrupts_pos = b().CreateIntToPtr(
+          clong((intptr_t)llvm_state()->shared().check_global_interrupts_address()),
+          llvm::PointerType::getUnqual(ctx_->Int8Ty), "cast_to_intptr");
 
       init_out_args();
 
-      vmm_debugging_ = constant(&info().vmm->debugging, llvm::PointerType::getUnqual(ls_->Int32Ty));
+      machine_code_debugging_ = constant(&info().machine_code->debugging, llvm::PointerType::getUnqual(ctx_->Int32Ty));
     }
 
     void set_has_side_effects() {
@@ -236,6 +237,13 @@ namespace rubinius {
       return current_jbb_->exception_handler->entry();
     }
 
+    void clear_current_block() {
+      if(current_block_) {
+        delete current_block_;
+        current_block_ = NULL;
+      }
+    }
+
     void check_for_return(Value* val) {
       BasicBlock* cont = new_block();
 
@@ -251,12 +259,12 @@ namespace rubinius {
       /////
       set_block(is_break);
 
-      Signature brk(ls_, ls_->Int1Ty);
-      brk << VMTy;
+      Signature brk(ctx_, ctx_->Int1Ty);
+      brk << StateTy;
       brk << CallFrameTy;
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_
       };
 
@@ -277,16 +285,16 @@ namespace rubinius {
       ////
       set_block(push_break_val);
 
-      Signature clear(ls_, ObjType);
-      clear << VMTy;
-      Value* crv = clear.call("rbx_clear_raise_value", &vm_, 1, "crv", b());
+      Signature clear(ctx_, ObjType);
+      clear << StateTy;
+      Value* crv = clear.call("rbx_clear_raise_value", &state_, 1, "crv", b());
 
       b().CreateBr(cont);
 
       /////
       set_block(cont);
 
-      PHINode* phi = b().CreatePHI(ObjType, "possible_break");
+      PHINode* phi = b().CreatePHI(ObjType, 2, "possible_break");
       phi->addIncoming(val, orig);
       phi->addIncoming(crv, push_break_val);
 
@@ -320,12 +328,12 @@ namespace rubinius {
 
       set_block(check_active);
 
-      if(!state()->config().jit_check_debugging) {
+      if(!llvm_state()->config().jit_check_debugging) {
         b().CreateBr(cont);
         return check_active;
       }
 
-      Value* is_debugging = b().CreateLoad(vmm_debugging_, "loaded_debugging_flag");
+      Value* is_debugging = b().CreateLoad(machine_code_debugging_, "loaded_debugging_flag");
 
       BasicBlock* restart_in_interp = new_block("restart");
 
@@ -341,28 +349,29 @@ namespace rubinius {
 
       flush();
 
-      Signature sig(ls_, "Object");
+      Signature sig(ctx_, "Object");
 
-      sig << "VM";
+      sig << "State";
       sig << "CallFrame";
-      sig << ls_->Int32Ty;
-      sig << ls_->IntPtrTy;
+      sig << ctx_->Int32Ty;
+      sig << ctx_->IntPtrTy;
       sig << "CallFrame";
-      sig << ls_->Int32Ty;
-      sig << llvm::PointerType::getUnqual(ls_->Int32Ty);
+      sig << "CallFrame";
+      sig << ctx_->Int32Ty;
 
       int unwinds = emit_unwinds();
 
       Value* root_callframe = info().top_parent_call_frame();
+      Value* creator_callframe = info().creator_call_frame();
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
         cint(next_ip_),
         sp,
         root_callframe,
+        creator_callframe,
         cint(unwinds),
-        info().unwind_info(),
         (pass_top ? val : Constant::getNullValue(val->getType()))
       };
 
@@ -421,30 +430,44 @@ namespace rubinius {
       flush_stack();
     }
 
-    /* push a global constant onto the stack */
-    /* 0:cpath_top, 1:rubinius */
+    /* push a global constant onto the stack
+    *  0 : cpath_top (Object)
+     * 1 : Rubinius module
+     * 2 : Rubinius::Type module
+     * 3 : Rubinius::Mirror class
+     */
     void push_system_object(int which) {
-      // we're calling something that returns an Object
-      Signature sig(ls_, ObjType);
-      // given a system state and a 32bit int
-      sig << VMTy;
-      sig << ls_->Int32Ty;
 
-      // the actual values of which are the calling arguments
-      Value* call_args[] = {
-        vm_,
-        cint(which)
-      };
+      Object** addr;
 
-      // call the function we just described using the builder
-      Value* val = sig.call("rbx_push_system_object", call_args, 2, "so", b());
-      stack_push(val);
+      switch(which) {
+      case 0:
+        addr = llvm_state()->shared().globals.object.object_address();
+        break;
+      case 1:
+        addr = llvm_state()->shared().globals.rubinius.object_address();
+        break;
+      case 2:
+        addr = llvm_state()->shared().globals.type.object_address();
+        break;
+      case 3:
+        addr = llvm_state()->shared().globals.mirror.object_address();
+        break;
+      default:
+        rubinius::bug("invalid system object");
+      }
+
+      Value* l_addr = constant(addr, ObjArrayTy);
+      stack_push(b().CreateLoad(l_addr, "system_object"));
     }
 
     // visitors.
 
     void visit(opcode op, opcode arg1, opcode arg2) {
       throw Unsupported();
+    }
+
+    void visit_noop() {
     }
 
     void visit_pop() {
@@ -456,22 +479,22 @@ namespace rubinius {
     }
 
     void visit_push_nil() {
-      stack_push(constant(Qnil), type::KnownType::nil());
+      stack_push(constant(cNil), type::KnownType::nil());
     }
 
     void visit_push_true() {
-      stack_push(constant(Qtrue), type::KnownType::true_());
+      stack_push(constant(cTrue), type::KnownType::true_());
     }
 
     void visit_push_undef() {
-      Object** addr = ls_->shared().globals.undefined.object_address();
+      Object** addr = llvm_state()->shared().globals.undefined.object_address();
       Value* l_addr = constant(addr, ObjArrayTy);
 
       stack_push(b().CreateLoad(l_addr, "undefined"));
     }
 
     void visit_push_false() {
-      stack_push(constant(Qfalse), type::KnownType::false_());
+      stack_push(constant(cFalse), type::KnownType::false_());
     }
 
     void visit_push_int(opcode arg) {
@@ -496,8 +519,8 @@ namespace rubinius {
     }
 
     void visit_ret() {
-      if(ls_->include_profiling() && method_entry_) {
-        Value* test = b().CreateLoad(ls_->profiling(), "profiling");
+      if(llvm_state()->include_profiling() && method_entry_) {
+        Value* test = b().CreateLoad(ctx_->profiling(), "profiling");
         BasicBlock* end_profiling = new_block("end_profiling");
         BasicBlock* cont = new_block("continue");
 
@@ -505,8 +528,8 @@ namespace rubinius {
 
         set_block(end_profiling);
 
-        Signature sig(ls_, ls_->VoidTy);
-        sig << llvm::PointerType::getUnqual(ls_->Int8Ty);
+        Signature sig(ctx_, ctx_->VoidTy);
+        sig << llvm::PointerType::getUnqual(ctx_->Int8Ty);
 
         Value* call_args[] = {
           method_entry_
@@ -556,8 +579,8 @@ namespace rubinius {
         Value* val = b().CreateLoad(pos, "rotate");
         Value* val2 = b().CreateLoad(pos2, "rotate");
 
-        b().CreateStore(val2, pos);
-        b().CreateStore(val, pos2);
+        store_stack_back_position(offset, val2);
+        store_stack_back_position(i, val);
       }
     }
 
@@ -569,26 +592,16 @@ namespace rubinius {
         int current = target + 1;
 
         Value* tmp = stack_back(current);
-        Value* pos = stack_back_position(target);
-
-        b().CreateStore(tmp, pos);
+        store_stack_back_position(target, tmp);
       }
 
-      b().CreateStore(val, stack_back_position(positions));
+      store_stack_back_position(positions, val);
     }
 
     void visit_check_frozen() {
-      Signature sig(ls_, "Object");
+      Value* recv = stack_top();
 
-      sig << "VM";
-      sig << "CallFrame";
-      sig << "Object";
-
-      Value* call_args[] = { vm_, call_frame_, stack_top() };
-
-      Value* res = sig.call("rbx_check_frozen", call_args, 3, "", b());
-
-      check_for_exception(res, false);
+      check_is_frozen(recv);
     }
 
     void check_fixnums(Value* left, Value* right, BasicBlock* if_true,
@@ -629,15 +642,16 @@ namespace rubinius {
     }
 
     void add_send_args(Signature& sig) {
-      sig << VMTy;
+      sig << StateTy;
       sig << CallFrameTy;
       sig << ObjType;
-      sig << ls_->IntPtrTy;
+      sig << ctx_->IntPtrTy;
       sig << ObjArrayTy;
     }
 
-    void setup_out_args_with_block(int args) {
+    void setup_out_args_with_block(Symbol* name, int args) {
       b().CreateStore(stack_back(args + 1), out_args_recv_);
+      b().CreateStore(constant(name, ptr_type("Symbol")), out_args_name_);
       b().CreateStore(stack_top(), out_args_block_);
       b().CreateStore(cint(args),
                     out_args_total_);
@@ -648,76 +662,91 @@ namespace rubinius {
       }
     }
 
-    Value* invoke_inline_cache(InlineCache* cache) {
-      Value* cache_const = b().CreateIntToPtr(
-          clong(reinterpret_cast<uintptr_t>(cache)),
-          ptr_type("InlineCache"), "cast_to_ptr");
+    Value* invoke_call_site(opcode& which) {
+      CallSite** call_site_ptr = reinterpret_cast<CallSite**>(&which);
+
+      Value* call_site_ptr_const = b().CreateIntToPtr(
+          clong(reinterpret_cast<uintptr_t>(call_site_ptr)),
+          ptr_type(ptr_type("CallSite")), "cast_to_ptr");
+
+      Value* call_site_const = b().CreateLoad(call_site_ptr_const, "cache_const");
 
       Value* execute_pos_idx[] = {
         cint(0),
-        cint(offset::ic_execute),
+        cint(offset::CallSite::executor),
       };
 
-      Value* execute_pos = b().CreateGEP(cache_const,
-          execute_pos_idx, execute_pos_idx+2, "execute_pos");
+      Value* execute_pos = b().CreateGEP(call_site_const,
+          execute_pos_idx, "execute_pos");
 
       Value* execute = b().CreateLoad(execute_pos, "execute");
 
       Value* call_args[] = {
-        vm_,
-        cache_const,
+        state_,
+        call_site_const,
         call_frame_,
         out_args_
       };
 
       flush_ip();
-      return b().CreateCall(execute, call_args, call_args+4, "ic_send");
+      return b().CreateCall(execute, call_args, "call_site_execute");
     }
 
-    Value* inline_cache_send(int args, InlineCache* cache) {
+    Value* inline_call_site_execute(int args, opcode& which) {
       sends_done_++;
 
-      setup_out_args(args);
-      return invoke_inline_cache(cache);
+      CallSite* call_site = reinterpret_cast<CallSite*>(which);
+
+      setup_out_args(call_site->name(), args);
+      return invoke_call_site(which);
     }
 
-    Value* block_send(InlineCache* cache, int args, bool priv=false) {
+    Value* block_send(opcode& which, int args, bool priv=false) {
+
       sends_done_++;
-      Value* cache_const = b().CreateIntToPtr(
-          clong(reinterpret_cast<uintptr_t>(cache)),
-          ptr_type("InlineCache"), "cast_to_ptr");
+
+      CallSite** call_site_ptr = reinterpret_cast<CallSite**>(&which);
+      CallSite* call_site = *call_site_ptr;
+
+      Value* call_site_ptr_const = b().CreateIntToPtr(
+          clong(reinterpret_cast<uintptr_t>(call_site_ptr)),
+          ptr_type(ptr_type("CallSite")), "cast_to_cache_ptr");
+
+      Value* call_site_const = b().CreateLoad(call_site_ptr_const, "cache_const");
 
       Value* execute_pos_idx[] = {
         cint(0),
-        cint(offset::ic_execute),
+        cint(offset::CallSite::executor),
       };
 
-      Value* execute_pos = b().CreateGEP(cache_const,
-          execute_pos_idx, execute_pos_idx+2, "execute_pos");
+      Value* execute_pos = b().CreateGEP(call_site_const,
+          execute_pos_idx, "execute_pos");
 
       Value* execute = b().CreateLoad(execute_pos, "execute");
 
-      setup_out_args_with_block(args);
+      setup_out_args_with_block(call_site->name(), args);
 
       Value* call_args[] = {
-        vm_,
-        cache_const,
+        state_,
+        call_site_const,
         call_frame_,
         out_args_
       };
 
       flush_ip();
-      return b().CreateCall(execute, call_args, call_args+4, "ic_send");
+      return b().CreateCall(execute, call_args, "ic_send");
     }
 
-    Value* splat_send(Symbol* name, int args, bool priv=false) {
-      sends_done_++;
-      Signature sig(ls_, ObjType);
+    Value* splat_send(opcode& which, int args, bool priv=false) {
 
-      sig << VMTy;
+      sends_done_++;
+      Signature sig(ctx_, ObjType);
+
+      sig << StateTy;
       sig << CallFrameTy;
-      sig << ObjType;
-      sig << ls_->IntPtrTy;
+      sig << "CallSite";
+      sig << ctx_->Int32Ty;
+      sig << ctx_->Int32Ty;
       sig << ObjArrayTy;
 
       const char* func_name;
@@ -727,24 +756,36 @@ namespace rubinius {
         func_name = "rbx_splat_send";
       }
 
+      CallSite** call_site_ptr = reinterpret_cast<CallSite**>(&which);
+
+      Value* call_site_ptr_const = b().CreateIntToPtr(
+          clong(reinterpret_cast<uintptr_t>(call_site_ptr)),
+          ptr_type(ptr_type("CallSite")), "cast_to_ptr");
+
+      Value* call_site_const = b().CreateLoad(call_site_ptr_const, "cache_const");
+
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
-        constant(name),
-        clong(args),
+        call_site_const,
+        cint(args),
+        cint(call_flags_),
         stack_objects(args + 3),   // 3 == recv + block + splat
       };
 
+      call_flags_ = 0;
       flush_ip();
-      return sig.call(func_name, call_args, 5, "splat_send", b());
+      return sig.call(func_name, call_args, 6, "splat_send", b());
     }
 
-    Value* super_send(Symbol* name, int args, bool splat=false) {
-      Signature sig(ls_, ObjType);
-      sig << VMTy;
+    Value* super_send(opcode& which, int args, bool splat=false) {
+
+      Signature sig(ctx_, ObjType);
+      sig << StateTy;
       sig << CallFrameTy;
-      sig << ObjType;
-      sig << ls_->IntPtrTy;
+      sig << "CallSite";
+      sig << ctx_->Int32Ty;
+      sig << ctx_->Int32Ty;
       sig << ObjArrayTy;
 
       const char* func_name;
@@ -756,38 +797,51 @@ namespace rubinius {
         func_name = "rbx_super_send";
       }
 
+      CallSite** call_site_ptr = reinterpret_cast<CallSite**>(&which);
+
+      Value* call_site_ptr_const = b().CreateIntToPtr(
+          clong(reinterpret_cast<uintptr_t>(call_site_ptr)),
+          ptr_type(ptr_type("CallSite")), "cast_to_ptr");
+
+      Value* call_site_const = b().CreateLoad(call_site_ptr_const, "cache_const");
+
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
-        constant(name),
-        clong(args),
+        call_site_const,
+        cint(args),
+        cint(call_flags_),
         stack_objects(args + extra),
       };
 
+      call_flags_ = 0;
       flush_ip();
-      return sig.call(func_name, call_args, 5, "super_send", b());
+      return sig.call(func_name, call_args, 6, "super_send", b());
     }
 
-    void visit_meta_to_s(opcode name) {
-      InlineCache* cache = reinterpret_cast<InlineCache*>(name);
+    void visit_meta_to_s(opcode& name) {
       set_has_side_effects();
 
       Value* recv = stack_top();
 
-      Signature sig(ls_, "Object");
-      sig << "VM";
+      Signature sig(ctx_, "Object");
+      sig << "State";
       sig << "CallFrame";
-      sig << "InlineCache";
+      sig << "CallSite";
       sig << "Object";
 
-      Value* cache_const = b().CreateIntToPtr(
-          clong(reinterpret_cast<uintptr_t>(cache)),
-          ptr_type("InlineCache"), "cast_to_ptr");
+      CallSite** call_site_ptr = reinterpret_cast<CallSite**>(&name);
+
+      Value* call_site_ptr_const = b().CreateIntToPtr(
+          clong(reinterpret_cast<uintptr_t>(call_site_ptr)),
+          ptr_type(ptr_type("CallSite")), "cast_to_ptr");
+
+      Value* call_site_const = b().CreateLoad(call_site_ptr_const, "cache_const");
 
       Value* args[] = {
-        vm_,
+        state_,
         call_frame_,
-        cache_const,
+        call_site_const,
         recv
       };
 
@@ -797,8 +851,7 @@ namespace rubinius {
       stack_push(ret);
     }
 
-    void visit_meta_send_op_equal(opcode name) {
-      InlineCache* cache = reinterpret_cast<InlineCache*>(name);
+    void visit_meta_send_op_equal(opcode& name) {
       set_has_side_effects();
 
       Value* recv = stack_back(1);
@@ -812,7 +865,7 @@ namespace rubinius {
 
       set_block(dispatch);
 
-      Value* called_value = inline_cache_send(1, cache);
+      Value* called_value = inline_call_site_execute(1, name);
       BasicBlock* send_block =
         check_for_exception_then(called_value, cont);
 
@@ -820,13 +873,13 @@ namespace rubinius {
 
       Value* cmp = b().CreateICmpEQ(recv, arg, "imm_cmp");
       Value* imm_value = b().CreateSelect(cmp,
-          constant(Qtrue), constant(Qfalse), "select_bool");
+          constant(cTrue), constant(cFalse), "select_bool");
 
       b().CreateBr(cont);
 
       set_block(cont);
 
-      PHINode* phi = b().CreatePHI(ObjType, "equal_value");
+      PHINode* phi = b().CreatePHI(ObjType, 2, "equal_value");
       phi->addIncoming(called_value, send_block);
       phi->addIncoming(imm_value, fast);
 
@@ -834,8 +887,7 @@ namespace rubinius {
       stack_push(phi);
     }
 
-    void visit_meta_send_op_tequal(opcode name) {
-      InlineCache* cache = reinterpret_cast<InlineCache*>(name);
+    void visit_meta_send_op_tequal(opcode& name) {
       set_has_side_effects();
 
       Value* recv = stack_back(1);
@@ -849,7 +901,7 @@ namespace rubinius {
 
       set_block(dispatch);
 
-      Value* called_value = inline_cache_send(1, cache);
+      Value* called_value = inline_call_site_execute(1, name);
       BasicBlock* send_block =
         check_for_exception_then(called_value, cont);
 
@@ -857,13 +909,13 @@ namespace rubinius {
 
       Value* cmp = b().CreateICmpEQ(recv, arg, "imm_cmp");
       Value* imm_value = b().CreateSelect(cmp,
-          constant(Qtrue), constant(Qfalse), "select_bool");
+          constant(cTrue), constant(cFalse), "select_bool");
 
       b().CreateBr(cont);
 
       set_block(cont);
 
-      PHINode* phi = b().CreatePHI(ObjType, "equal_value");
+      PHINode* phi = b().CreatePHI(ObjType, 2, "equal_value");
       phi->addIncoming(called_value, send_block);
       phi->addIncoming(imm_value, fast);
 
@@ -871,8 +923,7 @@ namespace rubinius {
       stack_push(phi);
     }
 
-    void visit_meta_send_op_lt(opcode name) {
-      InlineCache* cache = reinterpret_cast<InlineCache*>(name);
+    void visit_meta_send_op_lt(opcode& name) {
       set_has_side_effects();
 
       Value* recv = stack_back(1);
@@ -886,20 +937,20 @@ namespace rubinius {
 
       set_block(dispatch);
 
-      Value* called_value = inline_cache_send(1, cache);
+      Value* called_value = inline_call_site_execute(1, name);
       BasicBlock* send_bb = check_for_exception_then(called_value, cont);
 
       set_block(fast);
 
       Value* cmp = b().CreateICmpSLT(recv, arg, "imm_cmp");
       Value* imm_value = b().CreateSelect(cmp,
-          constant(Qtrue), constant(Qfalse), "select_bool");
+          constant(cTrue), constant(cFalse), "select_bool");
 
       b().CreateBr(cont);
 
       set_block(cont);
 
-      PHINode* phi = b().CreatePHI(ObjType, "addition");
+      PHINode* phi = b().CreatePHI(ObjType, 2, "addition");
       phi->addIncoming(called_value, send_bb);
       phi->addIncoming(imm_value, fast);
 
@@ -907,8 +958,7 @@ namespace rubinius {
       stack_push(phi);
     }
 
-    void visit_meta_send_op_gt(opcode name) {
-      InlineCache* cache = reinterpret_cast<InlineCache*>(name);
+    void visit_meta_send_op_gt(opcode& name) {
       set_has_side_effects();
 
       Value* recv = stack_back(1);
@@ -922,20 +972,20 @@ namespace rubinius {
 
       set_block(dispatch);
 
-      Value* called_value = inline_cache_send(1, cache);
+      Value* called_value = inline_call_site_execute(1, name);
       BasicBlock* send_bb = check_for_exception_then(called_value, cont);
 
       set_block(fast);
 
       Value* cmp = b().CreateICmpSGT(recv, arg, "imm_cmp");
       Value* imm_value = b().CreateSelect(cmp,
-          constant(Qtrue), constant(Qfalse), "select_bool");
+          constant(cTrue), constant(cFalse), "select_bool");
 
       b().CreateBr(cont);
 
       set_block(cont);
 
-      PHINode* phi = b().CreatePHI(ObjType, "compare");
+      PHINode* phi = b().CreatePHI(ObjType, 2, "compare");
       phi->addIncoming(called_value, send_bb);
       phi->addIncoming(imm_value, fast);
 
@@ -943,121 +993,97 @@ namespace rubinius {
       stack_push(phi);
     }
 
-    void visit_meta_send_op_plus(opcode name) {
-      InlineCache* cache = reinterpret_cast<InlineCache*>(name);
+    void visit_meta_send_op_plus(opcode& name) {
       set_has_side_effects();
       Value* recv = stack_back(1);
       Value* arg =  stack_top();
 
-      BasicBlock* fast = new_block("fast");
+      BasicBlock* fast     = new_block("fast");
       BasicBlock* dispatch = new_block("dispatch");
-      BasicBlock* tagnow = new_block("tagnow");
-      BasicBlock* cont = new_block("cont");
+      BasicBlock* bignum   = new_block("bignum");
+      BasicBlock* tagnow   = new_block("tagnow");
+      BasicBlock* cont     = new_block("cont");
 
       check_fixnums(recv, arg, fast, dispatch);
 
       set_block(dispatch);
 
-      Value* called_value = inline_cache_send(1, cache);
+      Value* called_value = inline_call_site_execute(1, name);
       BasicBlock* send_bb = check_for_exception_then(called_value, cont);
 
       set_block(fast);
 
-      std::vector<const Type*> types;
-      types.push_back(FixnumTy);
-      types.push_back(FixnumTy);
+      Value* recv_int = fixnum_strip(recv);
+      Value* arg_int  = fixnum_strip(arg);
 
-      std::vector<const Type*> struct_types;
-      struct_types.push_back(FixnumTy);
-      struct_types.push_back(ls_->Int1Ty);
+      Value* sum = b().CreateAdd(recv_int, arg_int, "fixnum.add");
 
-      StructType* st = StructType::get(ls_->ctx(), struct_types);
+      Value* cmp = check_if_fits_fixnum(sum);
 
-      FunctionType* ft = FunctionType::get(st, types, false);
-      Function* func = cast<Function>(
-          module_->getOrInsertFunction(ADD_WITH_OVERFLOW, ft));
+      create_conditional_branch(tagnow, bignum, cmp);
 
-      Value* recv_int = tag_strip(recv);
-      Value* arg_int = tag_strip(arg);
-      Value* call_args[] = { recv_int, arg_int };
-      Value* res = b().CreateCall(func, call_args, call_args+2, "add.overflow");
-
-      Value* sum = b().CreateExtractValue(res, 0, "sum");
-      Value* dof = b().CreateExtractValue(res, 1, "did_overflow");
-
-      b().CreateCondBr(dof, dispatch, tagnow);
+      set_block(bignum);
+      Value* big_value = promote_to_bignum(sum);
+      b().CreateBr(cont);
 
       set_block(tagnow);
-
       Value* imm_value = fixnum_tag(sum);
-
       b().CreateBr(cont);
 
       set_block(cont);
 
-      PHINode* phi = b().CreatePHI(ObjType, "addition");
+      PHINode* phi = b().CreatePHI(ObjType, 3, "addition");
       phi->addIncoming(called_value, send_bb);
+      phi->addIncoming(big_value, bignum);
       phi->addIncoming(imm_value, tagnow);
 
       stack_remove(2);
       stack_push(phi);
     }
 
-    void visit_meta_send_op_minus(opcode name) {
-      InlineCache* cache = reinterpret_cast<InlineCache*>(name);
+    void visit_meta_send_op_minus(opcode& name) {
       set_has_side_effects();
 
       Value* recv = stack_back(1);
       Value* arg =  stack_top();
 
-      BasicBlock* fast = new_block("fast");
+      BasicBlock* fast     = new_block("fast");
       BasicBlock* dispatch = new_block("dispatch");
-      BasicBlock* cont = new_block("cont");
+      BasicBlock* tagnow   = new_block("tagnow");
+      BasicBlock* bignum   = new_block("bignum");
+      BasicBlock* cont     = new_block("cont");
 
       check_fixnums(recv, arg, fast, dispatch);
 
       set_block(dispatch);
 
-      Value* called_value = inline_cache_send(1, cache);
+      Value* called_value = inline_call_site_execute(1, name);
       BasicBlock* send_bb = check_for_exception_then(called_value, cont);
 
       set_block(fast);
 
-      std::vector<const Type*> types;
-      types.push_back(FixnumTy);
-      types.push_back(FixnumTy);
+      Value* recv_int = fixnum_strip(recv);
+      Value* arg_int  = fixnum_strip(arg);
 
-      std::vector<const Type*> struct_types;
-      struct_types.push_back(FixnumTy);
-      struct_types.push_back(ls_->Int1Ty);
+      Value* sub = b().CreateSub(recv_int, arg_int, "fixnum.sub");
 
-      StructType* st = StructType::get(ls_->ctx(), struct_types);
+      Value* cmp = check_if_fits_fixnum(sub);
 
-      FunctionType* ft = FunctionType::get(st, types, false);
-      Function* func = cast<Function>(
-          module_->getOrInsertFunction(SUB_WITH_OVERFLOW, ft));
+      create_conditional_branch(tagnow, bignum, cmp);
 
-      Value* recv_int = tag_strip(recv);
-      Value* arg_int = tag_strip(arg);
-      Value* call_args[] = { recv_int, arg_int };
-      Value* res = b().CreateCall(func, call_args, call_args+2, "sub.overflow");
-
-      Value* sum = b().CreateExtractValue(res, 0, "sub");
-      Value* dof = b().CreateExtractValue(res, 1, "did_overflow");
-
-      BasicBlock* tagnow = new_block("tagnow");
-
-      b().CreateCondBr(dof, dispatch, tagnow);
+      set_block(bignum);
+      Value* big_value = promote_to_bignum(sub);
+      b().CreateBr(cont);
 
       set_block(tagnow);
-      Value* imm_value = fixnum_tag(sum);
-
+      Value* imm_value = fixnum_tag(sub);
       b().CreateBr(cont);
 
       set_block(cont);
 
-      PHINode* phi = b().CreatePHI(ObjType, "subtraction");
+      PHINode* phi = b().CreatePHI(ObjType, 3, "subtraction");
       phi->addIncoming(called_value, send_bb);
+      phi->addIncoming(big_value, bignum);
       phi->addIncoming(imm_value, tagnow);
 
       stack_remove(2);
@@ -1069,57 +1095,77 @@ namespace rubinius {
     }
 
     Value* get_literal(opcode which) {
-      Value* gep = b().CreateConstGEP2_32(call_frame_, 0, offset::CallFrame::cm, "cm_pos");
-      Value* cm =  b().CreateLoad(gep, "cm");
+      Value* gep = b().CreateConstGEP2_32(call_frame_, 0,
+          offset::CallFrame::compiled_code, "code_pos");
+      Value* code =  b().CreateLoad(gep, "code");
 
-      gep = b().CreateConstGEP2_32(cm, 0, offset::CompiledMethod::literals, "literals_pos");
+      gep = b().CreateConstGEP2_32(code, 0, offset::CompiledCode::literals, "literals_pos");
       Value* lits = b().CreateLoad(gep, "literals");
 
       Value* idx2[] = {
         cint(0),
-        cint(offset::tuple_field),
+        cint(offset::Tuple::field),
         cint(which)
       };
 
-      gep = b().CreateGEP(lits, idx2, idx2+3, "literal_pos");
+      gep = b().CreateGEP(lits, idx2, "literal_pos");
       return b().CreateLoad(gep, "literal");
     }
 
     void visit_push_literal(opcode which) {
       Object* lit = literal(which);
       if(Symbol* sym = try_as<Symbol>(lit)) {
-        stack_push(constant(sym), type::KnownType::symbol());
-      } else if(kind_of<Fixnum>(lit)) {
-        stack_push(constant(lit));
+        stack_push(constant(sym), type::KnownType::symbol(sym->index()));
+      } else if(Fixnum* fix = try_as<Fixnum>(lit)) {
+        stack_push(constant(fix), type::KnownType::fixnum(fix->to_native()));
+      } else if(lit->true_p()) {
+        stack_push(constant(cTrue), type::KnownType::true_());
+      } else if(lit->false_p()) {
+        stack_push(constant(cFalse), type::KnownType::false_());
+      } else if(lit->nil_p()) {
+        stack_push(constant(cNil), type::KnownType::nil());
+      } else if(lit->reference_p()) {
+        Class* klass = lit->klass();
+        type::KnownType kt = type::KnownType::unknown();
+        if(kind_of<SingletonClass>(klass)) {
+          kt = type::KnownType::singleton_instance(klass->class_id());
+        } else {
+          kt = type::KnownType::instance(klass->class_id());
+        }
+        stack_push(get_literal(which), kt);
       } else {
         stack_push(get_literal(which));
       }
     }
 
     void visit_string_dup() {
-      std::vector<const Type*> types;
+      std::vector<Type*> types;
 
-      types.push_back(VMTy);
+      types.push_back(StateTy);
       types.push_back(CallFrameTy);
       types.push_back(ObjType);
 
       FunctionType* ft = FunctionType::get(ObjType, types, false);
       Function* func = cast<Function>(
           module_->getOrInsertFunction("rbx_string_dup", ft));
+      func->setDoesNotCapture(1);
+      func->setDoesNotCapture(2);
+      func->setDoesNotCapture(3);
+      func->setDoesNotAlias(0);
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
         stack_pop()
       };
 
-      Value* dup = b().CreateCall(func, call_args, call_args+3, "string_dup");
+      Value* dup = b().CreateCall(func, call_args, "string_dup");
       check_for_exception(dup);
-      stack_push(dup, type::KnownType::instance(ls_->string_class_id()));
+      stack_push(dup, type::KnownType::instance(llvm_state()->string_class_id()));
     }
 
     void push_scope_local(Value* scope, opcode which) {
-      Value* pos = b().CreateConstGEP2_32(scope, 0, offset::varscope_locals,
+      Value* pos = b().CreateConstGEP2_32(scope, 0, offset::VariableScope::locals,
                                      "locals_pos");
 
       Value* table = b().CreateLoad(pos, "locals");
@@ -1132,66 +1178,47 @@ namespace rubinius {
     Value* local_location(Value* vars, opcode which) {
       Value* idx2[] = {
         cint(0),
-        cint(offset::vars_tuple),
+        cint(offset::StackVariables::locals),
         cint(which)
       };
 
-      return b().CreateGEP(vars, idx2, idx2+3, "local_pos");
+      return b().CreateGEP(vars, idx2, "local_pos");
     }
 
     void visit_push_stack_local(opcode which) {
-      Value* pos = stack_slot_position(vmmethod()->stack_size - which - 1);
+      Value* pos = stack_slot_position(machine_code()->stack_size - which - 1);
       stack_push(b().CreateLoad(pos, "stack_local"));
     }
 
     void visit_set_stack_local(opcode which) {
-      Value* pos = stack_slot_position(vmmethod()->stack_size - which - 1);
+      Value* pos = stack_slot_position(machine_code()->stack_size - which - 1);
       b().CreateStore(stack_top(), pos);
     }
 
     void visit_push_local(opcode which) {
       Value* idx2[] = {
         cint(0),
-        cint(offset::vars_tuple),
+        cint(offset::StackVariables::locals),
         cint(which)
       };
 
-      Value* pos = b().CreateGEP(vars_, idx2, idx2+3, "local_pos");
+      Value* pos = b().CreateGEP(vars_, idx2, "local_pos");
 
       if(LocalInfo* bli = current_jbb_->get_local(which)) {
         type::KnownType kt = bli->known_type();
         kt.set_local_source(which);
-
         stack_push(b().CreateLoad(pos, "local"), kt);
         return;
       }
 
       LocalInfo* li = info().get_local(which);
-
-      /*
-      if(li->known_type().known_p()) {
-        std::cout << "push_local type known for " << which << ": "
-                  << li->known_type().describe() << ". "
-                  << (li->static_type_argument_p() ? "STA" : "not STA")
-                  << "\n";
-      }
-      */
-
-      if(!info().use_full_scope() && li->static_type_argument_p()) {
-        type::KnownType kt = li->known_type();
-        kt.set_local_source(which);
-
-        stack_push(b().CreateLoad(pos, "local"), kt);
-      } else {
-        type::KnownType kt;
-        kt.set_local_source(which);
-
-        stack_push(b().CreateLoad(pos, "local"), kt);
-      }
+      type::KnownType kt = li->known_type();
+      kt.set_local_source(which);
+      stack_push(b().CreateLoad(pos, "local"), kt);
     }
 
     void set_scope_local(Value* scope, opcode which) {
-      Value* pos = b().CreateConstGEP2_32(scope, 0, offset::varscope_locals,
+      Value* pos = b().CreateConstGEP2_32(scope, 0, offset::VariableScope::locals,
                                      "locals_pos");
 
       Value* table = b().CreateLoad(pos, "locals");
@@ -1208,26 +1235,26 @@ namespace rubinius {
     void visit_set_local(opcode which) {
       Value* idx2[] = {
         cint(0),
-        cint(offset::vars_tuple),
+        cint(offset::StackVariables::locals),
         cint(which)
       };
 
-      Value* pos = b().CreateGEP(vars_, idx2, idx2+3, "local_pos");
+      Value* pos = b().CreateGEP(vars_, idx2, "local_pos");
 
       Value* val;
 
       JITStackArgs* inline_args = incoming_args();
       if(inline_args && current_hint() == cHintLazyBlockArgs) {
-        std::vector<const Type*> types;
-        types.push_back(ls_->ptr_type("VM"));
-        types.push_back(ls_->Int32Ty);
+        std::vector<Type*> types;
+        types.push_back(ctx_->ptr_type("State"));
+        types.push_back(ctx_->Int32Ty);
 
-        FunctionType* ft = FunctionType::get(ls_->ptr_type("Object"), types, true);
+        FunctionType* ft = FunctionType::get(ctx_->ptr_type("Object"), types, true);
         Function* func = cast<Function>(
-            ls_->module()->getOrInsertFunction("rbx_create_array", ft));
+            ctx_->module()->getOrInsertFunction("rbx_create_array", ft));
 
         std::vector<Value*> outgoing_args;
-        outgoing_args.push_back(vm());
+        outgoing_args.push_back(state_);
 
         int ary_size;
         if(block_arg_shift_ >= (int)inline_args->size()) {
@@ -1244,9 +1271,12 @@ namespace rubinius {
           }
         }
 
-        val = b().CreateCall(func, outgoing_args.begin(), outgoing_args.end(), "ary");
+        val = b().CreateCall(func, outgoing_args, "ary");
       } else {
         val = stack_top();
+        LocalInfo* li = info().get_local(which);
+        type::KnownType kt = type::KnownType::extract(ctx_, val);
+        li->set_known_type(kt);
       }
 
       b().CreateStore(val, pos);
@@ -1258,19 +1288,19 @@ namespace rubinius {
       assert(vars);
 
       return b().CreateLoad(
-          b().CreateConstGEP2_32(vars, 0, offset::vars_self),
+          b().CreateConstGEP2_32(vars, 0, offset::StackVariables::self),
           "self");
     }
 
     Value* get_block() {
       return b().CreateLoad(
-          b().CreateConstGEP2_32(vars_, 0, offset::vars_block, "block_pos"));
+          b().CreateConstGEP2_32(vars_, 0, offset::StackVariables::block, "block_pos"));
     }
 
     void visit_push_self() {
       Instruction* val = get_self();
 
-      info().self_type.associate(ls_, val);
+      info().self_type.associate(ctx_, val);
 
       stack_push(val);
     }
@@ -1279,7 +1309,7 @@ namespace rubinius {
       allow_private_ = true;
     }
 
-    void novisit_set_call_flags(opcode flag) {
+    void visit_set_call_flags(opcode flag) {
       call_flags_ = flag;
     }
 
@@ -1296,69 +1326,147 @@ namespace rubinius {
       }
 
       jbb = current_jbb_->exception_handler;
-      Value* unwinds = info().unwind_info();
 
-      for(int slice = (count - 1) * 3; slice >= 0; slice -= 3) {
-        /*
-        std::cout << "unwind: " << jbb->start_ip
-                  << " sp: " << jbb->sp
-                  << " type: " << jbb->exception_type
-                  << "\n";
-        */
+      Signature sig(ctx_, ctx_->VoidTy);
 
-        b().CreateStore(
-            cint(jbb->start_ip),
-            b().CreateConstGEP1_32(unwinds, slice, "unwind_ip"));
-        b().CreateStore(
-            cint(jbb->sp),
-            b().CreateConstGEP1_32(unwinds, slice + 1, "unwind_sp"));
-        b().CreateStore(
-            cint(jbb->exception_type),
-            b().CreateConstGEP1_32(unwinds, slice + 2, "unwind_type"));
+      sig << "State";
+      sig << ctx_->Int32Ty;
+      sig << ctx_->Int32Ty;
+      sig << ctx_->Int32Ty;
+      sig << ctx_->Int32Ty;
 
+      for(int i = count - 1; i >= 0; --i) {
+        Value* call_args[] = {
+          state_,
+          cint(i),
+          cint(jbb->start_ip),
+          cint(jbb->sp),
+          cint(jbb->exception_type)
+        };
+        sig.call("rbx_setup_unwind", call_args, 5, "", b());
         jbb = jbb->exception_handler;
       }
 
       return count;
     }
 
-    void emit_uncommon() {
-      emit_delayed_create_block(true);
+    void emit_uncommon(bool force_deoptimization = false) {
+      emit_delayed_create_block();
+
+      if(current_block_) {
+        Signature sig(ctx_, ObjType);
+        sig << StateTy;
+        sig << CallFrameTy;
+        sig << ctx_->Int32Ty;
+
+        Value* call_args[] = {
+          state_,
+          call_frame_,
+          cint(current_block_->which())
+        };
+
+        Value* blk = sig.call("rbx_create_block", call_args, 3,
+            "delayed_create_block", b());
+
+        b().CreateStore(
+            blk,
+            current_block_->stack_ptr());
+      }
 
       Value* sp = last_sp_as_int();
 
       flush();
 
-      Signature sig(ls_, "Object");
+      Signature sig(ctx_, "Object");
 
-      sig << "VM";
+      sig << "State";
       sig << "CallFrame";
-      sig << ls_->Int32Ty;
-      sig << ls_->IntPtrTy;
+      sig << ctx_->Int32Ty;
+      sig << ctx_->IntPtrTy;
       sig << "CallFrame";
-      sig << ls_->VoidPtrTy;
-      sig << ls_->Int32Ty;
-      sig << llvm::PointerType::getUnqual(ls_->Int32Ty);
+      sig << "CallFrame";
+      sig << ctx_->VoidPtrTy;
+      sig << ctx_->Int32Ty;
+      sig << ctx_->Int8Ty;
 
       int unwinds = emit_unwinds();
 
-      Value* root_callframe = info().top_parent_call_frame();
+      Value* root_callframe    = info().top_parent_call_frame();
+      Value* creator_callframe = info().creator_call_frame();
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
         cint(current_ip_),
         sp,
         root_callframe,
-        constant(info().context().runtime_data_holder(), ls_->VoidPtrTy),
+        creator_callframe,
+        constant(ctx_->runtime_data_holder(), ctx_->VoidPtrTy),
         cint(unwinds),
-        info().unwind_info()
+        llvm::ConstantInt::get(ctx_->Int8Ty, force_deoptimization)
       };
 
-      Value* call = sig.call("rbx_continue_uncommon", call_args, 8, "", b());
+      Value* call = sig.call("rbx_continue_uncommon", call_args, 9, "", b());
 
       info().add_return_value(call, current_block());
       b().CreateBr(info().return_pad());
+    }
+
+    void emit_respond_to(RespondToCache* cache, opcode& which, opcode args) {
+      BasicBlock* cont = new_block("check_class_respond_to");
+      BasicBlock* success = new_block("success");
+      BasicBlock* failure = new_block("use_call");
+
+      Value* responds = NULL;
+
+      if(args >= 1 && args <= 2) {
+        Value* msg  = stack_back(0);
+        Value* recv = stack_back(1);
+        Value* priv = constant(cFalse, ObjType);
+        if(args == 2) {
+          priv = stack_back(1);
+          recv = stack_back(2);
+        }
+
+        Class* klass = cache->receiver_class();
+        check_class(recv, klass,
+                          cache->receiver_class_id(),
+                          cache->receiver_serial_id(),
+                          failure,
+                          failure);
+
+        Value* msg_match  = b().CreateICmp(ICmpInst::ICMP_EQ, msg, constant(cache->message()), "check_message");
+        Value* priv_match = b().CreateICmp(ICmpInst::ICMP_EQ, priv, constant(cache->visibility()), "check_visibility");
+        Value* both_match = create_and(msg_match, priv_match, "both_match");
+
+        create_conditional_branch(success, failure, both_match);
+        set_block(success);
+
+        responds = constant(cache->responds());
+        create_branch(cont);
+      } else {
+        create_branch(failure);
+      }
+
+      set_block(failure);
+
+      Value* ret = inline_call_site_execute(args, which);
+      check_for_exception(ret);
+      failure = current_block();
+
+      create_branch(cont);
+      set_block(cont);
+
+      stack_remove(args + 1);
+
+      if(responds) {
+        PHINode* phi = b().CreatePHI(ObjType, 2, "object_class");
+        phi->addIncoming(responds, success);
+        phi->addIncoming(ret, failure);
+        stack_push(phi);
+      } else {
+        stack_push(ret);
+      }
     }
 
     void visit_invoke_primitive(opcode which, opcode args) {
@@ -1371,10 +1479,10 @@ namespace rubinius {
       if(invoker == invoke_object_class && args == 1) {
         Value* obj = stack_back(0);
 
-        type::KnownType kt = type::KnownType::extract(state(), obj);
-        if(kt.instance_p()) {
-          if(state()->config().jit_inline_debug) {
-            context().inline_log("inlining") << "direct class of reference\n";
+        type::KnownType kt = type::KnownType::extract(ctx_, obj);
+        if(kt.instance_p() && !kt.singleton_instance_p()) {
+          if(llvm_state()->config().jit_inline_debug) {
+            ctx_->inline_log("inlining") << "direct class of reference\n";
           }
 
           stack_remove(1);
@@ -1384,8 +1492,8 @@ namespace rubinius {
           return;
         }
 
-        if(state()->config().jit_inline_debug) {
-          context().inline_log("inlining") << "custom object_class invoker\n";
+        if(llvm_state()->config().jit_inline_debug) {
+          ctx_->inline_log("inlining") << "custom object_class invoker\n";
         }
 
         Value* is_ref = check_is_reference(obj);
@@ -1413,21 +1521,21 @@ namespace rubinius {
         failure->moveAfter(inline_body);
       }
 
-      Signature sig(ls_, "Object");
-      sig << "VM";
+      Signature sig(ctx_, "Object");
+      sig << "State";
       sig << "CallFrame";
       sig << ObjArrayTy;
-      sig << ls_->Int32Ty;
+      sig << ctx_->Int32Ty;
 
       Value* arg_ary = stack_objects(args);
 
-      Value* call_args[] = { vm_, call_frame_, arg_ary, cint(args) };
+      Value* call_args[] = { state_, call_frame_, arg_ary, cint(args) };
 
       Value* ptr = b().CreateIntToPtr(
           clong(reinterpret_cast<uintptr_t>(invoker)),
           llvm::PointerType::getUnqual(sig.type()));
 
-      Value* call = b().CreateCall(ptr, call_args, call_args + 4, "invoked_prim");
+      Value* call = b().CreateCall(ptr, call_args, "invoked_prim");
       stack_remove(args);
 
       check_for_exception(call);
@@ -1439,7 +1547,7 @@ namespace rubinius {
 
         set_block(fin);
 
-        PHINode* phi = b().CreatePHI(ObjType, "object_class");
+        PHINode* phi = b().CreatePHI(ObjType, 2, "object_class");
         phi->addIncoming(inline_klass, inline_body);
         phi->addIncoming(call, cur);
 
@@ -1449,10 +1557,10 @@ namespace rubinius {
       }
     }
 
-    void invoke_inline_cache(InlineCache* cache, opcode args) {
+    void invoke_call_site(opcode& call_site, opcode args) {
       set_has_side_effects();
 
-      Value* ret = inline_cache_send(args, cache);
+      Value* ret = inline_call_site_execute(args, call_site);
       stack_remove(args + 1);
       check_for_exception(ret);
       stack_push(ret);
@@ -1460,69 +1568,117 @@ namespace rubinius {
       allow_private_ = false;
     }
 
-    void visit_send_stack(opcode which, opcode args) {
-      InlineCache* cache = reinterpret_cast<InlineCache*>(which);
+    void visit_send_stack(opcode& which, opcode args) {
+      CallSite** call_site_ptr = reinterpret_cast<CallSite**>(&which);
+      CallSite*  call_site = *call_site_ptr;
 
-      MethodCacheEntry* mce = cache->cache();
-      atomic::memory_barrier();
+      if(RespondToCache* respond_to = try_as<RespondToCache>(call_site)) {
+        emit_respond_to(respond_to, which, args);
+        return;
+      }
 
-      if(mce) {
-        BasicBlock* failure = new_block("fallback");
-        BasicBlock* cont = new_block("continue");
+      if(!call_site->regular_call()) {
+        invoke_call_site(which, args);
+        return;
+      }
 
-        Inliner inl(context(), *this, cache, args, failure);
-        if(inl.consider()) {
-          if(!inl.fail_to_send() && !in_inlined_block()) {
-            BasicBlock* cur = b().GetInsertBlock();
+      BasicBlock* class_failure = new_block("class_fallback");
+      BasicBlock* serial_failure = new_block("serial_fallback");
+      BasicBlock* cont = new_block("continue");
 
-            set_block(failure);
-            emit_uncommon();
+      Inliner inl(ctx_, *this, call_site_ptr, args, class_failure, serial_failure);
 
-            set_block(cur);
-            stack_remove(args+1);
-            if(inl.check_for_exception()) {
-              check_for_exception(inl.result());
-            }
-            stack_push(inl.result());
+      MonoInlineCache* mono = try_as<MonoInlineCache>(call_site);
+      PolyInlineCache* poly = try_as<PolyInlineCache>(call_site);
 
-            type::KnownType kt = inl.guarded_type();
+      bool res = false;
+      if(mono) {
+        res = inl.consider_mono();
+      } else if(poly) {
+        res = inl.consider_poly();
+      }
 
-            if(kt.local_source_p() && kt.known_p()) {
-              current_jbb_->add_local(kt.local_id(), kt);
-            }
+      // If we have tried to reoptimize here a few times and failed, we use
+      // a regular send as the fallback so we don't try to keep reoptimizing in
+      // the future.
+      if(poly && poly->seen_classes_overflow() > llvm_state()->shared().config.jit_deoptimize_overflow_threshold) {
+        inl.use_send_for_failure();
+      }
 
-            b().CreateBr(cont);
+      if(!res) {
+        invoke_call_site(which, args);
+        return;
+      }
 
-            set_block(cont);
-          } else {
-            // Emit both the inlined code and a send for it
-            BasicBlock* inline_block = b().GetInsertBlock();
+      BasicBlock* cur = b().GetInsertBlock();
 
-            b().CreateBr(cont);
+      if(!inl.fail_to_send() && !in_inlined_block()) {
 
-            set_block(failure);
-            Value* send_res = inline_cache_send(args, cache);
-            b().CreateBr(cont);
+        set_block(class_failure);
+        emit_uncommon();
 
-            set_block(cont);
-            PHINode* phi = b().CreatePHI(ObjType, "send_result");
-            phi->addIncoming(inl.result(), inline_block);
-            phi->addIncoming(send_res, failure);
+        set_block(serial_failure);
+        emit_uncommon(true);
 
-            stack_remove(args + 1);
-            check_for_exception(phi);
-
-            stack_push(phi);
-          }
-
-          allow_private_ = false;
-          return;
+        set_block(cur);
+        stack_remove(args+1);
+        if(inl.check_for_exception()) {
+          check_for_exception(inl.result());
         }
+        stack_push(inl.result());
+
+        if(mono) {
+          type::KnownType kt = inl.guarded_type();
+
+          if(kt.local_source_p() && kt.known_p()) {
+            current_jbb_->add_local(kt.local_id(), kt);
+          }
+        }
+
+        b().CreateBr(cont);
+
+        set_block(cont);
+
+      } else {
+        set_block(serial_failure);
+        emit_uncommon(true);
+
+        set_block(cur);
+
+        // Emit both the inlined code and a send for it
+        if(inl.check_for_exception()) {
+          check_for_exception(inl.result());
+        }
+        BasicBlock* inline_block = b().GetInsertBlock();
+        b().CreateBr(cont);
+
+        set_block(class_failure);
+        Value* send_res = inline_call_site_execute(args, which);
+
+        BasicBlock* send_block =
+          check_for_exception_then(send_res, cont);
+
+        set_block(cont);
+        PHINode* phi = b().CreatePHI(ObjType, 2, "send_result");
+        phi->addIncoming(inl.result(), inline_block);
+        phi->addIncoming(send_res, send_block);
+
+        stack_remove(args + 1);
+
+        stack_push(phi);
+      }
+
+      allow_private_ = false;
+    }
+
+    void visit_call_custom(opcode& which, opcode args) {
+      if(llvm_state()->config().jit_inline_debug) {
+        ctx_->log() << "generate: call_custom\n";
       }
 
       set_has_side_effects();
 
-      Value* ret = inline_cache_send(args, cache);
+      Value* ret = inline_call_site_execute(args, which);
       stack_remove(args + 1);
       check_for_exception(ret);
       stack_push(ret);
@@ -1530,24 +1686,7 @@ namespace rubinius {
       allow_private_ = false;
     }
 
-    void visit_call_custom(opcode which, opcode args) {
-      if(state()->config().jit_inline_debug) {
-        ls_->log() << "generate: call_custom\n";
-      }
-
-      InlineCache* cache = reinterpret_cast<InlineCache*>(which);
-
-      set_has_side_effects();
-
-      Value* ret = inline_cache_send(args, cache);
-      stack_remove(args + 1);
-      check_for_exception(ret);
-      stack_push(ret);
-
-      allow_private_ = false;
-    }
-
-    void visit_send_method(opcode which) {
+    void visit_send_method(opcode& which) {
       visit_send_stack(which, 0);
     }
 
@@ -1555,7 +1694,7 @@ namespace rubinius {
       return for_inlined_method() && info().is_block;
     }
 
-    void emit_delayed_create_block(bool always=false) {
+    void emit_delayed_create_block() {
       std::list<JITMethodInfo*> in_scope;
       JITMethodInfo* nfo = &info();
 
@@ -1570,17 +1709,17 @@ namespace rubinius {
         nfo = *i;
 
         JITInlineBlock* ib = nfo->inline_block();
-        if(ib && ib->code() && (always || !ib->created_object_p())) {
+        if(ib && ib->machine_code()) {
           JITMethodInfo* creator = ib->creation_scope();
           assert(creator);
 
-          Signature sig(ls_, ObjType);
-          sig << VMTy;
+          Signature sig(ctx_, ObjType);
+          sig << StateTy;
           sig << CallFrameTy;
-          sig << ls_->Int32Ty;
+          sig << ctx_->Int32Ty;
 
           Value* call_args[] = {
-            vm_,
+            state_,
             creator->call_frame(),
             cint(ib->which())
           };
@@ -1591,15 +1730,13 @@ namespace rubinius {
           b().CreateStore(
               blk,
               b().CreateConstGEP2_32(nfo->variables(), 0,
-                offset::vars_block),
+                offset::StackVariables::block),
               false);
-
-          if(!always) ib->set_created_object();
         }
       }
     }
 
-    void emit_create_block(opcode which, bool push=false) {
+    void emit_create_block(opcode which) {
       // if we're inside an inlined method that has a block
       // visible, that means that we've note yet emitted the code to
       // actually create the block for this inlined block.
@@ -1613,25 +1750,23 @@ namespace rubinius {
 
       emit_delayed_create_block();
 
-      std::vector<const Type*> types;
-      types.push_back(VMTy);
+      std::vector<Type*> types;
+      types.push_back(StateTy);
 
       // we use stack_set_top here because we always have a placeholder
       // on the stack that we're going to just replace.
 
       if(in_inlined_block()) {
         types.push_back(ObjType);
-        types.push_back(ls_->Int32Ty);
-        types.push_back(ls_->Int32Ty);
+        types.push_back(ctx_->Int32Ty);
 
         FunctionType* ft = FunctionType::get(ObjType, types, true);
         Function* func = cast<Function>(
           module_->getOrInsertFunction("rbx_create_block_multi", ft));
 
         std::vector<Value*> call_args;
-        call_args.push_back(vm_);
+        call_args.push_back(state_);
         call_args.push_back(get_literal(which));
-        call_args.push_back(cint(which));
 
         std::vector<JITMethodInfo*> mis;
 
@@ -1649,81 +1784,72 @@ namespace rubinius {
           call_args.push_back((*i)->call_frame());
         }
 
-        if(push) {
-          stack_push(b().CreateCall(func, call_args.begin(), call_args.end(), "create_block"));
-        } else {
-          stack_set_top(b().CreateCall(func, call_args.begin(), call_args.end(), "create_block"));
-        }
+        stack_set_top(b().CreateCall(func, call_args, "create_block"));
         return;
       };
 
       types.push_back(CallFrameTy);
-      types.push_back(ls_->Int32Ty);
+      types.push_back(ctx_->Int32Ty);
 
       FunctionType* ft = FunctionType::get(ObjType, types, false);
       Function* func = cast<Function>(
           module_->getOrInsertFunction("rbx_create_block", ft));
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
         cint(which)
       };
 
-      if(push) {
-        stack_push(b().CreateCall(func, call_args, call_args+3, "create_block"));
-      } else {
-        stack_set_top(b().CreateCall(func, call_args, call_args+3, "create_block"));
-      }
+      stack_set_top(b().CreateCall(func, call_args, "create_block"));
     }
 
     void visit_create_block(opcode which) {
-      // If we're creating a block to pass directly to
-      // send_stack_with_block, delay doing so.
-      if(next_op() == InstructionSequence::insn_send_stack_with_block) {
-        // Push a placeholder and register which literal we would
-        // use for the block. The later send handles whether to actually
-        // emit the call to create the block (replacing the placeholder)
-        stack_push(constant(Qnil));
-        current_block_ = (int)which;
-      } else {
-        current_block_ = -1;
-        emit_create_block(which, true);
-      }
+      stack_push(constant(cNil));
+      BasicBlock* block_emit = new_block("block_emit");
+      b().CreateBr(block_emit);
+      set_block(block_emit);
+
+      emit_create_block(which);
+
+      BasicBlock* block_continue = new_block("block_continue");
+      b().CreateBr(block_continue);
+      set_block(block_continue);
+
+      CompiledCode* block_code = as<CompiledCode>(literal(which));
+      MachineCode* code = block_code->machine_code();
+
+      current_block_ = new JITInlineBlock(ctx_, block_code, code, &info(), which, stack_ptr());
+      current_block_->set_block_emit_loc(block_emit);
     }
 
-    void visit_send_stack_with_block(opcode which, opcode args) {
+    void visit_send_stack_with_block(opcode& which, opcode args) {
       set_has_side_effects();
 
-      bool has_literal_block = (current_block_ >= 0);
-      bool block_on_stack = !has_literal_block;
+      CallSite** call_site_ptr = reinterpret_cast<CallSite**>(&which);
+      CallSite*  call_site = *call_site_ptr;
+      CompiledCode* block_code = 0;
 
-      InlineCache* cache = reinterpret_cast<InlineCache*>(which);
-      CompiledMethod* block_code = 0;
-
-      MethodCacheEntry* mce = cache->cache();
-      atomic::memory_barrier();
-
-      if(mce &&
-          ls_->config().jit_inline_blocks &&
-          !context().inlined_block()) {
-        if(has_literal_block) {
-          block_code = try_as<CompiledMethod>(literal(current_block_));
+      if(call_site->regular_call() &&
+          llvm_state()->config().jit_inline_blocks &&
+         !ctx_->inlined_block()) {
+        if(current_block_) {
+          block_code = current_block_->method();
 
           // Run the policy on the block code here, if we're not going to
           // inline it, don't inline this either.
           InlineOptions opts;
-          if(ls_->config().version >= 19) {
-            opts.inlining_block_19();
-          } else {
+          if(LANGUAGE_18_ENABLED) {
             opts.inlining_block();
+          } else {
+            opts.inlining_block_19();
           }
 
           InlineDecision decision = inline_policy()->inline_p(
-                                      block_code->backend_method(), opts);
+                                      block_code->machine_code(), opts);
           if(decision == cTooComplex) {
-            if(state()->config().jit_inline_debug) {
-              context().inline_log("NOT inlining")
+            if(llvm_state()->config().jit_inline_debug) {
+              ctx_->inline_log("NOT inlining")
                         << "block was too complex\n";
             }
             goto use_send;
@@ -1738,37 +1864,36 @@ namespace rubinius {
         }
 
         // Ok, we decision was cInline, so lets do this!
-        BasicBlock* failure = new_block("fallback");
+        BasicBlock* class_failure = new_block("class_fallback");
+        BasicBlock* serial_failure = new_block("serial_fallback");
+
         BasicBlock* cont = new_block("continue");
         BasicBlock* cleanup = new_block("send_done");
-        PHINode* send_result = b().CreatePHI(ObjType, "send_result");
+        PHINode* send_result = b().CreatePHI(ObjType, 1, "send_result");
 
-        Inliner inl(context(), *this, cache, args, failure);
+        Inliner inl(ctx_, *this, call_site_ptr, args, class_failure, serial_failure);
 
-        VMMethod* code = 0;
-        if(block_code) code = block_code->backend_method();
-        JITInlineBlock block_info(ls_, send_result, cleanup, block_code, code, &info(),
-                                  current_block_);
+        current_block_->set_block_break_result(send_result);
+        current_block_->set_block_break_loc(cleanup);
 
-        inl.set_inline_block(&block_info);
+        inl.set_inline_block(current_block_);
 
         int stack_cleanup = args + 2;
 
         // So that the inliner can find recv and args properly.
         inl.set_block_on_stack();
 
-        if(inl.consider()) {
+        if(inl.consider_mono()) {
           if(!inl.fail_to_send() && !in_inlined_block()) {
             send_result->addIncoming(inl.result(), b().GetInsertBlock());
 
             b().CreateBr(cleanup);
 
-            set_block(failure);
-            if(!block_on_stack) {
-              emit_create_block(current_block_);
-              block_on_stack = true;
-            }
+            set_block(class_failure);
             emit_uncommon();
+
+            set_block(serial_failure);
+            emit_uncommon(true);
 
             set_block(cleanup);
             send_result->removeFromParent();
@@ -1786,26 +1911,33 @@ namespace rubinius {
             b().CreateBr(cont);
 
             set_block(cont);
+
+            current_block_->eraseBlockEmit();
           } else {
             // Emit both the inlined code and a send for it
+
+            if(inl.check_for_exception()) {
+              check_for_exception(inl.result());
+            }
             send_result->addIncoming(inl.result(), b().GetInsertBlock());
 
             b().CreateBr(cleanup);
 
-            set_block(failure);
-            if(!block_on_stack) {
-              emit_create_block(current_block_);
-              block_on_stack = true;
-            }
+            set_block(class_failure);
 
-            Value* send_res = block_send(cache, args, allow_private_);
-            b().CreateBr(cleanup);
+            Value* send_res = block_send(which, args, allow_private_);
+
+            BasicBlock* send_block =
+              check_for_exception_then(send_res, cleanup);
+
+            set_block(serial_failure);
+            emit_uncommon(true);
 
             set_block(cleanup);
             send_result->removeFromParent();
             cleanup->getInstList().push_back(send_result);
 
-            send_result->addIncoming(send_res, failure);
+            send_result->addIncoming(send_res, send_block);
 
             stack_remove(stack_cleanup);
             check_for_exception(send_result);
@@ -1816,7 +1948,7 @@ namespace rubinius {
           allow_private_ = false;
 
           // Clear the current block
-          current_block_ = -1;
+          clear_current_block();
           return;
         }
 
@@ -1826,42 +1958,49 @@ namespace rubinius {
 
 use_send:
 
-      // Detect a literal block being created and passed here.
-      if(!block_on_stack) {
-        emit_create_block(current_block_);
-      }
-
-      Value* ret = block_send(cache, args, allow_private_);
+      Value* ret = block_send(which, args, allow_private_);
       stack_remove(args + 2);
       check_for_return(ret);
       allow_private_ = false;
 
-      // Clear the current block
-      current_block_ = -1;
+      clear_current_block();
     }
 
-    void visit_send_stack_with_splat(opcode which, opcode args) {
+    void visit_send_stack_with_splat(opcode& which, opcode args) {
       set_has_side_effects();
 
-      if(current_block_ >= 0) {
-        emit_create_block(current_block_);
-      }
-
-      InlineCache* cache = reinterpret_cast<InlineCache*>(which);
-      Value* ret = splat_send(cache->name, args, allow_private_);
+      Value* ret = splat_send(which, args, allow_private_);
       stack_remove(args + 3);
       check_for_exception(ret);
       stack_push(ret);
       allow_private_ = false;
 
-      // Clear the current block
-      current_block_ = -1;
+      clear_current_block();
     }
 
     void visit_cast_array() {
-      std::vector<const Type*> types;
+      Value* top = stack_pop();
 
-      types.push_back(VMTy);
+      BasicBlock* cont = new_block("cont");
+      BasicBlock* done = new_block("done");
+      BasicBlock* ref  = new_block("ref");
+      BasicBlock* call = new_block("call");
+
+      Value* is_ref = check_is_reference(top);
+      create_conditional_branch(ref, call, is_ref);
+
+      set_block(ref);
+      Value* is_ary = check_type_bits(top, rubinius::Array::type, "is_ary");
+
+      create_conditional_branch(done, call, is_ary);
+
+      set_block(done);
+      create_branch(cont);
+
+      set_block(call);
+      std::vector<Type*> types;
+
+      types.push_back(StateTy);
       types.push_back(CallFrameTy);
       types.push_back(ObjType);
 
@@ -1870,20 +2009,51 @@ use_send:
           module_->getOrInsertFunction("rbx_cast_array", ft));
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
-        stack_pop()
+        top
       };
 
-      Value* val = b().CreateCall(func, call_args, call_args+3, "cast_array");
+      Value* val = b().CreateCall(func, call_args, "cast_array");
       check_for_exception(val);
-      stack_push(val);
+
+      call = b().GetInsertBlock();
+      create_branch(cont);
+
+      set_block(cont);
+
+      PHINode* phi = b().CreatePHI(ObjType, 2, "result");
+      phi->addIncoming(top, done);
+      phi->addIncoming(val, call);
+
+      stack_push(phi);
     }
 
     void visit_cast_multi_value() {
-      std::vector<const Type*> types;
+      Value* top = stack_pop();
 
-      types.push_back(VMTy);
+      BasicBlock* cont = new_block("cont");
+      BasicBlock* done = new_block("done");
+      BasicBlock* ref  = new_block("ref");
+      BasicBlock* call = new_block("call");
+
+      Value* is_ref = check_is_reference(top);
+      create_conditional_branch(ref, call, is_ref);
+
+      set_block(ref);
+
+      Value* is_ary = check_type_bits(top, rubinius::Array::type, "is_ary");
+
+      create_conditional_branch(done, call, is_ary);
+
+      set_block(done);
+      create_branch(cont);
+
+      set_block(call);
+
+      std::vector<Type*> types;
+
+      types.push_back(StateTy);
       types.push_back(CallFrameTy);
       types.push_back(ObjType);
 
@@ -1892,14 +2062,24 @@ use_send:
           module_->getOrInsertFunction("rbx_cast_multi_value", ft));
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
-        stack_pop()
+        top
       };
 
-      Value* val = b().CreateCall(func, call_args, call_args+3, "cast_multi_value");
+      Value* val = b().CreateCall(func, call_args, "cast_multi_value");
       check_for_exception(val);
-      stack_push(val);
+      call = b().GetInsertBlock();
+      create_branch(cont);
+
+      set_block(cont);
+
+      PHINode* phi = b().CreatePHI(ObjType, 2, "result");
+      phi->addIncoming(top, done);
+      phi->addIncoming(val, call);
+
+      stack_push(phi);
+
     }
 
     void visit_push_block() {
@@ -1914,30 +2094,30 @@ use_send:
         //
         JITInlineBlock* ib = info().inline_block();
 
-        if(ib && ib->code()) {
-          stack_push(constant(Qtrue));
+        if(ib && ib->machine_code()) {
+          stack_push(constant(cTrue));
         } else {
-          stack_push(constant(Qfalse));
+          stack_push(constant(cFalse));
         }
 
         return;
       }
 
-      Value* cmp = b().CreateICmpNE(get_block(), constant(Qnil), "is_nil");
-      Value* imm_value = b().CreateSelect(cmp, constant(Qtrue),
-          constant(Qfalse), "select_bool");
+      Value* cmp = b().CreateICmpNE(get_block(), constant(cNil), "is_nil");
+      Value* imm_value = b().CreateSelect(cmp, constant(cTrue),
+          constant(cFalse), "select_bool");
       stack_push(imm_value);
     }
 
     void visit_push_proc() {
       set_has_side_effects();
 
-      Signature sig(ls_, ObjType);
-      sig << "VM";
+      Signature sig(ctx_, ObjType);
+      sig << "State";
       sig << "CallFrame";
 
       Value* args[] = {
-        vm_,
+        state_,
         call_frame_
       };
 
@@ -1946,56 +2126,72 @@ use_send:
       stack_push(prc);
     }
 
-    void visit_send_super_stack_with_block(opcode which, opcode args) {
+    void visit_push_block_arg() {
+
+      Value* args = b().CreateLoad(
+          b().CreateConstGEP2_32(call_frame_, 0, offset::CallFrame::arguments, "args_pos"),
+          "args");
+
+      stack_push(b().CreateLoad(
+          b().CreateConstGEP2_32(args, 0, offset::Arguments::block, "block_pos"),
+          "block"));
+    }
+
+    void visit_send_super_stack_with_block(opcode& which, opcode args) {
       set_has_side_effects();
 
-      if(current_block_ >= 0) {
-        emit_create_block(current_block_);
+      CallSite* call_site = reinterpret_cast<CallSite*>(which);
+
+      b().CreateStore(get_self(), out_args_recv_);
+      b().CreateStore(constant(call_site->name(), ptr_type("Symbol")), out_args_name_);
+      b().CreateStore(stack_top(), out_args_block_);
+      b().CreateStore(cint(args), out_args_total_);
+      b().CreateStore(Constant::getNullValue(ptr_type("Tuple")),
+                      out_args_container_);
+
+      if(args > 0) {
+        b().CreateStore(stack_objects(args + 1), out_args_arguments_);
       }
 
-      InlineCache* cache = reinterpret_cast<InlineCache*>(which);
-      Value* ret = super_send(cache->name, args);
+      Value* ret = invoke_call_site(which);
       stack_remove(args + 1);
       check_for_return(ret);
 
-      current_block_ = -1;
+      clear_current_block();
     }
 
-    void visit_send_super_stack_with_splat(opcode which, opcode args) {
+    void visit_send_super_stack_with_splat(opcode& which, opcode args) {
       set_has_side_effects();
 
-      if(current_block_ >= 0) {
-        emit_create_block(current_block_);
-      }
-
-      InlineCache* cache = reinterpret_cast<InlineCache*>(which);
-      Value* ret = super_send(cache->name, args, true);
+      Value* ret = super_send(which, args, true);
       stack_remove(args + 2);
       check_for_exception(ret);
       stack_push(ret);
 
-      current_block_ = -1;
+      clear_current_block();
     }
 
-    void visit_zsuper(opcode which) {
+    void visit_zsuper(opcode& which) {
       set_has_side_effects();
 
-      if(current_block_ >= 0) {
-        emit_create_block(current_block_);
-      }
-
-      InlineCache* cache = reinterpret_cast<InlineCache*>(which);
-
-      Signature sig(ls_, ObjType);
-      sig << VMTy;
+      Signature sig(ctx_, ObjType);
+      sig << StateTy;
       sig << CallFrameTy;
+      sig << "CallSite";
       sig << ObjType;
-      sig << ObjType;
+
+      CallSite** call_site_ptr = reinterpret_cast<CallSite**>(&which);
+
+      Value* call_site_ptr_const = b().CreateIntToPtr(
+          clong(reinterpret_cast<uintptr_t>(call_site_ptr)),
+          ptr_type(ptr_type("CallSite")), "cast_to_ptr");
+
+      Value* call_site_const = b().CreateLoad(call_site_ptr_const, "cache_const");
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
-        constant(cache->name),
+        call_site_const,
         stack_top()
       };
 
@@ -2006,13 +2202,13 @@ use_send:
       check_for_exception(ret);
       stack_push(ret);
 
-      current_block_ = -1;
+      clear_current_block();
     }
 
     void visit_add_scope() {
-      std::vector<const Type*> types;
+      std::vector<Type*> types;
 
-      types.push_back(VMTy);
+      types.push_back(StateTy);
       types.push_back(CallFrameTy);
       types.push_back(ObjType);
 
@@ -2021,19 +2217,19 @@ use_send:
           module_->getOrInsertFunction("rbx_add_scope", ft));
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
         stack_pop()
       };
 
-      b().CreateCall(func, call_args, call_args+3);
+      b().CreateCall(func, call_args);
     }
 
     Object* current_literal(opcode which) {
       return info().method()->literals()->at(which);
     }
 
-    void visit_push_const_fast(opcode name, opcode cache) {
+    void visit_push_const_fast(opcode& name) {
       set_has_side_effects();
 
       BasicBlock* cont = 0;
@@ -2041,90 +2237,119 @@ use_send:
       Value* cached_value = 0;
       BasicBlock* cached_block = 0;
 
-      GlobalCacheEntry* entry = try_as<GlobalCacheEntry>(current_literal(cache));
-      if(entry) {
-        assert(entry->pin());
+      ConstantCache** constant_cache_ptr = reinterpret_cast<ConstantCache**>(&name);
+      ConstantCache* constant_cache = *constant_cache_ptr;
 
-        Value* global_serial = b().CreateLoad(global_serial_pos, "global_serial");
+      Value* global_serial = b().CreateLoad(global_serial_pos, "global_serial");
 
-        Value* current_serial_pos = b().CreateIntToPtr(
-            clong((intptr_t)entry->serial_location()),
-            llvm::PointerType::getUnqual(ls_->IntPtrTy), "cast_to_intptr");
 
-        Value* current_serial = b().CreateLoad(current_serial_pos, "serial");
+      Value* cache_ptr = b().CreateIntToPtr(
+        ConstantInt::get(context()->IntPtrTy, (reinterpret_cast<uintptr_t>(constant_cache_ptr))),
+        ptr_type(ptr_type("ConstantCache")), "cast_to_ptr");
 
-        Value* cmp = b().CreateICmpEQ(global_serial, current_serial, "use_cache");
+      Value* cache = b().CreateLoad(cache_ptr, "constant_cache");
 
-        BasicBlock* use_cache = new_block("use_cache");
-        BasicBlock* use_call  = new_block("use_call");
-        cont =      new_block("continue");
+      Value* constant_scope_pos_idx[] = {
+        context()->cint(0),
+        context()->cint(offset::ConstantCache::scope),
+      };
 
-        b().CreateCondBr(cmp, use_cache, use_call);
+      Value* constant_scope_pos = b().CreateGEP(cache,
+          constant_scope_pos_idx, "constant_cache_pos");
 
-        set_block(use_cache);
+      Value* constant_scope = b().CreateLoad(constant_scope_pos, "constant_scope");
 
-        Value* value_pos = b().CreateIntToPtr(
-            clong((intptr_t)entry->value_location()),
-            llvm::PointerType::getUnqual(ObjType), "cast_to_objptr");
+      Value* frame_scope = b().CreateLoad(
+          b().CreateConstGEP2_32(call_frame_, 0,
+                                 offset::CallFrame::constant_scope, "scope_pos"), "frame_scope");
 
-        cached_value = b().CreateLoad(value_pos, "cached_value");
-        cached_block = b().GetInsertBlock();
+      Value* scope_cmp = b().CreateICmpEQ(constant_scope, frame_scope, "same_scope");
 
-        b().CreateBr(cont);
+      BasicBlock* check_serial = new_block("check_serial");
+      BasicBlock* use_cache = new_block("use_cache");
+      BasicBlock* use_call  = new_block("use_call");
+      cont =      new_block("continue");
 
-        set_block(use_call);
-      }
+      b().CreateCondBr(scope_cmp, check_serial, use_call);
 
-      std::vector<const Type*> types;
+      set_block(check_serial);
 
-      types.push_back(VMTy);
+      Value* serial_pos_idx[] = {
+        context()->cint(0),
+        context()->cint(offset::ConstantCache::serial),
+      };
+
+      Value* serial_pos = b().CreateGEP(cache,
+          serial_pos_idx, "serial_pos");
+
+      Value* current_serial = b().CreateLoad(serial_pos, "serial");
+
+      Value* cmp = b().CreateICmpEQ(global_serial, current_serial, "use_cache");
+
+
+      b().CreateCondBr(cmp, use_cache, use_call);
+
+      set_block(use_cache);
+
+      Value* value_pos_idx[] = {
+        context()->cint(0),
+        context()->cint(offset::ConstantCache::value),
+      };
+
+      Value* value_pos = b().CreateGEP(cache,
+          value_pos_idx, "value_pos");
+
+      cached_value = b().CreateLoad(value_pos, "cached_value");
+      cached_block = b().GetInsertBlock();
+
+      b().CreateBr(cont);
+
+      set_block(use_call);
+
+      std::vector<Type*> types;
+
+      types.push_back(StateTy);
       types.push_back(CallFrameTy);
-      types.push_back(ObjType);
-      types.push_back(ls_->Int32Ty);
+      types.push_back(ptr_type(ptr_type("ConstantCache")));
 
       FunctionType* ft = FunctionType::get(ObjType, types, false);
       Function* func = cast<Function>(
           module_->getOrInsertFunction("rbx_push_const_fast", ft));
 
-      func->setOnlyReadsMemory(true);
-      func->setDoesNotThrow(true);
+      func->setOnlyReadsMemory();
+      func->setDoesNotThrow();
 
       flush();
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
-        constant(as<Symbol>(literal(name))),
-        cint(cache)
+        constant(constant_cache_ptr, ptr_type(ptr_type("ConstantCache")))
       };
 
-      CallInst* ret = b().CreateCall(func, call_args, call_args+4,
+      CallInst* ret = b().CreateCall(func, call_args,
                                        "push_const_fast");
 
-      ret->setOnlyReadsMemory(true);
-      ret->setDoesNotThrow(true);
+      ret->setOnlyReadsMemory();
+      ret->setDoesNotThrow();
 
       check_for_exception(ret);
 
-      if(entry) {
-        BasicBlock* ret_block = b().GetInsertBlock();
-        b().CreateBr(cont);
-        set_block(cont);
+      BasicBlock* ret_block = b().GetInsertBlock();
+      b().CreateBr(cont);
+      set_block(cont);
 
-        PHINode* phi = b().CreatePHI(ObjType, "constant");
-        phi->addIncoming(cached_value, cached_block);
-        phi->addIncoming(ret, ret_block);
+      PHINode* phi = b().CreatePHI(ObjType, 2, "constant");
+      phi->addIncoming(cached_value, cached_block);
+      phi->addIncoming(ret, ret_block);
 
-        stack_push(phi);
-      } else {
-        stack_push(ret);
-      }
+      stack_push(phi, type::KnownType::constant_cache(constant_cache));
     }
 
     void visit_push_const(opcode name) {
-      std::vector<const Type*> types;
+      std::vector<Type*> types;
 
-      types.push_back(VMTy);
+      types.push_back(StateTy);
       types.push_back(CallFrameTy);
       types.push_back(ObjType);
 
@@ -2135,12 +2360,15 @@ use_send:
       flush();
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
         constant(as<Symbol>(literal(name)))
       };
 
-      Value* ret = b().CreateCall(func, call_args, call_args+3, "push_const_fast");
+      CallInst* ret = b().CreateCall(func, call_args, "push_const");
+      ret->setOnlyReadsMemory();
+      ret->setDoesNotThrow();
+
       check_for_exception(ret);
       stack_push(ret);
     }
@@ -2148,9 +2376,9 @@ use_send:
     void visit_set_const(opcode name) {
       set_has_side_effects();
 
-      std::vector<const Type*> types;
+      std::vector<Type*> types;
 
-      types.push_back(VMTy);
+      types.push_back(StateTy);
       types.push_back(CallFrameTy);
       types.push_back(ObjType);
       types.push_back(ObjType);
@@ -2160,21 +2388,21 @@ use_send:
           module_->getOrInsertFunction("rbx_set_const", ft));
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
         constant(as<Symbol>(literal(name))),
         stack_top()
       };
 
-      b().CreateCall(func, call_args, call_args+4);
+      b().CreateCall(func, call_args);
     }
 
     void visit_set_const_at(opcode name) {
       set_has_side_effects();
 
-      std::vector<const Type*> types;
+      std::vector<Type*> types;
 
-      types.push_back(VMTy);
+      types.push_back(StateTy);
       types.push_back(ObjType);
       types.push_back(ObjType);
 
@@ -2184,13 +2412,13 @@ use_send:
 
       Value* val = stack_pop();
       Value* call_args[] = {
-        vm_,
+        state_,
         constant(as<Symbol>(literal(name))),
         stack_top(),
         val
       };
 
-      b().CreateCall(func, call_args, call_args+4);
+      b().CreateCall(func, call_args);
 
       stack_push(val);
     }
@@ -2198,11 +2426,11 @@ use_send:
     void visit_set_literal(opcode which) {
       set_has_side_effects();
 
-      std::vector<const Type*> types;
+      std::vector<Type*> types;
 
-      types.push_back(VMTy);
+      types.push_back(StateTy);
       types.push_back(CallFrameTy);
-      types.push_back(ls_->Int32Ty);
+      types.push_back(ctx_->Int32Ty);
       types.push_back(ObjType);
 
       FunctionType* ft = FunctionType::get(ObjType, types, false);
@@ -2210,24 +2438,24 @@ use_send:
           module_->getOrInsertFunction("rbx_set_literal", ft));
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
         cint(which),
         stack_top()
       };
 
-      b().CreateCall(func, call_args, call_args+4);
+      b().CreateCall(func, call_args);
     }
 
     void visit_push_variables() {
       set_has_side_effects();
 
-      Signature sig(ls_, ObjType);
-      sig << "VM";
+      Signature sig(ctx_, ObjType);
+      sig << "State";
       sig << "CallFrame";
 
       Value* args[] = {
-        vm_,
+        state_,
         call_frame_
       };
 
@@ -2235,31 +2463,12 @@ use_send:
     }
 
     void visit_push_scope() {
-      if(info().is_block && !in_inlined_block()) {
-        Value* scope = b().CreateLoad(
-            b().CreateConstGEP2_32(call_frame_, 0,
-                                   offset::CallFrame::static_scope, "scope_pos"),
-            "cm");
+      Value* scope = b().CreateLoad(
+          b().CreateConstGEP2_32(call_frame_, 0,
+                                 offset::CallFrame::constant_scope, "scope_pos"),
+          "constant_scope");
 
-        stack_push(scope);
-      } else {
-        Value* cm;
-
-        if(in_inlined_block()) {
-          JITMethodInfo* creator = info().creator_info();
-          assert(creator);
-          cm = b().CreateLoad(
-              b().CreateConstGEP2_32(creator->call_frame(), 0, offset::CallFrame::cm, "cm_pos"),
-              "cm");
-        } else {
-          cm = b().CreateLoad(
-              b().CreateConstGEP2_32(call_frame_, 0, offset::CallFrame::cm, "cm_pos"),
-              "cm");
-        }
-
-        Value* gep = b().CreateConstGEP2_32(cm, 0, offset::CompiledMethod::scope, "scope_pos");
-        stack_push(b().CreateLoad(gep, "scope"));
-      }
+      stack_push(scope);
     }
 
     void visit_cast_for_single_block_arg() {
@@ -2267,22 +2476,22 @@ use_send:
       if(inline_args) {
         switch(inline_args->size()) {
         case 0:
-          stack_push(constant(Qnil));
+          stack_push(constant(cNil));
           break;
         case 1:
           stack_push(inline_args->at(0));
           break;
         default: {
-          std::vector<const Type*> types;
-          types.push_back(ls_->ptr_type("VM"));
-          types.push_back(ls_->Int32Ty);
+          std::vector<Type*> types;
+          types.push_back(ctx_->ptr_type("State"));
+          types.push_back(ctx_->Int32Ty);
 
-          FunctionType* ft = FunctionType::get(ls_->ptr_type("Object"), types, true);
+          FunctionType* ft = FunctionType::get(ctx_->ptr_type("Object"), types, true);
           Function* func = cast<Function>(
-              ls_->module()->getOrInsertFunction("rbx_create_array", ft));
+              ctx_->module()->getOrInsertFunction("rbx_create_array", ft));
 
           std::vector<Value*> outgoing_args;
-          outgoing_args.push_back(vm());
+          outgoing_args.push_back(state_);
           outgoing_args.push_back(cint(inline_args->size()));
 
           for(size_t i = 0; i < inline_args->size(); i++) {
@@ -2290,14 +2499,14 @@ use_send:
           }
 
           Value* ary =
-            b().CreateCall(func, outgoing_args.begin(), outgoing_args.end(), "ary");
+            b().CreateCall(func, outgoing_args, "ary");
           stack_push(ary);
          }
         }
       } else {
-        std::vector<const Type*> types;
+        std::vector<Type*> types;
 
-        types.push_back(VMTy);
+        types.push_back(StateTy);
         types.push_back(ptr_type("Arguments"));
 
         FunctionType* ft = FunctionType::get(ObjType, types, false);
@@ -2305,11 +2514,11 @@ use_send:
             module_->getOrInsertFunction("rbx_cast_for_single_block_arg", ft));
 
         Value* call_args[] = {
-          vm_,
+          state_,
           args_
         };
 
-        stack_push(b().CreateCall(func, call_args, call_args+2, "cfsba"));
+        stack_push(b().CreateCall(func, call_args, "cfsba"));
       }
     }
 
@@ -2317,17 +2526,17 @@ use_send:
       JITStackArgs* inline_args = incoming_args();
       if(inline_args) {
         if(inline_args->size() == 1) {
-          std::vector<const Type*> types;
-          types.push_back(ls_->ptr_type("VM"));
+          std::vector<Type*> types;
+          types.push_back(ctx_->ptr_type("State"));
           types.push_back(CallFrameTy);
-          types.push_back(ls_->Int32Ty);
+          types.push_back(ctx_->Int32Ty);
 
-          FunctionType* ft = FunctionType::get(ls_->ptr_type("Object"), types, true);
+          FunctionType* ft = FunctionType::get(ctx_->ptr_type("Object"), types, true);
           Function* func = cast<Function>(
-              ls_->module()->getOrInsertFunction("rbx_cast_for_multi_block_arg_varargs", ft));
+              ctx_->module()->getOrInsertFunction("rbx_cast_for_multi_block_arg_varargs", ft));
 
           std::vector<Value*> outgoing_args;
-          outgoing_args.push_back(vm());
+          outgoing_args.push_back(state_);
           outgoing_args.push_back(call_frame_);
           outgoing_args.push_back(cint(inline_args->size()));
 
@@ -2336,21 +2545,21 @@ use_send:
           }
 
           Value* ary =
-            b().CreateCall(func, outgoing_args.begin(), outgoing_args.end(), "ary");
+            b().CreateCall(func, outgoing_args, "ary");
           check_for_exception(ary);
           stack_push(ary);
         } else {
-          stack_push(constant(Qundef)); // holder
+          stack_push(constant(cUndef)); // holder
           set_hint(cHintLazyBlockArgs);
         }
       } else {
-        Signature sig(ls_, ObjType);
-        sig << VMTy;
+        Signature sig(ctx_, ObjType);
+        sig << StateTy;
         sig << CallFrameTy;
         sig << ptr_type("Arguments");
 
         Value* call_args[] = {
-          vm_,
+          state_,
           call_frame_,
           args_
         };
@@ -2368,16 +2577,16 @@ use_send:
         // If the arguments came from an unboxed array, we have to put them
         // back in the array before splatting them.
         if(inline_args->from_unboxed_array()) {
-          std::vector<const Type*> types;
-          types.push_back(ls_->ptr_type("VM"));
-          types.push_back(ls_->Int32Ty);
+          std::vector<Type*> types;
+          types.push_back(ctx_->ptr_type("State"));
+          types.push_back(ctx_->Int32Ty);
 
-          FunctionType* ft = FunctionType::get(ls_->ptr_type("Object"), types, true);
+          FunctionType* ft = FunctionType::get(ctx_->ptr_type("Object"), types, true);
           Function* func = cast<Function>(
-              ls_->module()->getOrInsertFunction("rbx_create_array", ft));
+              ctx_->module()->getOrInsertFunction("rbx_create_array", ft));
 
           std::vector<Value*> outgoing_args;
-          outgoing_args.push_back(vm());
+          outgoing_args.push_back(state_);
           outgoing_args.push_back(cint(inline_args->size()));
 
           for(size_t i = 0; i < inline_args->size(); i++) {
@@ -2385,28 +2594,28 @@ use_send:
           }
 
           Value* ary =
-            b().CreateCall(func, outgoing_args.begin(), outgoing_args.end(), "ary");
+            b().CreateCall(func, outgoing_args, "ary");
 
           Value* outargs2[] = {
-            vm(),
+            state_,
             cint(1),
             ary
           };
 
-          Value* wrapped = b().CreateCall(func, outargs2, outargs2 + 3, "splat_ary");
+          Value* wrapped = b().CreateCall(func, outargs2, "splat_ary");
           stack_push(wrapped);
         } else {
-          std::vector<const Type*> types;
-          types.push_back(ls_->ptr_type("VM"));
+          std::vector<Type*> types;
+          types.push_back(ctx_->ptr_type("State"));
           types.push_back(CallFrameTy);
-          types.push_back(ls_->Int32Ty);
+          types.push_back(ctx_->Int32Ty);
 
-          FunctionType* ft = FunctionType::get(ls_->ptr_type("Object"), types, true);
+          FunctionType* ft = FunctionType::get(ctx_->ptr_type("Object"), types, true);
           Function* func = cast<Function>(
-              ls_->module()->getOrInsertFunction("rbx_cast_for_splat_block_arg_varargs", ft));
+              ctx_->module()->getOrInsertFunction("rbx_cast_for_splat_block_arg_varargs", ft));
 
           std::vector<Value*> outgoing_args;
-          outgoing_args.push_back(vm());
+          outgoing_args.push_back(state_);
           outgoing_args.push_back(call_frame_);
           outgoing_args.push_back(cint(inline_args->size()));
 
@@ -2415,18 +2624,18 @@ use_send:
           }
 
           Value* ary =
-            b().CreateCall(func, outgoing_args.begin(), outgoing_args.end(), "ary");
+            b().CreateCall(func, outgoing_args, "ary");
           check_for_exception(ary);
           stack_push(ary);
         }
       } else {
-        Signature sig(ls_, ObjType);
-        sig << VMTy;
+        Signature sig(ctx_, ObjType);
+        sig << StateTy;
         sig << CallFrameTy;
         sig << ptr_type("Arguments");
 
         Value* call_args[] = {
-          vm_,
+          state_,
           call_frame_,
           args_
         };
@@ -2464,22 +2673,22 @@ use_send:
           /*
           Value* idx[] = {
             cint(0),
-            cint(offset::vars_parent)
+            cint(offset::StackVariables::parent)
           };
 
           Value* varscope = b().CreateLoad(
-              b().CreateGEP(vars_, idx, idx+2), "scope.parent");
+              b().CreateGEP(vars_, idx), "scope.parent");
           */
 
-          Signature sig(ls_, ObjType);
-          sig << VMTy;
+          Signature sig(ctx_, ObjType);
+          sig << StateTy;
           sig << "CallFrame";
           sig << ObjType;
-          sig << ls_->Int32Ty;
-          sig << ls_->Int32Ty;
+          sig << ctx_->Int32Ty;
+          sig << ctx_->Int32Ty;
 
           Value* call_args[] = {
-            vm_,
+            state_,
             nfo->call_frame(),
             stack_top(),
             cint(depth),
@@ -2500,10 +2709,10 @@ use_send:
       else if(depth == 1) {
         Value* idx[] = {
           cint(0),
-          cint(offset::vars_parent)
+          cint(offset::StackVariables::parent)
         };
 
-        Value* gep = b().CreateGEP(vars_, idx, idx+2, "parent_pos");
+        Value* gep = b().CreateGEP(vars_, idx, "parent_pos");
 
         Value* parent = b().CreateLoad(gep, "scope.parent");
         set_scope_local(parent, index);
@@ -2513,27 +2722,27 @@ use_send:
 
       // Handle depth > 1
 
-      std::vector<const Type*> types;
+      std::vector<Type*> types;
 
-      types.push_back(VMTy);
+      types.push_back(StateTy);
       types.push_back(CallFrameTy);
       types.push_back(ObjType);
-      types.push_back(ls_->Int32Ty);
-      types.push_back(ls_->Int32Ty);
+      types.push_back(ctx_->Int32Ty);
+      types.push_back(ctx_->Int32Ty);
 
       FunctionType* ft = FunctionType::get(ObjType, types, false);
       Function* func = cast<Function>(
           module_->getOrInsertFunction("rbx_set_local_depth", ft));
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
         stack_pop(),
         cint(depth),
         cint(index)
       };
 
-      Value* val = b().CreateCall(func, call_args, call_args+5, "sld");
+      Value* val = b().CreateCall(func, call_args, "sld");
       check_for_exception(val);
       stack_push(val);
     }
@@ -2576,21 +2785,21 @@ use_send:
           /*
           Value* idx[] = {
             cint(0),
-            cint(offset::vars_parent)
+            cint(offset::StackVariables::parent)
           };
 
           Value* varscope = b().CreateLoad(
-              b().CreateGEP(vars_, idx, idx+2), "scope.parent");
+              b().CreateGEP(vars_, idx), "scope.parent");
               */
 
-          Signature sig(ls_, ObjType);
-          sig << VMTy;
+          Signature sig(ctx_, ObjType);
+          sig << StateTy;
           sig << "CallFrame";
-          sig << ls_->Int32Ty;
-          sig << ls_->Int32Ty;
+          sig << ctx_->Int32Ty;
+          sig << ctx_->Int32Ty;
 
           Value* call_args[] = {
-            vm_,
+            state_,
             nfo->call_frame(),
             cint(depth),
             cint(index)
@@ -2606,45 +2815,25 @@ use_send:
         return;
       }
 
-      if(depth == 0) {
-        visit_push_local(index);
-        return;
-      }
-      /*
-      else if(depth == 1) {
-        Value* idx[] = {
-          cint(0),
-          cint(offset::vars_parent)
-        };
+      std::vector<Type*> types;
 
-        Value* gep = b().CreateGEP(vars_, idx, idx+2, "parent_pos");
-
-        Value* parent = b().CreateLoad(gep, "scope.parent");
-        push_scope_local(parent, index);
-        return;
-      }
-      */
-
-      // Handle depth > 1
-      std::vector<const Type*> types;
-
-      types.push_back(VMTy);
+      types.push_back(StateTy);
       types.push_back(CallFrameTy);
-      types.push_back(ls_->Int32Ty);
-      types.push_back(ls_->Int32Ty);
+      types.push_back(ctx_->Int32Ty);
+      types.push_back(ctx_->Int32Ty);
 
       FunctionType* ft = FunctionType::get(ObjType, types, false);
       Function* func = cast<Function>(
           module_->getOrInsertFunction("rbx_push_local_depth", ft));
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
         cint(depth),
         cint(index)
       };
 
-      Value* val = b().CreateCall(func, call_args, call_args+4, "pld");
+      Value* val = b().CreateCall(func, call_args, "pld");
       check_for_exception(val);
       stack_push(val);
     }
@@ -2659,13 +2848,13 @@ use_send:
     void visit_goto_if_true(opcode ip) {
       Value* cond = stack_pop();
       Value* i = b().CreatePtrToInt(
-          cond, ls_->IntPtrTy, "as_int");
+          cond, ctx_->IntPtrTy, "as_int");
 
       Value* anded = b().CreateAnd(i,
           clong(FALSE_MASK), "and");
 
       Value* cmp = b().CreateICmpNE(anded,
-          clong(cFalse), "is_true");
+          clong(reinterpret_cast<long>(cFalse)), "is_true");
 
       BasicBlock* cont = new_block("continue");
       BasicBlock* bb = block_map_[ip].block;
@@ -2678,13 +2867,13 @@ use_send:
     void visit_goto_if_false(opcode ip) {
       Value* cond = stack_pop();
       Value* i = b().CreatePtrToInt(
-          cond, ls_->IntPtrTy, "as_int");
+          cond, ctx_->IntPtrTy, "as_int");
 
       Value* anded = b().CreateAnd(i,
           clong(FALSE_MASK), "and");
 
       Value* cmp = b().CreateICmpEQ(anded,
-          clong(cFalse), "is_true");
+          clong(reinterpret_cast<long>(cFalse)), "is_true");
 
       BasicBlock* cont = new_block("continue");
       BasicBlock* bb = block_map_[ip].block;
@@ -2695,30 +2884,25 @@ use_send:
     }
 
     void visit_yield_stack(opcode count) {
-      if(skip_yield_stack_) {
-        skip_yield_stack_ = false;
-        return;
-      }
-
       set_has_side_effects();
 
       JITInlineBlock* ib = info().inline_block();
 
       // Hey! Look at that! We know the block we'd be yielding to
       // statically! woo! ok, lets just emit the code for it here!
-      if(ib && ib->code()) {
-        context().set_inlined_block(true);
+      if(ib && ib->machine_code()) {
+        ctx_->set_inlined_block(true);
 
         JITMethodInfo* creator = ib->creation_scope();
         assert(creator);
 
         // Count the block against the policy size total
-        inline_policy()->increase_size(ib->code());
+        inline_policy()->increase_size(ib->machine_code());
 
         // We inline unconditionally here, since we make the decision
         // wrt the block when we are considering inlining the send that
         // has the block on it.
-        Inliner inl(context(), *this, count);
+        Inliner inl(ctx_, *this, count);
 
         // Propagate the creator's inlined block into the inlined block.
         // This is so that if the inlined block yields, it can see the outer
@@ -2746,20 +2930,20 @@ use_send:
         vars = home->variables();
       }
 
-      Signature sig(ls_, ObjType);
+      Signature sig(ctx_, ObjType);
 
-      sig << VMTy;
+      sig << StateTy;
       sig << CallFrameTy;
       sig << "Object";
-      sig << ls_->Int32Ty;
+      sig << ctx_->Int32Ty;
       sig << ObjArrayTy;
 
       Value* block_obj = b().CreateLoad(
-          b().CreateConstGEP2_32(vars, 0, offset::vars_block),
+          b().CreateConstGEP2_32(vars, 0, offset::StackVariables::block),
           "block");
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
         block_obj,
         cint(count),
@@ -2777,20 +2961,20 @@ use_send:
     void visit_yield_splat(opcode count) {
       set_has_side_effects();
 
-      Signature sig(ls_, ObjType);
+      Signature sig(ctx_, ObjType);
 
-      sig << VMTy;
+      sig << StateTy;
       sig << CallFrameTy;
       sig << "Object";
-      sig << ls_->Int32Ty;
+      sig << ctx_->Int32Ty;
       sig << ObjArrayTy;
 
       Value* block_obj = b().CreateLoad(
-          b().CreateConstGEP2_32(vars_, 0, offset::vars_block),
+          b().CreateConstGEP2_32(vars_, 0, offset::StackVariables::block),
           "block");
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
         block_obj,
         cint(count),
@@ -2806,92 +2990,242 @@ use_send:
     }
 
     void visit_check_interrupts() {
-      std::vector<const Type*> types;
 
-      types.push_back(VMTy);
+      BasicBlock* cont = new_block("continue");
+      BasicBlock* interrupts = new_block("interrupts");
+      BasicBlock* done = new_block("done");
+
+      Value* idx_jit[] = {
+        cint(0),
+        cint(offset::State::vm_jit)
+      };
+
+      Value* vm_jit = b().CreateLoad(b().CreateGEP(state_, idx_jit), "vm_jit");
+
+      Value* idx_check[] = {
+        cint(0),
+        cint(offset::VMJIT::check_local_interrupts)
+      };
+
+      Value* check_interrupts = b().CreateLoad(b().CreateGEP(vm_jit, idx_check),
+                                               "check_interrupts");
+
+      Value* check_global_interrupts = b().CreateLoad(check_global_interrupts_pos, "check_global_interrupts");
+      Value* checkpoint = b().CreateOr(check_interrupts, check_global_interrupts, "or");
+
+      Value* zero = ConstantInt::get(ctx_->Int8Ty, 0);
+      Value* is_zero = b().CreateICmpEQ(checkpoint, zero, "needs_interrupts");
+
+      create_conditional_branch(cont, interrupts, is_zero);
+
+      set_block(cont);
+      create_branch(done);
+
+      set_block(interrupts);
+
+      std::vector<Type*> types;
+
+      types.push_back(StateTy);
       types.push_back(CallFrameTy);
 
       FunctionType* ft = FunctionType::get(ObjType, types, false);
       Function* func = cast<Function>(
           module_->getOrInsertFunction("rbx_check_interrupts", ft));
 
-      func->setDoesNotCapture(0, true);
-      func->setDoesNotCapture(1, true);
-      func->setDoesNotCapture(2, true);
+      func->setDoesNotCapture(0);
+      func->setDoesNotCapture(1);
+      func->setDoesNotCapture(2);
 
       flush();
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_
       };
 
-      Value* ret = b().CreateCall(func, call_args, call_args+2, "ci");
+      Value* ret = b().CreateCall(func, call_args, "ci");
       check_for_exception(ret, false);
+      create_branch(done);
+
+      set_block(done);
     }
 
-    void visit_check_serial(opcode index, opcode serial) {
-      Signature sig(ls_, "Object");
-      sig << "VM";
-      sig << "CallFrame";
-      sig << "InlineCache";
-      sig << ls_->Int32Ty;
-      sig << "Object";
+    void emit_check_serial(opcode& index, opcode serial, const char* function) {
 
-      Value* cache_const = b().CreateIntToPtr(
-          clong(index),
-          ptr_type("InlineCache"), "cast_to_ptr");
+      CallSite** call_site_ptr = reinterpret_cast<CallSite**>(&index);
+      Value* call_site_ptr_const = b().CreateIntToPtr(
+          clong(reinterpret_cast<uintptr_t>(call_site_ptr)),
+          ptr_type(ptr_type("CallSite")), "cast_to_ptr");
 
-      Value* call_args[] = {
-        vm_,
-        call_frame_,
-        cache_const,
-        cint(serial),
-        stack_pop()
+      Value* call_site_const = b().CreateLoad(call_site_ptr_const, "cache_const");
+
+      BasicBlock* mono_cache = new_block("mono_cache");
+      BasicBlock* check_poly_cache = new_block("check_poly_cache");
+      BasicBlock* poly_cache = new_block("mono_cache");
+      BasicBlock* cont = new_block("cont");
+      BasicBlock* fallback = new_block("fallback");
+      BasicBlock* done = new_block("done");
+      BasicBlock* mono_class_match = new_block("mono_class_match");
+
+      Value* recv = stack_pop();
+
+      Value* is_ref = check_is_reference(recv);
+      create_conditional_branch(cont, fallback, is_ref);
+
+      set_block(cont);
+
+      Value* recv_class = reference_class(recv);
+
+      Value* is_mono_cache = check_type_bits(call_site_const, rubinius::MonoInlineCache::type, "is_mono_cache");
+      create_conditional_branch(mono_cache, check_poly_cache, is_mono_cache);
+
+      set_block(mono_cache);
+
+      Value* mono_const = b().CreateBitCast(call_site_const, ptr_type("MonoInlineCache"), "downcast");
+
+      Value* receiver_class_idx[] = {
+        cint(0),
+        cint(offset::MonoInlineCache::receiver_class)
       };
 
-      sig.setDoesNotCapture("rbx_check_serial", 2);
+      Value* receiver_class = b().CreateLoad(b().CreateGEP(mono_const, receiver_class_idx, "receiver_class"));
+      Value* check_class = b().CreateICmpEQ(recv_class, receiver_class, "check_class");
 
-      stack_push(sig.call("rbx_check_serial", call_args, 5, "cs", b()));
+      create_conditional_branch(mono_class_match, fallback, check_class);
+      set_block(mono_class_match);
+
+      Value* method_idx[] = {
+        cint(0),
+        cint(offset::MonoInlineCache::method)
+      };
+      Value* method = b().CreateLoad(b().CreateGEP(mono_const, method_idx, "method"));
+
+      Value* executable_serial_idx[] = {
+        cint(0),
+        cint(offset::Executable::serial)
+      };
+      Value* executable_serial = b().CreateLoad(b().CreateGEP(method, executable_serial_idx, "executable_serial"));
+      Value* check_serial = b().CreateICmpEQ(fixnum_strip(executable_serial), clong(serial), "check_serial");
+
+      create_conditional_branch(done, fallback, check_serial);
+
+      set_block(check_poly_cache);
+
+      Value* is_poly_cache = check_type_bits(call_site_const, rubinius::PolyInlineCache::type, "is_inline_cache");
+      create_conditional_branch(poly_cache, fallback, is_poly_cache);
+
+      set_block(poly_cache);
+      BasicBlock* blocks[cTrackedICHits];
+
+      Value* poly_const = b().CreateBitCast(call_site_const, ptr_type("PolyInlineCache"), "downcast");
+
+      for(int i = 0; i < cTrackedICHits; ++i) {
+        Value* ice_idx[] = {
+          cint(0),
+          cint(offset::PolyInlineCache::entries),
+          cint(i)
+        };
+
+        Value* ice = b().CreateLoad(b().CreateGEP(poly_const, ice_idx, "ice"));
+
+        BasicBlock* has_ice = new_block("has_ice");
+        BasicBlock* class_match = new_block("class_match");
+        BasicBlock* next =        new_block("next");
+
+        Value* check_ice = b().CreateICmpNE(ice, Constant::getNullValue(ctx_->ptr_type("InlineCacheEntry")), "check_ice");
+        create_conditional_branch(has_ice, next, check_ice);
+
+        set_block(has_ice);
+        Value* receiver_class_idx[] = {
+          cint(0),
+          cint(offset::InlineCacheEntry::receiver_class)
+        };
+        Value* receiver_class = b().CreateLoad(b().CreateGEP(ice, receiver_class_idx, "receiver_class"));
+
+        Value* check_class = b().CreateICmpEQ(recv_class, receiver_class, "check_class");
+
+        create_conditional_branch(class_match, next, check_class);
+        set_block(class_match);
+
+        Value* method_idx[] = {
+          cint(0),
+          cint(offset::InlineCacheEntry::method)
+        };
+        Value* method = b().CreateLoad(b().CreateGEP(ice, method_idx, "method"));
+
+        Value* executable_serial_idx[] = {
+          cint(0),
+          cint(offset::Executable::serial)
+        };
+        Value* executable_serial = b().CreateLoad(b().CreateGEP(method, executable_serial_idx, "executable_serial"));
+        Value* check_serial = b().CreateICmpEQ(fixnum_strip(executable_serial), clong(serial), "check_serial");
+
+        blocks[i] = current_block();
+        create_conditional_branch(done, fallback, check_serial);
+
+
+        set_block(next);
+      }
+
+      create_branch(fallback);
+
+      set_block(fallback);
+
+      Signature sig(ctx_, "Object");
+      sig << "State";
+      sig << "CallFrame";
+      sig << "CallSite";
+      sig << ctx_->Int32Ty;
+      sig << "Object";
+
+
+      Value* call_args[] = {
+        state_,
+        call_frame_,
+        call_site_const,
+        cint(serial),
+        recv
+      };
+
+      sig.setDoesNotCapture(function, 2);
+      Value* fallback_result = sig.call(function, call_args, 5, "cs", b());
+
+      create_branch(done);
+      set_block(done);
+
+      PHINode* phi = b().CreatePHI(ObjType, 1 + cTrackedICHits, "constant");
+
+      phi->addIncoming(constant(cTrue), mono_class_match);
+
+      for(int i = 0; i < cTrackedICHits; ++i) {
+        phi->addIncoming(constant(cTrue), blocks[i]);
+      }
+
+      phi->addIncoming(fallback_result, fallback);
+
+      stack_push(phi);
     }
 
-    void visit_check_serial_private(opcode index, opcode serial) {
-      Signature sig(ls_, "Object");
-      sig << "VM";
-      sig << "CallFrame";
-      sig << "InlineCache";
-      sig << ls_->Int32Ty;
-      sig << "Object";
+    void visit_check_serial(opcode& index, opcode serial) {
+      emit_check_serial(index, serial, "rbx_check_serial");
+    }
 
-      Value* cache_const = b().CreateIntToPtr(
-          clong(index),
-          ptr_type("InlineCache"), "cast_to_ptr");
-
-      Value* call_args[] = {
-        vm_,
-        call_frame_,
-        cache_const,
-        cint(serial),
-        stack_pop()
-      };
-
-      sig.setDoesNotCapture("rbx_check_serial_private", 2);
-
-      stack_push(sig.call("rbx_check_serial_private", call_args, 5, "cs", b()));
+    void visit_check_serial_private(opcode& index, opcode serial) {
+      emit_check_serial(index, serial, "rbx_check_serial_private");
     }
 
     void visit_push_my_offset(opcode i) {
-      if(ls_->config().jit_inline_debug) {
-        context().inline_log("inline slot read")
+      if(llvm_state()->config().jit_inline_debug) {
+        ctx_->inline_log("inline slot read")
              << "offset: " << i << "\n";
       }
 
       Value* idx[] = {
         cint(0),
-        cint(offset::vars_self)
+        cint(offset::StackVariables::self)
       };
 
-      Value* pos = b().CreateGEP(vars_, idx, idx+2, "self_pos");
+      Value* pos = b().CreateGEP(vars_, idx, "self_pos");
 
       Value* self = b().CreateLoad(pos, "self");
 
@@ -2905,7 +3239,7 @@ use_send:
         cint(i / sizeof(Object*))
       };
 
-      pos = b().CreateGEP(cst, idx2, idx2+1, "field_pos");
+      pos = b().CreateGEP(cst, idx2, "field_pos");
 
       stack_push(b().CreateLoad(pos, "field"));
     }
@@ -2925,15 +3259,15 @@ use_send:
         code = new_block("is_exception");
         set_block(code);
 
-        std::vector<const Type*> types;
-        types.push_back(VMTy);
+        std::vector<Type*> types;
+        types.push_back(StateTy);
 
-        FunctionType* ft = FunctionType::get(ls_->Int1Ty, types, false);
+        FunctionType* ft = FunctionType::get(ctx_->Int1Ty, types, false);
         Function* func = cast<Function>(
             module_->getOrInsertFunction("rbx_raising_exception", ft));
 
-        Value* call_args[] = { vm_ };
-        Value* isit = b().CreateCall(func, call_args, call_args+1, "rae");
+        Value* call_args[] = { state_ };
+        Value* isit = b().CreateCall(func, call_args, "rae");
 
         // Chain to an existing handler.
         BasicBlock* next = 0;
@@ -2950,8 +3284,6 @@ use_send:
         // Now, change jbb to point to code, so anyone branching there hits
         // the check first.
         jbb.prologue = code;
-      } else {
-        code = jbb.block;
       }
     }
 
@@ -2992,14 +3324,14 @@ use_send:
         return;
       }
 
-      Signature sig(ls_, ObjType);
+      Signature sig(ctx_, ObjType);
 
-      sig << VMTy;
+      sig << StateTy;
       sig << CallFrameTy;
       sig << ObjType;
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
         stack_top()
       };
@@ -3009,14 +3341,14 @@ use_send:
     }
 
     void visit_ensure_return() {
-      Signature sig(ls_, ObjType);
+      Signature sig(ctx_, ObjType);
 
-      sig << VMTy;
+      sig << StateTy;
       sig << CallFrameTy;
       sig << ObjType;
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
         stack_top()
       };
@@ -3042,14 +3374,14 @@ use_send:
         return;
       }
 
-      Signature sig(ls_, ObjType);
+      Signature sig(ctx_, ObjType);
 
-      sig << VMTy;
+      sig << StateTy;
       sig << CallFrameTy;
       sig << ObjType;
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
         stack_top()
       };
@@ -3059,53 +3391,53 @@ use_send:
     }
 
     void visit_push_current_exception() {
-      std::vector<const Type*> types;
+      std::vector<Type*> types;
 
-      types.push_back(VMTy);
+      types.push_back(StateTy);
 
       FunctionType* ft = FunctionType::get(ObjType, types, false);
       Function* func = cast<Function>(
           module_->getOrInsertFunction("rbx_current_exception", ft));
 
-      Value* call_args[] = { vm_ };
+      Value* call_args[] = { state_ };
 
-      stack_push(b().CreateCall(func, call_args, call_args+1, "ce"));
+      stack_push(b().CreateCall(func, call_args, "ce"));
     }
 
     void visit_clear_exception() {
       set_has_side_effects();
 
-      std::vector<const Type*> types;
+      std::vector<Type*> types;
 
-      types.push_back(VMTy);
+      types.push_back(StateTy);
 
       FunctionType* ft = FunctionType::get(ObjType, types, false);
       Function* func = cast<Function>(
           module_->getOrInsertFunction("rbx_clear_exception", ft));
 
-      Value* call_args[] = { vm_ };
+      Value* call_args[] = { state_ };
 
-      b().CreateCall(func, call_args, call_args+1);
+      b().CreateCall(func, call_args);
     }
 
     void visit_push_exception_state() {
-      std::vector<const Type*> types;
+      std::vector<Type*> types;
 
-      types.push_back(VMTy);
+      types.push_back(StateTy);
 
       FunctionType* ft = FunctionType::get(ObjType, types, false);
       Function* func = cast<Function>(
           module_->getOrInsertFunction("rbx_push_exception_state", ft));
 
-      Value* call_args[] = { vm_ };
+      Value* call_args[] = { state_ };
 
-      stack_push(b().CreateCall(func, call_args, call_args+1));
+      stack_push(b().CreateCall(func, call_args));
     }
 
     void visit_restore_exception_state() {
-      std::vector<const Type*> types;
+      std::vector<Type*> types;
 
-      types.push_back(VMTy);
+      types.push_back(StateTy);
       types.push_back(CallFrameTy);
       types.push_back(ObjType);
 
@@ -3113,21 +3445,21 @@ use_send:
       Function* func = cast<Function>(
           module_->getOrInsertFunction("rbx_restore_exception_state", ft));
 
-      Value* call_args[] = { vm_, call_frame_, stack_pop() };
+      Value* call_args[] = { state_, call_frame_, stack_pop() };
 
-      b().CreateCall(func, call_args, call_args+3);
+      b().CreateCall(func, call_args);
     }
 
     void visit_find_const(opcode which) {
-      Signature sig(ls_, ObjType);
+      Signature sig(ctx_, ObjType);
 
-      sig << VMTy;
+      sig << StateTy;
       sig << CallFrameTy;
-      sig << ls_->Int32Ty;
+      sig << ctx_->Int32Ty;
       sig << ObjType;
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
         cint(which),
         stack_pop()
@@ -3140,159 +3472,243 @@ use_send:
       stack_push(val);
     }
 
-    void visit_instance_of() {
-      Signature sig(ls_, ObjType);
+    void visit_find_const_fast(opcode& name) {
+      BasicBlock* cont = 0;
 
-      sig << VMTy;
+      Value* cached_value = 0;
+      BasicBlock* cached_block = 0;
+
+      Value* under = stack_pop();
+
+      ConstantCache** constant_cache_ptr = reinterpret_cast<ConstantCache**>(&name);
+      ConstantCache* constant_cache = *constant_cache_ptr;
+
+      Value* global_serial = b().CreateLoad(global_serial_pos, "global_serial");
+
+
+      Value* cache_ptr = b().CreateIntToPtr(
+        ConstantInt::get(context()->IntPtrTy, (reinterpret_cast<uintptr_t>(constant_cache_ptr))),
+        ptr_type(ptr_type("ConstantCache")), "cast_to_ptr");
+
+      Value* cache = b().CreateLoad(cache_ptr, "constant_cache");
+
+      Value* constant_scope_pos_idx[] = {
+        context()->cint(0),
+        context()->cint(offset::ConstantCache::scope),
+      };
+
+      Value* constant_scope_pos = b().CreateGEP(cache,
+          constant_scope_pos_idx, "constant_cache_pos");
+
+      Value* constant_scope = b().CreateLoad(constant_scope_pos, "constant_scope");
+
+      Value* frame_scope = b().CreateLoad(
+          b().CreateConstGEP2_32(call_frame_, 0,
+                                 offset::CallFrame::constant_scope, "scope_pos"), "frame_scope");
+
+      Value* scope_cmp = b().CreateICmpEQ(constant_scope, frame_scope, "same_scope");
+
+      BasicBlock* check_serial = new_block("check_serial");
+      BasicBlock* check_under  = new_block("check_under");
+      BasicBlock* use_cache    = new_block("use_cache");
+      BasicBlock* use_call     = new_block("use_call");
+
+      cont =      new_block("continue");
+
+      b().CreateCondBr(scope_cmp, check_serial, use_call);
+
+      set_block(check_serial);
+
+      Value* serial_pos_idx[] = {
+        context()->cint(0),
+        context()->cint(offset::ConstantCache::serial),
+      };
+
+      Value* serial_pos = b().CreateGEP(cache,
+          serial_pos_idx, "serial_pos");
+
+      Value* current_serial = b().CreateLoad(serial_pos, "serial");
+
+      Value* cache_cmp = b().CreateICmpEQ(global_serial, current_serial, "use_under");
+
+      b().CreateCondBr(cache_cmp, check_under, use_call);
+
+      set_block(check_under);
+
+      Value* under_pos_idx[] = {
+        context()->cint(0),
+        context()->cint(offset::ConstantCache::under),
+      };
+
+      Value* under_pos = b().CreateGEP(cache,
+          under_pos_idx, "value_pos");
+
+      Value* cached_under = b().CreateBitCast(b().CreateLoad(under_pos, "cached_under"),
+                                              ptr_type("Object"), "downcast");
+
+      Value* under_cmp = b().CreateICmpEQ(cached_under, under, "use_cache");
+
+      b().CreateCondBr(under_cmp, use_cache, use_call);
+
+      set_block(use_cache);
+
+      Value* value_pos_idx[] = {
+        context()->cint(0),
+        context()->cint(offset::ConstantCache::value),
+      };
+
+      Value* value_pos = b().CreateGEP(cache,
+          value_pos_idx, "value_pos");
+
+      cached_value = b().CreateLoad(value_pos, "cached_value");
+      cached_block = b().GetInsertBlock();
+
+      b().CreateBr(cont);
+
+      set_block(use_call);
+
+      Signature sig(ctx_, ObjType);
+
+      sig << StateTy;
+      sig << CallFrameTy;
+      sig << ptr_type(ptr_type("ConstantCache"));
+      sig << ObjType;
+
+      Value* call_args[] = {
+        state_,
+        call_frame_,
+        constant(constant_cache_ptr, ptr_type(ptr_type("ConstantCache"))),
+        under
+      };
+
+      flush();
+
+      CallInst* ret = sig.call("rbx_find_const_fast", call_args, 4, "constant", b());
+      ret->setOnlyReadsMemory();
+      ret->setDoesNotThrow();
+      check_for_exception(ret);
+
+      BasicBlock* ret_block = b().GetInsertBlock();
+      b().CreateBr(cont);
+      set_block(cont);
+
+      PHINode* phi = b().CreatePHI(ObjType, 2, "constant");
+      phi->addIncoming(cached_value, cached_block);
+      phi->addIncoming(ret, ret_block);
+
+      stack_push(phi, type::KnownType::constant_cache(constant_cache));
+    }
+
+    void visit_instance_of() {
+      Signature sig(ctx_, ObjType);
+
+      sig << StateTy;
       sig << ObjType;
       sig << ObjType;
 
       Value* top = stack_pop();
       Value* call_args[] = {
-        vm_,
+        state_,
+        call_frame_,
         top,
         stack_pop()
       };
 
-      Value* val = sig.call("rbx_instance_of", call_args, 3, "constant", b());
+      Value* val = sig.call("rbx_instance_of", call_args, 4, "constant", b());
       stack_push(val);
     }
 
     void visit_kind_of() {
-      Signature sig(ls_, ObjType);
-
-      sig << VMTy;
-      sig << ObjType;
-      sig << ObjType;
-
-      Value* top = stack_pop();
-      Value* call_args[] = {
-        vm_,
-        top,
-        stack_pop()
-      };
-
-      Value* val = sig.call("rbx_kind_of", call_args, 3, "constant", b());
-      stack_push(val);
+      Value* obj = stack_pop();
+      Value* klass = stack_pop();
+      stack_push(check_kind_of(obj, klass));
     }
 
     void visit_is_nil() {
       Value* cmp = b().CreateICmpEQ(stack_pop(),
-          constant(Qnil), "is_nil");
-      Value* imm_value = b().CreateSelect(cmp, constant(Qtrue),
-          constant(Qfalse), "select_bool");
+          constant(cNil), "is_nil");
+      Value* imm_value = b().CreateSelect(cmp, constant(cTrue),
+          constant(cFalse), "select_bool");
       stack_push(imm_value);
     }
 
     void visit_make_array(opcode count) {
-      // Detect if we're passing an array as the arguments to an inlined
-      // block, so that we can avoid the array boxing.
-      if(next_op() == InstructionSequence::insn_yield_stack &&
-          next_op_operand(0) == 1)
-      {
-        JITInlineBlock* ib = info().inline_block();
+      Signature sig(ctx_, ObjType);
 
-        // Hey! Look at that! We know the block we'd be yielding to
-        // statically! woo! ok, lets just emit the code for it here!
-        if(ib && ib->code()) {
-          skip_yield_stack_ = true; // skip the yield_stack, we're doing the work here.
-
-          context().set_inlined_block(true);
-
-          JITMethodInfo* creator = ib->creation_scope();
-          assert(creator);
-
-          // Count the block against the policy size total
-          inline_policy()->increase_size(ib->code());
-
-          // We inline unconditionally here, since we make the decision
-          // wrt the block when we are considering inlining the send that
-          // has the block on it.
-          Inliner inl(context(), *this, count);
-          inl.set_inline_block(creator->inline_block());
-          inl.set_from_unboxed_array();
-
-          // Make it's inlining info available to itself
-          inl.set_block_info(ib);
-
-          inl.set_creator(creator);
-
-          inl.inline_block(ib, get_self(creator->variables()));
-
-          stack_remove(count);
-          if(inl.check_for_exception()) {
-            check_for_exception(inl.result());
-          }
-          stack_push(inl.result());
-          return;
-        }
-
-      }
-
-      Signature sig(ls_, ObjType);
-
-      sig << VMTy;
-      sig << ls_->Int32Ty;
+      sig << StateTy;
+      sig << ctx_->Int32Ty;
       sig << ObjArrayTy;
 
       Value* call_args[] = {
-        vm_,
+        state_,
         cint(count),
         stack_objects(count)
       };
 
       Value* val = sig.call("rbx_make_array", call_args, 3, "constant", b());
+
       stack_remove(count);
       stack_push(val);
     }
 
-    void visit_meta_send_call(opcode name, opcode count) {
-      InlineCache* cache = reinterpret_cast<InlineCache*>(name);
-      if(cache->classes_seen() == 0) {
+    void visit_meta_send_call(opcode& name, opcode count) {
+      CallSite* call_site = reinterpret_cast<CallSite*>(name);
+
+      if(call_site->type_id() == CallSiteType) {
         set_has_side_effects();
 
-        Signature sig(ls_, ObjType);
+        Signature sig(ctx_, ObjType);
 
-        sig << VMTy;
+        sig << StateTy;
         sig << CallFrameTy;
-        sig << ls_->Int32Ty;
+        sig << "CallSite";
+        sig << ctx_->Int32Ty;
         sig << ObjArrayTy;
 
+        CallSite** call_site_ptr = reinterpret_cast<CallSite**>(&name);
+
+        Value* call_site_ptr_const = b().CreateIntToPtr(
+            clong(reinterpret_cast<uintptr_t>(call_site_ptr)),
+            ptr_type(ptr_type("CallSite")), "cast_to_ptr");
+
+        Value* call_site_const = b().CreateLoad(call_site_ptr_const, "cache_const");
+
         Value* call_args[] = {
-          vm_,
+          state_,
           call_frame_,
+          call_site_const,
           cint(count),
           stack_objects(count + 1)
         };
 
         flush_ip();
-        Value* val = sig.call("rbx_meta_send_call", call_args, 4, "constant", b());
+        Value* val = sig.call("rbx_meta_send_call", call_args, 5, "constant", b());
         stack_remove(count+1);
         check_for_exception(val);
         stack_push(val);
       } else {
-        invoke_inline_cache(cache, count);
+        invoke_call_site(name, count);
       }
     }
 
     void visit_passed_arg(opcode count) {
-      count += vmmethod()->post_args;
+      count += machine_code()->post_args;
 
       if(called_args_ >= 0) {
         if((int)count < called_args_) {
-          stack_push(constant(Qtrue));
+          stack_push(constant(cTrue));
         } else {
-          stack_push(constant(Qfalse));
+          stack_push(constant(cFalse));
         }
       } else {
-        Signature sig(ls_, ObjType);
+        Signature sig(ctx_, ObjType);
 
-        sig << VMTy;
+        sig << StateTy;
         sig << "Arguments";
-        sig << ls_->Int32Ty;
+        sig << ctx_->Int32Ty;
 
         Value* call_args[] = {
-          vm_,
+          state_,
           args_,
           cint(count)
         };
@@ -3303,14 +3719,14 @@ use_send:
     }
 
     void visit_passed_blockarg(opcode count) {
-      Signature sig(ls_, ObjType);
+      Signature sig(ctx_, ObjType);
 
-      sig << VMTy;
+      sig << StateTy;
       sig << "Arguments";
-      sig << ls_->Int32Ty;
+      sig << ctx_->Int32Ty;
 
       Value* call_args[] = {
-        vm_,
+        state_,
         args_,
         cint(count)
       };
@@ -3328,48 +3744,49 @@ use_send:
     }
 
     void visit_push_type() {
-      // we're calling something that returns an Object
-      Signature sig(ls_, ObjType);
-      // given a system state and a 32bit int
-      sig << VMTy;
-      sig << ls_->Int32Ty;
+      push_system_object(2);
+    }
 
-      // the actual values of which are the calling arguments
-      Value* call_args[] = {
-        vm_,
-        cint(2)
-      };
-
-      // call the function we just described using the builder
-      Value* val = sig.call("rbx_push_system_object", call_args, 2, "so", b());
-      stack_push(val, type::KnownType::type());
+    void visit_push_mirror() {
+      push_system_object(3);
     }
 
     void visit_push_ivar(opcode which) {
       Symbol* name = as<Symbol>(literal(which));
 
+      BasicBlock* failure = new_block("visit_push_ivar_fallback");
+      BasicBlock* cont = new_block("continue");
+
+      // Reserve room on stack for result
+      stack_push(constant(cNil));
+
+      bool handled = false;
+
       if(Class* klass = try_as<Class>(info().self_class())) {
 
-        if(ls_->config().jit_inline_debug) {
-          context().inline_log("inline ivar read")
-            << ls_->symbol_cstr(name);
+        if(llvm_state()->config().jit_inline_debug) {
+          ctx_->inline_log("inline ivar read")
+            << llvm_state()->symbol_debug_str(klass->module_name()) << "#"
+            << llvm_state()->symbol_debug_str(name);
         }
 
         // Figure out if we should use the table ivar lookup or
         // the slot ivar lookup.
+
+        Value* self = get_self();
+
+        check_reference_class(self, klass, failure);
 
         TypeInfo* ti = klass->type_info();
         TypeInfo::Slots::iterator it = ti->slots.find(name->index());
 
         Value* ivar = 0;
 
-        Value* self = get_self();
-
         if(it != ti->slots.end()) {
           int offset = ti->slot_locations[it->second];
           ivar = get_object_slot(self, offset);
-          if(ls_->config().jit_inline_debug) {
-            ls_->log() << " (slot: " << it->second << ")";
+          if(llvm_state()->config().jit_inline_debug) {
+            ctx_->log() << " (slot: " << it->second << ")";
           }
         } else {
           LookupTable* pii = klass->packed_ivar_info();
@@ -3382,171 +3799,240 @@ use_send:
               int offset = sizeof(Object) + (sizeof(Object*) * index);
               Value* slot_val = get_object_slot(self, offset);
 
-              Value* cmp = b().CreateICmpEQ(slot_val, constant(Qundef), "prune_undef");
+              Value* cmp = b().CreateICmpEQ(slot_val, constant(cUndef), "prune_undef");
 
-              ivar = b().CreateSelect(cmp, constant(Qnil), slot_val, "select ivar");
+              ivar = b().CreateSelect(cmp, constant(cNil), slot_val, "select ivar");
 
-              if(ls_->config().jit_inline_debug) {
-                ls_->log() << " (packed index: " << index << ", " << offset << ")";
+              if(llvm_state()->config().jit_inline_debug) {
+                ctx_->log() << " (packed index: " << index << ", " << offset << ")";
               }
             }
           }
         }
 
         if(ivar) {
-          stack_push(ivar);
+          stack_set_top(ivar);
 
-          if(ls_->config().jit_inline_debug) {
-            ls_->log() << "\n";
+          if(llvm_state()->config().jit_inline_debug) {
+            ctx_->log() << "\n";
           }
 
-          return;
+          handled = true;
+          create_branch(cont);
         } else {
-          if(ls_->config().jit_inline_debug) {
-            ls_->log() << " (abort, using slow lookup)\n";
+          if(llvm_state()->config().jit_inline_debug) {
+            ctx_->log() << " (abort, using slow lookup)\n";
           }
         }
       }
 
-      if(ls_->config().jit_inline_debug) {
-        context().inline_log("slow ivar read")
-          << ls_->symbol_cstr(name) << "\n";
+      if(!handled) {
+        create_branch(failure);
+        if(llvm_state()->config().jit_inline_debug) {
+          ctx_->inline_log("slow ivar read")
+            << llvm_state()->symbol_debug_str(name) << "\n";
+        }
       }
 
-      Signature sig(ls_, ObjType);
+      set_block(failure);
+      Signature sig(ctx_, ObjType);
 
-      sig << VMTy;
+      sig << StateTy;
       sig << ObjType;
       sig << ObjType;
 
       Value* self = get_self();
 
       Value* call_args[] = {
-        vm_,
+        state_,
         self,
         constant(as<Symbol>(literal(which)))
       };
 
-      Value* val = sig.call("rbx_push_ivar", call_args, 3, "ivar", b());
-      // TODO: why would rbx_push_ivar raise an exception?
-      // check_for_exception(val);
-      stack_push(val);
+      CallInst* val = sig.call("rbx_push_ivar", call_args, 3, "ivar", b());
+      val->setOnlyReadsMemory();
+      val->setDoesNotThrow();
+      stack_set_top(val);
+
+      create_branch(cont);
+      set_block(cont);
     }
 
     void visit_set_ivar(opcode which) {
+      Value* self = get_self();
+      Value* ivar = stack_top();
       Symbol* name = as<Symbol>(literal(which));
+      bool handled = false;
 
+      BasicBlock* failure = new_block("visit_push_ivar_fallback");
+      BasicBlock* cont = new_block("continue");
+
+      set_has_side_effects();
       if(Class* klass = try_as<Class>(info().self_class())) {
 
-        if(ls_->config().jit_inline_debug) {
-          context().inline_log("inline ivar write")
-            << ls_->symbol_cstr(name);
+        if(llvm_state()->config().jit_inline_debug) {
+          ctx_->inline_log("inline ivar write")
+            << llvm_state()->symbol_debug_str(name);
         }
 
-        // slot ivars (Array#@size for example) have type checks, so use the slow
-        // path for now.
+        TypeInfo* ti = klass->type_info();
+        TypeInfo::Slots::iterator it = ti->slots.find(name->index());
 
-        Value* self = get_self();
+        check_reference_class(self, klass, failure);
 
-        LookupTable* pii = klass->packed_ivar_info();
-        if(!pii->nil_p()) {
-          bool found = false;
+        if(it != ti->slots.end()) {
+          int field = it->second;
+          int offset = ti->slot_locations[field];
+          set_object_type_slot(self, field, offset, ti->slot_types[field], ivar);
+          if(llvm_state()->config().jit_inline_debug) {
+            ctx_->log() << " (slot: " << it->second << ")\n";
+          }
 
-          Fixnum* which = try_as<Fixnum>(pii->fetch(0, name, &found));
-          if(found) {
-            int index = which->to_native();
-            int offset = sizeof(Object) + (sizeof(Object*) * index);
+          handled = true;
+          create_branch(cont);
+        } else {
+          LookupTable* pii = klass->packed_ivar_info();
+          if(!pii->nil_p()) {
+            bool found = false;
 
-            set_object_slot(self, offset, stack_top());
+            Fixnum* which = try_as<Fixnum>(pii->fetch(0, name, &found));
+            if(found) {
+              int index = which->to_native();
+              int offset = sizeof(Object) + (sizeof(Object*) * index);
 
-            if(ls_->config().jit_inline_debug) {
-              ls_->log() << " (packed index: " << index << ", " << offset << ")\n";
+              set_object_slot(self, offset, ivar);
+
+              if(llvm_state()->config().jit_inline_debug) {
+                ctx_->log() << " (packed index: " << index << ", " << offset << ")\n";
+              }
+              handled = true;
+              create_branch(cont);
             }
-            return;
           }
         }
 
-        if(ls_->config().jit_inline_debug) {
-          ls_->log() << " (abort, using slow write)\n";
+        if(!handled) {
+          if(llvm_state()->config().jit_inline_debug) {
+            ctx_->log() << " (abort, using slow write)\n";
+          }
         }
       }
 
-      if(ls_->config().jit_inline_debug) {
-        context().inline_log("slow ivar write")
-          << ls_->symbol_cstr(name) << "\n";
+      if(!handled) {
+        create_branch(failure);
+        if(llvm_state()->config().jit_inline_debug) {
+          ctx_->inline_log("slow ivar write")
+            << llvm_state()->symbol_debug_str(name) << "\n";
+        }
       }
 
-      set_has_side_effects();
+      set_block(failure);
 
-      Signature sig(ls_, ObjType);
+      Signature sig(ctx_, ObjType);
 
-      sig << VMTy;
+      sig << StateTy;
       sig << "CallFrame";
       sig << ObjType;
       sig << ObjType;
       sig << ObjType;
 
-      Value* self = get_self();
-
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
         self,
-        constant(as<Symbol>(literal(which))),
-        stack_top()
+        constant(name),
+        ivar
       };
 
       Value* ret = sig.call("rbx_set_ivar", call_args, 5, "ivar", b());
       check_for_exception(ret, false);
+
+      create_branch(cont);
+      set_block(cont);
     }
 
     void visit_push_my_field(opcode which) {
-      Signature sig(ls_, ObjType);
-
-      sig << VMTy;
-      sig << ObjType;
-      sig << ls_->Int32Ty;
-
       Value* self = get_self();
 
-      Value* call_args[] = {
-        vm_,
-        self,
-        cint(which)
-      };
+      if(Class* klass = try_as<Class>(info().self_class())) {
 
-      Value* val = sig.call("rbx_push_my_field", call_args, 3, "field", b());
-      check_for_exception(val);
-      stack_push(val);
+        if(llvm_state()->config().jit_inline_debug) {
+          ctx_->inline_log("inline field read");
+          ctx_->log() << " (slot: " << which << ")\n";
+        }
+
+        TypeInfo* ti = klass->type_info();
+        int offset = ti->slot_locations[which];
+        stack_push(get_object_slot(self, offset));
+      } else {
+
+        if(llvm_state()->config().jit_inline_debug) {
+          ctx_->inline_log("inline field read slow path");
+          ctx_->log() << " (slot: " << which << ")\n";
+        }
+        Signature sig(ctx_, ObjType);
+
+        sig << StateTy;
+        sig << ObjType;
+        sig << ctx_->Int32Ty;
+
+        Value* call_args[] = {
+          state_,
+          self,
+          cint(which)
+        };
+
+        Value* val = sig.call("rbx_push_my_field", call_args, 3, "field", b());
+        check_for_exception(val);
+        stack_push(val);
+      }
     }
 
     void visit_store_my_field(opcode which) {
       set_has_side_effects();
 
-      Signature sig(ls_, ObjType);
-
-      sig << VMTy;
-      sig << ObjType;
-      sig << ls_->Int32Ty;
-      sig << ObjType;
-
       Value* self = get_self();
+      Value* ivar = stack_top();
 
-      Value* call_args[] = {
-        vm_,
-        self,
-        cint(which),
-        stack_top()
-      };
+      if(Class* klass = try_as<Class>(info().self_class())) {
 
-      sig.call("rbx_set_my_field", call_args, 4, "field", b());
+        if(llvm_state()->config().jit_inline_debug) {
+          ctx_->inline_log("inline field write");
+          ctx_->log() << " (slot: " << which << ")\n";
+        }
+
+        TypeInfo* ti = klass->type_info();
+        int offset = ti->slot_locations[which];
+        set_object_type_slot(self, which, offset, ti->slot_types[which], ivar);
+      } else {
+
+        if(llvm_state()->config().jit_inline_debug) {
+          ctx_->inline_log("inline write slow path");
+          ctx_->log() << " (slot: " << which << ")\n";
+        }
+        Signature sig(ctx_, ObjType);
+
+        sig << StateTy;
+        sig << ObjType;
+        sig << ctx_->Int32Ty;
+        sig << ObjType;
+
+        Value* call_args[] = {
+          state_,
+          self,
+          cint(which),
+          ivar
+        };
+
+        sig.call("rbx_set_my_field", call_args, 4, "field", b());
+      }
     }
 
     void visit_shift_array() {
       JITStackArgs* inline_args = incoming_args();
       if(inline_args && current_hint() == cHintLazyBlockArgs) {
         if(inline_args->size() <= (size_t)block_arg_shift_) {
-          stack_push(constant(Qnil));
+          stack_push(constant(cNil));
         } else {
           stack_push(inline_args->at(block_arg_shift_));
           block_arg_shift_++;
@@ -3554,14 +4040,14 @@ use_send:
         return;
       }
 
-      Signature sig(ls_, ObjType);
+      Signature sig(ctx_, ObjType);
 
-      sig << VMTy;
+      sig << StateTy;
       sig << CallFrameTy;
       sig << ObjArrayTy;
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
         stack_back_position(0)
       };
@@ -3573,36 +4059,37 @@ use_send:
     void visit_string_append() {
       set_has_side_effects();
 
-      Signature sig(ls_, ObjType);
+      Signature sig(ctx_, ObjType);
 
-      sig << VMTy;
+      sig << StateTy;
       sig << ObjType;
       sig << ObjType;
 
       Value* val = stack_pop();
 
       Value* call_args[] = {
-        vm_,
+        state_,
+        call_frame_,
         val,
         stack_pop()
       };
 
-      Value* str = sig.call("rbx_string_append", call_args, 3, "string", b());
+      Value* str = sig.call("rbx_string_append", call_args, 4, "string", b());
       stack_push(str);
     }
 
     void visit_string_build(opcode count) {
       set_has_side_effects();
 
-      Signature sig(ls_, ObjType);
+      Signature sig(ctx_, ObjType);
 
-      sig << VMTy;
+      sig << StateTy;
       sig << CallFrameTy;
-      sig << ls_->Int32Ty;
+      sig << ctx_->Int32Ty;
       sig << ObjArrayTy;
 
       Value* call_args[] = {
-        vm_,
+        state_,
         call_frame_,
         cint(count),
         stack_objects(count)

@@ -1,34 +1,42 @@
-#include "vm.hpp"
-#include "vm/object_utils.hpp"
-#include "objectmemory.hpp"
-
-#include "builtin/class.hpp"
-#include "builtin/module.hpp"
-#include "builtin/fixnum.hpp"
-#include "builtin/lookuptable.hpp"
-#include "builtin/methodtable.hpp"
-#include "builtin/symbol.hpp"
-#include "builtin/string.hpp"
-#include "builtin/system.hpp"
 #include "builtin/array.hpp"
+#include "builtin/autoload.hpp"
+#include "builtin/class.hpp"
 #include "builtin/compactlookuptable.hpp"
-
+#include "builtin/constant_table.hpp"
+#include "builtin/executable.hpp"
+#include "builtin/lookuptable.hpp"
+#include "builtin/module.hpp"
+#include "builtin/methodtable.hpp"
+#include "builtin/string.hpp"
+#include "builtin/symbol.hpp"
+#include "builtin/system.hpp"
+#include "builtin/thread.hpp"
+#include "builtin/weakref.hpp"
+#include "configuration.hpp"
 #include "global_cache.hpp"
+#include "object_utils.hpp"
+#include "objectmemory.hpp"
+#include "on_stack.hpp"
+#include "version.h"
+
+#include <string>
 
 namespace rubinius {
 
   void Module::bootstrap_methods(STATE) {
-    System::attach_primitive(state,
+    GCTokenImpl gct;
+    System::attach_primitive(state, gct,
                              G(module), false,
                              state->symbol("const_set"),
                              state->symbol("module_const_set"));
   }
 
   Module* Module::create(STATE) {
-    Module* mod = state->om->new_object_enduring<Module>(state, G(module));
+    Module* mod = state->memory()->new_object_enduring<Module>(state, G(module));
 
-    mod->name(state, nil<Symbol>());
+    mod->module_name(state, nil<Symbol>());
     mod->superclass(state, nil<Module>());
+    mod->hierarchy_subclasses(state, nil<Array>());
 
     mod->setup(state);
 
@@ -38,107 +46,168 @@ namespace rubinius {
   Module* Module::allocate(STATE, Object* self) {
     Module* module = Module::create(state);
 
-    module->klass(state, (Class*)self);
+    module->klass(state, as<Class>(self));
 
     return module;
   }
 
   void Module::setup(STATE) {
-    constant_table(state, LookupTable::create(state));
+    constant_table(state, ConstantTable::create(state));
     method_table(state, MethodTable::create(state));
-  }
-
-  void Module::setup(STATE, const char* str, Module* under) {
-    setup(state, state->symbol(str), under);
-
-    if(under && under != G(object)) {
-      std::ostringstream ss;
-      ss << under->name()->c_str(state) << "::" << str;
-      this->name(state, state->symbol(ss.str().c_str()));
+    origin(state, this);
+    if(!superclass()->nil_p()) {
+      superclass()->track_subclass(state, this);
     }
   }
 
-  void Module::setup(STATE, Symbol* name, Module* under) {
+  void Module::setup(STATE, std::string name, Module* under) {
+    setup(state);
+
     if(!under) under = G(object);
-
-    constant_table(state, LookupTable::create(state));
-    this->method_table(state, MethodTable::create(state));
-    this->name(state, name);
     under->set_const(state, name, this);
+    set_name(state, name, under);
   }
 
-  Object* Module::case_compare(STATE, Object* obj) {
-    return obj->kind_of_p(state, this) ? Qtrue : Qfalse;
-  }
+  void Module::set_name(STATE, Symbol* name, Module* under) {
+    if(!module_name()->nil_p()) return;
 
-  void Module::set_name(STATE, Module* under, Symbol* name) {
     if(under == G(object)) {
-      this->name(state, name);
+      module_name(state, name);
     } else {
-      String* cur = under->name()->to_str(state);
-      String* str_name = cur->add(state, "::")->append(state,
-          name->to_str(state));
+      Symbol* under_name = under->module_name();
 
-      this->name(state, str_name->to_sym(state));
+      if(!under_name->nil_p()) {
+        std::ostringstream path_name;
+        path_name << under_name->cpp_str(state) << "::" << name->cpp_str(state);
+        module_name(state, state->symbol(path_name.str()));
+
+        ConstantTable::iterator i(constant_table());
+
+        while(i.advance()) {
+          if(Module* m = try_as<Module>(i.constant())) {
+            if(m->module_name()->nil_p()) {
+              m->set_name(state, i.name(), this);
+            }
+          }
+        }
+      }
     }
   }
 
-  Object* Module::const_set(STATE, Object* name, Object* value) {
+  void Module::set_name(STATE, std::string name, Module* under) {
+    set_name(state, state->symbol(name), under);
+  }
+
+  String* Module::get_name(STATE) {
+    if(module_name()->nil_p()) {
+      if(LANGUAGE_18_ENABLED) {
+        return String::create(state, "");
+      } else {
+        return nil<String>();
+      }
+    } else {
+      return module_name()->to_str(state);
+    }
+  }
+
+  Object* Module::const_set(STATE, Symbol* name, Object* value) {
     set_const(state, name, value);
     return value;
   }
 
-  void Module::set_const(STATE, Object* sym, Object* val) {
-    constants()->store(state, sym, val);
-    state->shared.inc_global_serial(state);
+  void Module::set_const(STATE, Symbol* sym, Object* val) {
+    constant_table()->store(state, sym, val, G(sym_public));
+    state->shared().inc_global_serial(state);
   }
 
   void Module::del_const(STATE, Symbol* sym) {
-    constants()->remove(state, sym);
-    state->shared.inc_global_serial(state);
+    constant_table()->remove(state, sym);
+    state->shared().inc_global_serial(state);
   }
 
-  void Module::set_const(STATE, const char* name, Object* val) {
+  void Module::set_const(STATE, std::string name, Object* val) {
     set_const(state, state->symbol(name), val);
   }
 
-  Object* Module::get_const(STATE, Symbol* sym, bool* found, bool check_super) {
+  Object* Module::get_const(STATE, Symbol* sym, Symbol* min_vis, ConstantMissingReason* reason, bool check_super, bool replace_autoload) {
     Module* mod = this;
+    *reason = vNonExistent;
 
     while(!mod->nil_p()) {
-      Object* obj = mod->constants()->fetch(state, sym, found);
+      ConstantTableBucket* bucket = mod->constant_table()->lookup(state, sym);
 
-      if(*found) return obj;
+      if(!bucket->nil_p()) {
+        if(min_vis == G(sym_public) &&
+           bucket->visibility() == G(sym_private)) {
+          *reason = vPrivate;
+          break;
+        } else {
+          *reason = vFound;
+          if(Autoload* autoload = try_as<Autoload>(bucket->constant())) {
+            if(autoload->constant() != G(undefined)) {
+              if(replace_autoload) {
+                bucket->constant(state, autoload->constant());
+              } else if (autoload->thread() == Thread::current(state)) {
+                return autoload->constant();
+              }
+            }
+          }
+          return bucket->constant();
+        }
+      }
 
       if(!check_super) break;
 
       mod = mod->superclass();
     }
-
-    return Qnil;
+    return cNil;
   }
 
   Object* Module::get_const(STATE, Symbol* sym) {
-    bool found;
-    return get_const(state, sym, &found);
+    ConstantMissingReason reason;
+    return get_const(state, sym, G(sym_private), &reason);
   }
 
-  Object* Module::get_const(STATE, const char* sym) {
+  Object* Module::get_const(STATE, std::string sym) {
     return get_const(state, state->symbol(sym));
   }
 
   void Module::add_method(STATE, Symbol* name, Executable* exec, Symbol* vis) {
     if(!vis) vis = G(sym_public);
     method_table_->store(state, name, exec, vis);
-    state->global_cache()->clear(state, this, name);
+    state->vm()->global_cache()->clear(state, this, name);
+    reset_method_cache(state, name);
+  }
+
+  Object* Module::reset_method_cache(STATE, Symbol* name) {
+    if(Class* self = try_as<Class>(this)) {
+      self->increment_serial();
+    }
+    if(!name->nil_p()) {
+      if(MethodTableBucket* b = method_table_->find_entry(state, name)) {
+        Executable* exec = b->method();
+        if(!exec->nil_p()) {
+          exec->clear_inliners(state);
+        }
+      }
+    }
+    if(!hierarchy_subclasses_->nil_p()) {
+      for(native_int i = 0; i < hierarchy_subclasses_->size(); ++i) {
+        WeakRef* ref = try_as<WeakRef>(hierarchy_subclasses_->get(state, i));
+        if(ref && ref->alive_p()) {
+          Module* mod = as<Module>(ref->object());
+          mod->reset_method_cache(state, name);
+        }
+      }
+    }
+    return cNil;
   }
 
   Executable* Module::find_method(Symbol* name, Module** defined_in) {
-    MethodTableBucket* buk;
     Module* mod = this;
 
     do {
-      buk = mod->method_table()->find_entry(name);
+      MethodTableBucket* buk = mod->method_table()->find_entry(name);
       if(buk) {
         if(defined_in) *defined_in = mod;
         return buk->method();
@@ -201,27 +270,25 @@ namespace rubinius {
     if(!name->is_cvar_p(state)->true_p()) return Primitives::failure();
 
     Module* mod = this;
-    Module* mod_to_query;
 
     while(!mod->nil_p()) {
-      mod_to_query = get_module_to_query(mod);
+      Module* mod_to_query = get_module_to_query(mod);
 
-      if(mod_to_query->table_ivar_defined(state, name)->true_p()) return Qtrue;
+      if(mod_to_query->table_ivar_defined(state, name)->true_p()) return cTrue;
 
       mod = mod->superclass();
     }
 
-    return Qfalse;
+    return cFalse;
   }
 
   Object* Module::cvar_get(STATE, Symbol* name) {
     if(!name->is_cvar_p(state)->true_p()) return Primitives::failure();
 
     Module* mod = this;
-    Module* mod_to_query;
 
     while(!mod->nil_p()) {
-      mod_to_query = get_module_to_query(mod);
+      Module* mod_to_query = get_module_to_query(mod);
 
       if(mod_to_query->table_ivar_defined(state, name)->true_p()) {
         return mod_to_query->get_table_ivar(state, name);
@@ -235,18 +302,18 @@ namespace rubinius {
       mod = as<Module>(sc->attached_instance());
     }
 
-    std::stringstream ss;
+    std::ostringstream ss;
     ss << "uninitialized class variable ";
-    ss << name->c_str(state);
+    ss << name->debug_str(state);
     ss << " in module ";
-    if(mod->name()->nil_p()) {
+    if(mod->module_name()->nil_p()) {
       if(kind_of<Class>(mod)) {
         ss << "#<Class>";
       } else {
         ss << "#<Module>";
       }
     } else {
-      ss << mod->name()->c_str(state);
+      ss << mod->debug_str(state);
     }
 
     RubyException::raise(
@@ -260,9 +327,7 @@ namespace rubinius {
   Object* Module::cvar_set(STATE, Symbol* name, Object* value) {
     if(!name->is_cvar_p(state)->true_p()) return Primitives::failure();
 
-    if(RTEST(frozen_p(state))) {
-      Exception::type_error(state, "unable to change frozen object");
-    }
+    check_frozen(state);
 
     Module* mod = this;
     Module* mod_to_query;
@@ -320,30 +385,29 @@ namespace rubinius {
     Object* value = mod_to_query->del_table_ivar(state, name, &removed);
     if(removed) return value;
 
-    std::stringstream ss;
-    mod = this;
+    std::ostringstream ss;
     if(SingletonClass* sc = try_as<SingletonClass>(mod)) {
       mod = as<Module>(sc->attached_instance());
     }
 
-    if (this->cvar_defined(state, name) == Qtrue) {
+    if(CBOOL(this->cvar_defined(state, name))) {
       ss << "cannot remove ";
-      ss << name->c_str(state);
+      ss << name->debug_str(state);
       ss << " for ";
     } else {
       ss << "uninitialized class variable ";
-      ss << name->c_str(state);
+      ss << name->debug_str(state);
       ss << " in module ";
     }
 
-    if(mod->name()->nil_p()) {
+    if(mod->module_name()->nil_p()) {
       if(kind_of<Class>(mod)) {
         ss << "#<Class>";
       } else {
         ss << "#<Module>";
       }
     } else {
-      ss << mod->name()->c_str(state);
+      ss << mod->debug_str(state);
     }
 
     RubyException::raise(
@@ -354,23 +418,103 @@ namespace rubinius {
     return NULL;
   }
 
+  Class* Module::mirror(STATE, Object* obj) {
+    Class* object_class = obj->class_object(state);
+    Class* mirror = object_class->mirror();
+
+    if(!mirror->nil_p()) return mirror;
+
+    Class* klass = object_class;
+
+    do {
+      Symbol* name = klass->module_name();
+
+      if(!name->nil_p()) {
+        std::string class_name = name->cpp_str(state);
+        size_t k = class_name.rfind("::");
+        if(k != std::string::npos) {
+          class_name = class_name.substr(k);
+        }
+
+        ConstantMissingReason reason = vNonExistent;
+        Object* obj = G(mirror)->get_const(state, state->symbol(class_name), G(sym_private), &reason);
+
+        if(reason == vFound) {
+          if(Class* mirror_class = try_as<Class>(obj)) {
+            object_class->mirror(state, mirror_class);
+            return mirror_class;
+          }
+        }
+      }
+
+      Module* ancestor = klass->superclass();
+      klass = 0;
+
+      while(!ancestor->nil_p()) {
+        if((klass = try_as<Class>(ancestor))) break;
+        ancestor = ancestor->superclass();
+      }
+    } while(klass);
+
+    return nil<Class>();
+  }
+
+  Object* Module::track_subclass(STATE, Module* mod) {
+    if(hierarchy_subclasses_->nil_p()) {
+      hierarchy_subclasses(state, Array::create(state, 4));
+    }
+    hierarchy_subclasses_->append(state, WeakRef::create(state, mod));
+    return cNil;
+  }
+
+  std::string Module::debug_str(STATE) {
+    Symbol* name = module_name();
+
+    if(name->nil_p()) {
+      return "<anonymous module>";
+    } else {
+      return name->cpp_str(state);
+    }
+  }
+
   void Module::Info::show(STATE, Object* self, int level) {
     Module* mod = as<Module>(self);
 
     class_header(state, self);
-    indent_attribute(++level, "name"); mod->name()->show(state, level);
+    indent_attribute(++level, "name"); mod->module_name()->show(state, level);
     indent_attribute(level, "superclass"); class_info(state, mod->superclass(), true);
-    indent_attribute(level, "constants"); mod->constants()->show(state, level);
+    indent_attribute(level, "constant_table"); mod->constant_table()->show(state, level);
     indent_attribute(level, "method_table"); mod->method_table()->show(state, level);
     close_body(level);
   }
 
+  void Module::Info::mark(Object* obj, ObjectMark& mark) {
+    auto_mark(obj, mark);
+
+    Array* subclasses = as<Module>(obj)->hierarchy_subclasses_;
+    if(subclasses->nil_p()) return;
+
+    native_int offset = subclasses->offset();
+    native_int size = subclasses->size();
+    Tuple* tup = subclasses->tuple();
+
+    for(native_int i = offset; i < size + offset; ++i) {
+      if(WeakRef* ref = try_as<WeakRef>(tup->field[i])) {
+        if(!ref->alive_p()) {
+          tup->field[i] = cNil;
+        }
+      }
+    }
+    subclasses->set_size(size - tup->delete_inplace(offset, size, cNil));
+  }
+
   IncludedModule* IncludedModule::create(STATE) {
     IncludedModule* imod;
-    imod = state->om->new_object_enduring<IncludedModule>(state, G(included_module));
+    imod = state->memory()->new_object_enduring<IncludedModule>(state, G(included_module));
 
-    imod->name(state, state->symbol("<included module>"));
+    imod->module_name(state, state->symbol("<included module>"));
     imod->superclass(state, nil<Module>());
+    imod->origin(state, imod);
 
     return imod;
   }
@@ -378,7 +522,8 @@ namespace rubinius {
   IncludedModule* IncludedModule::allocate(STATE, Object* self) {
     IncludedModule* imod = IncludedModule::create(state);
 
-    imod->klass(state, (Class*)self);
+    imod->klass(state, as<Class>(self));
+    imod->origin(state, imod);
 
     return imod;
   }

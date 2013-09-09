@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 class IO
 
   class InternalBuffer
@@ -43,7 +45,7 @@ class IO
 
   def self.select_primitive(readables, writables, errorables, timeout)
     Rubinius.primitive :io_select
-    raise PrimitiveFailure, "IO#select_primitive primitive failed"
+    raise IOError, "Unable to select on IO set (descriptor too big?)"
   end
 
   def self.fnmatch(pattern, path, flags)
@@ -60,17 +62,12 @@ class IO
 
   def read_primitive(number_of_bytes)
     Rubinius.primitive :io_sysread
-    raise PrimitiveFailure, "IO::sysread primitive failed!"
+    raise PrimitiveFailure, "IO::sysread primitive failed"
   end
 
   def write(str)
     Rubinius.primitive :io_write
-    raise PrimitiveFailure, "IO#write failed. Might not have passed a string."
-  end
-
-  def blocking_read(size)
-    Rubinius.primitive :io_blocking_read
-    raise PrimitiveFailure, "IO#blocking_read primitive failed"
+    raise PrimitiveFailure, "IO#write primitive failed"
   end
 
   def read_if_available(size)
@@ -100,6 +97,16 @@ class IO
 
   def prim_seek(amount, whence)
     Rubinius.primitive :io_seek
+    raise RangeError, "#{amount} is too big"
+  end
+
+  def self.prim_truncate(name, offset)
+    Rubinius.primitive :io_truncate
+    raise RangeError, "#{offset} is too big"
+  end
+
+  def prim_ftruncate(offset)
+    Rubinius.primitive :io_ftruncate
     raise RangeError, "#{amount} is too big"
   end
 

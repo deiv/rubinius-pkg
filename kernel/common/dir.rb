@@ -1,19 +1,37 @@
+# -*- encoding: us-ascii -*-
+
 class Dir
   include Enumerable
 
+  FFI = Rubinius::FFI
+
   def self.[](*patterns)
     if patterns.size == 1
-      patterns = Rubinius::Type.coerce_to_path(patterns[0]).split("\0")
+      pattern = Rubinius::Type.coerce_to_path(patterns[0])
+      return [] if pattern.empty?
+      patterns = glob_split pattern
     end
 
-    files = []
-
-    patterns.each do |pat|
-      Dir::Glob.glob pat, 0, files
-    end
-
-    files
+    glob patterns
   end
+
+  #   files = []
+  #   index = 0
+
+  #   patterns.each do |pat|
+  #     enc = Rubinius::Type.ascii_compatible_encoding pat
+
+  #     Dir::Glob.glob pat, 0, files
+
+  #     total = files.size
+  #     while index < total
+  #       Rubinius::Type.encode_string files[index], enc
+  #       index += 1
+  #     end
+  #   end
+
+  #   files
+  # end
 
   def self.glob(pattern, flags=0, &block)
     if pattern.kind_of? Array
@@ -23,13 +41,21 @@ class Dir
 
       return [] if pattern.empty?
 
-      patterns = pattern.split("\0")
+      patterns = glob_split pattern
     end
 
     matches = []
+    index = 0
 
     patterns.each do |pat|
+      enc = Rubinius::Type.ascii_compatible_encoding pat
       Dir::Glob.glob pat, flags, matches
+
+      total = matches.size
+      while index < total
+        Rubinius::Type.encode_string matches[index], enc
+        index += 1
+      end
     end
 
     if block
@@ -38,6 +64,16 @@ class Dir
     end
 
     return matches
+  end
+
+  def self.glob_split(pattern)
+    result = []
+    start = 0
+    while idx = pattern.find_string("\0", start)
+      result << pattern.byteslice(start, idx)
+      start = idx + 1
+    end
+    result << pattern.byteslice(start, pattern.bytesize)
   end
 
   def self.foreach(path)
@@ -74,65 +110,34 @@ class Dir
       return value
     else
       error = FFI::Platform::POSIX.chdir path
-      if error != 0
-        Errno.handle path
-      end
+      Errno.handle path if error != 0
       error
     end
   end
 
   def self.mkdir(path, mode = 0777)
     error = FFI::Platform::POSIX.mkdir(Rubinius::Type.coerce_to_path(path), mode)
-    if error != 0
-      Errno.handle path
-    end
+    Errno.handle path if error != 0
     error
   end
 
   def self.rmdir(path)
     error = FFI::Platform::POSIX.rmdir(Rubinius::Type.coerce_to_path(path))
-    if error != 0
-      Errno.handle path
-    end
+    Errno.handle path if error != 0
     error
   end
 
   def self.getwd
-    buf = " " * 1024
-    FFI::Platform::POSIX.getcwd(buf, buf.length)
-  end
-
-  def self.open(path)
-    dir = new path
-    if block_given?
-      begin
-        value = yield dir
-      ensure
-        dir.close
-      end
-
-      return value
-    else
-      return dir
-    end
-  end
-
-  def self.entries(path)
-    ret = []
-
-    open(path) do |dir|
-      while s = dir.read
-        ret << s
-      end
-    end
-
-    ret
+    buf = String.pattern Rubinius::PATH_MAX, 0
+    wd = FFI::Platform::POSIX.getcwd(buf, buf.length)
+    Errno.handle unless wd
+    Rubinius::Type.external_string wd
   end
 
   def self.chroot(path)
     ret = FFI::Platform::POSIX.chroot Rubinius::Type.coerce_to_path(path)
-    Errno.handle path
-    return ret
+    Errno.handle path if ret != 0
+    ret
   end
 
   def each

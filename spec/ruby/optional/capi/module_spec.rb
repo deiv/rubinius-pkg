@@ -1,26 +1,7 @@
 require File.expand_path('../spec_helper', __FILE__)
+require File.expand_path('../fixtures/module', __FILE__)
 
 load_extension('module')
-
-class CApiModuleSpecs
-  class A
-    X = 1
-  end
-
-  class B < A
-    Y = 2
-  end
-
-  class C
-    Z = 3
-  end
-
-  module M
-  end
-
-  class Super
-  end
-end
 
 describe "CApiModule" do
 
@@ -48,32 +29,6 @@ describe "CApiModule" do
     end
   end
 
-  describe "rb_define_class_under" do
-    it "creates a subclass of the superclass contained in a module" do
-      cls = @m.rb_define_class_under(CApiModuleSpecs,
-                                     "ModuleSpecsClassUnder1",
-                                     CApiModuleSpecs::Super)
-      cls.should be_kind_of(Class)
-      CApiModuleSpecs::Super.should be_ancestor_of(CApiModuleSpecs::ModuleSpecsClassUnder1)
-    end
-
-    it "uses Object as the superclass if NULL is passed" do
-      @m.rb_define_class_under(CApiModuleSpecs, "ModuleSpecsClassUnder2", nil)
-      Object.should be_ancestor_of(CApiModuleSpecs::ModuleSpecsClassUnder2)
-    end
-
-    it "sets the class name" do
-      cls = @m.rb_define_class_under(CApiModuleSpecs, "ModuleSpecsClassUnder3", nil)
-      cls.name.should == "CApiModuleSpecs::ModuleSpecsClassUnder3"
-    end
-
-    it "call #inherited on the superclass" do
-      CApiModuleSpecs::Super.should_receive(:inherited)
-      cls = @m.rb_define_class_under(CApiModuleSpecs,
-                                     "ModuleSpecsClassUnder4", CApiModuleSpecs::Super)
-    end
-  end
-
   describe "rb_define_module_under" do
     it "creates a new module inside the inner class" do
       mod = @m.rb_define_module_under(CApiModuleSpecs, "ModuleSpecsModuleUnder1")
@@ -83,6 +38,18 @@ describe "CApiModule" do
     it "sets the module name" do
       mod = @m.rb_define_module_under(CApiModuleSpecs, "ModuleSpecsModuleUnder2")
       mod.name.should == "CApiModuleSpecs::ModuleSpecsModuleUnder2"
+    end
+
+    it "defines a module for an existing Autoload with an extension" do
+      compile_extension("module_under_autoload")
+
+      CApiModuleSpecs::ModuleUnderAutoload.name.should == "CApiModuleSpecs::ModuleUnderAutoload"
+    end
+
+    it "defines a module for an existing Autoload with a ruby object" do
+      compile_extension("module_under_autoload")
+
+      CApiModuleSpecs::RubyUnderAutoload.name.should == "CApiModuleSpecs::RubyUnderAutoload"
     end
   end
 
@@ -277,16 +244,48 @@ describe "CApiModule" do
   end
 
   describe "rb_undef_method" do
-    it "undef'ines a method on a class" do
-      cls = Class.new do
+    before(:each) do
+      @class = Class.new do
         def ruby_test_method
           :ruby_test_method
         end
       end
+    end
 
-      cls.new.ruby_test_method.should == :ruby_test_method
-      @m.rb_undef_method cls, "ruby_test_method"
-      cls.should_not have_instance_method(:ruby_test_method)
+    it "undef'ines a method on a class" do
+      @class.new.ruby_test_method.should == :ruby_test_method
+      @m.rb_undef_method @class, "ruby_test_method"
+      @class.should_not have_instance_method(:ruby_test_method)
+    end
+
+    it "does not raise exceptions when passed a missing name" do
+      lambda { @m.rb_undef_method @class, "not_exist" }.should_not raise_error
+    end
+
+    describe "when given a frozen Class" do
+      before(:each) do
+        @frozen = @class.dup.freeze
+      end
+
+      ruby_version_is "" ... "1.9" do
+        it "raises a TypeError when passed a name" do
+          lambda { @m.rb_undef_method @frozen, "ruby_test_method" }.should raise_error(TypeError)
+        end
+
+        it "raises a TypeError when passed a missing name" do
+          lambda { @m.rb_undef_method @frozen, "not_exist" }.should raise_error(TypeError)
+        end
+      end
+
+      ruby_version_is "1.9" do
+        it "raises a RuntimeError when passed a name" do
+          lambda { @m.rb_undef_method @frozen, "ruby_test_method" }.should raise_error(RuntimeError)
+        end
+
+        it "raises a RuntimeError when passed a missing name" do
+          lambda { @m.rb_undef_method @frozen, "not_exist" }.should raise_error(RuntimeError)
+        end
+      end
     end
   end
 

@@ -1,9 +1,8 @@
-require File.dirname(__FILE__) + '/../spec_helper'
+require 'spec_helper'
 require 'mspec/utils/script'
 require 'mspec/runner/mspec'
 require 'mspec/runner/filters'
 require 'mspec/runner/actions/filter'
-require 'mspec/runner/actions/debug'
 require 'mspec/runner/actions/gdb'
 
 describe MSpecScript, ".config" do
@@ -81,7 +80,7 @@ end
 
 describe MSpecScript, ".main" do
   before :each do
-    @script = mock("MSpecScript", :null_object => true)
+    @script = mock("MSpecScript").as_null_object
     MSpecScript.stub!(:new).and_return(@script)
   end
 
@@ -213,7 +212,7 @@ describe MSpecScript, "#register" do
   before :each do
     @script = MSpecScript.new
 
-    @formatter = mock("formatter", :null_object => true)
+    @formatter = mock("formatter").as_null_object
     @script.config[:formatter] = @formatter
   end
 
@@ -250,7 +249,7 @@ describe MSpecScript, "#register" do
   before :each do
     @script = MSpecScript.new
 
-    @formatter = mock("formatter", :null_object => true)
+    @formatter = mock("formatter").as_null_object
     @script.config[:formatter] = @formatter
 
     @filter = mock("filter")
@@ -304,14 +303,6 @@ describe MSpecScript, "#register" do
   it "creates and registers a ProfileFilter for excluded specs" do
     ProfileFilter.should_receive(:new).with(:exclude, *@ary).and_return(@filter)
     @script.config[:xprofiles] = @ary
-    @script.register
-  end
-
-  it "creates and registers a DebugAction for excluded specs" do
-    @script.config[:atags] = ["some"]
-    @script.config[:astrings] = ["string"]
-    DebugAction.should_receive(:new).with(["some"], ["string"]).and_return(@filter)
-    @script.config[:debugger] = true
     @script.register
   end
 

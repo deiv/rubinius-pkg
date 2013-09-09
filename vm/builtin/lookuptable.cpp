@@ -1,16 +1,11 @@
-#include "vm.hpp"
-#include "vm/object_utils.hpp"
-#include "objectmemory.hpp"
-
-#include "builtin/lookuptable.hpp"
 #include "builtin/array.hpp"
 #include "builtin/class.hpp"
 #include "builtin/fixnum.hpp"
+#include "builtin/lookuptable.hpp"
+#include "builtin/string.hpp"
 #include "builtin/symbol.hpp"
 #include "builtin/tuple.hpp"
-#include "builtin/string.hpp"
-
-#include <iostream>
+#include "object_utils.hpp"
 
 #define LOOKUPTABLE_MAX_DENSITY 0.75
 #define LOOKUPTABLE_MIN_DENSITY 0.3
@@ -151,21 +146,21 @@ namespace rubinius {
   /** Same as fetch(state, key). */
   Object* LookupTable::aref(STATE, Object* key) {
     LookupTableBucket* entry = find_entry(state, key);
-    if(entry == Qnil) return Qnil;
+    if(entry->nil_p()) return cNil;
     return entry->value();
   }
 
   /** Same as aref(state, key). */
   Object* LookupTable::fetch(STATE, Object* key) {
     LookupTableBucket* entry = find_entry(state, key);
-    if(entry == Qnil) return Qnil;
+    if(entry->nil_p()) return cNil;
     return entry->value();
   }
 
   Object* LookupTable::fetch(STATE, Object* key, Object* return_on_failure) {
     LookupTableBucket* entry = find_entry(state, key);
 
-    if(entry == Qnil) {
+    if(entry->nil_p()) {
       return return_on_failure;
     }
 
@@ -174,24 +169,24 @@ namespace rubinius {
 
   Object* LookupTable::fetch(STATE, Object* key, bool* found) {
     LookupTableBucket* entry = find_entry(state, key);
-    if(entry == Qnil) {
+    if(entry->nil_p()) {
       *found = false;
-      return Qnil;
+      return cNil;
     }
 
     *found = true;
     return entry->value();
   }
 
-  /* lookuptable_find returns Qundef if there is not entry
+  /* lookuptable_find returns cUndef if there is not entry
    * referenced by 'key' in the LookupTable. This is useful
    * to distinguish x = {} from x = {:a => nil} and is used
    * in cpu.c in e.g. cpu_const_get_in_context.
    */
   Object* LookupTable::find(STATE, Object* key) {
     LookupTableBucket* entry = find_entry(state, key);
-    if(entry == Qnil) {
-      return Qundef;
+    if(entry->nil_p()) {
+      return cUndef;
     }
     return entry->value();
   }
@@ -229,21 +224,20 @@ namespace rubinius {
       entry = try_as<LookupTableBucket>(entry->next());
     }
 
-    return Qnil;
+    return cNil;
   }
 
   Object* LookupTable::has_key(STATE, Object* key) {
     LookupTableBucket* entry = find_entry(state, key);
 
-    if(entry == Qnil) return Qfalse;
-    return Qtrue;
+    if(entry->nil_p()) return cFalse;
+    return cTrue;
   }
 
   Array* LookupTable::collect(STATE, LookupTable* tbl, CollectAction& action, Array* ary)
   {
     size_t i, j;
     Tuple* values;
-    LookupTableBucket* entry;
 
     if(!ary) ary = Array::create(state, tbl->entries()->to_native());
 
@@ -251,7 +245,7 @@ namespace rubinius {
     values = tbl->values();
 
     for(i = j = 0; i < num_bins; i++) {
-      entry = try_as<LookupTableBucket>(values->at(state, i));
+      LookupTableBucket* entry = try_as<LookupTableBucket>(values->at(state, i));
 
       while(entry) {
         Object* ret = action.call(state, entry);
@@ -267,14 +261,13 @@ namespace rubinius {
   {
     size_t i, j;
     Tuple* values;
-    LookupTableBucket* entry;
 
     Array* ary = Array::create(state, tbl->entries()->to_native());
     size_t num_bins = tbl->bins()->to_native();
     values = tbl->values();
 
     for(i = j = 0; i < num_bins; i++) {
-      entry = try_as<LookupTableBucket>(values->at(state, i));
+      LookupTableBucket* entry = try_as<LookupTableBucket>(values->at(state, i));
 
       while(entry) {
         ary->set(state, j++, action(state, entry));
@@ -348,7 +341,7 @@ namespace rubinius {
     indent(++level);
     for(size_t i = 0; i < size; i++) {
       if(Symbol* sym = try_as<Symbol>(keys->get(state, i))) {
-        std::cout << ":" << sym->c_str(state);
+        std::cout << ":" << sym->debug_str(state);
       } else if(Fixnum* fix = try_as<Fixnum>(keys->get(state, i))) {
         std::cout << fix->to_native();
       }

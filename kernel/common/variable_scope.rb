@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   class VariableScope
     attr_reader :parent
@@ -5,12 +7,16 @@ module Rubinius
     attr_reader :module
     attr_reader :self
 
-    # CompiledMethod this scope is for.
+    # CompiledCode this scope is for.
     #
     attr_reader :method
 
     def self=(obj)
       @self = obj
+    end
+
+    def has_dynamic_locals?
+      @dynamic_locals
     end
 
     def dynamic_locals
@@ -31,7 +37,7 @@ module Rubinius
       # Otherwise, put it in the highest non-eval scope
       if @parent
         scope = @parent
-        while scope.parent and scope.method.get_metadata(:for_eval)
+        while scope.parent and scope.method.for_eval?
           scope = scope.parent
         end
 
@@ -47,7 +53,7 @@ module Rubinius
     def get_eval_local(name)
       scope = self
       while scope
-        if scope.dynamic_locals.key? name
+        if scope.has_dynamic_locals? && scope.dynamic_locals.key?(name)
           return scope.dynamic_locals[name]
         end
 
@@ -127,24 +133,7 @@ module Rubinius
       return false
     end
 
-    # Indicates if this scope is for the running of a script body
-    def for_script?
-      if script = @method.scope.script
-        return script.compiled_method == @method
-      end
-
-      return false
-    end
-
     def method_visibility
-      if scr = method.scope.script and scr.eval?
-        if scr.eval_binding
-          return scr.eval_binding.variables.method_visibility
-        else
-          return @method_visibility
-        end
-      end
-
       return @method_visibility if @method_visibility
 
       # if this scope is for a script, and there is no method_visibility
@@ -152,10 +141,16 @@ module Rubinius
       #
       # This is so that a script body has it's visibility default to private.
 
-      return :private if for_script?
+      return :private if script?
+      return nil if top_level_visibility?
+      return @parent.method_visibility if @parent
 
       # The default, let the caller sort it out.
       return nil
+    end
+
+    def inspect
+      "#<#{self.class.name}:0x#{self.object_id.to_s(16)} module=#{@module} method=#{@method.inspect}>"
     end
   end
 end

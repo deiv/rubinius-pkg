@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 
 
 module Rubinius
@@ -30,50 +32,15 @@ module Rubinius
     end
 
     #
-    # Bytewise iterator.
-    #
-    # @see  #each_byte
-    #
-    def bytes(&b)
-      return to_enum(:each_byte) unless block_given?
-      each_byte(&b)
-      self
-    end
-
-    #
-    # Set stream into binary mode.
-    #
-    # Stream is set into binary mode, i.e. 8-bit ASCII.
-    # Once set, the binary mode cannot be undone. Returns
-    # self.
-    #
-    # @todo Not implemented! Intentional? --rue
-    #
-    def binmode
-      self
-    end
-
-    #
-    # Character iterator.
-    #
-    # @see  #each_char
-    #
-    def chars(&b)
-      return to_enum(:each_char) unless block_given?
-      each_char(&b)
-      self
-    end
-
-    #
     # Close stream.
     #
     def close
       advance!
       @stream.close
-
       @advance = true unless @use_stdin_only
       @lineno = 0
-
+      @binmode = false
+      @external = nil
       self
     end
 
@@ -94,26 +61,17 @@ module Rubinius
     #
     # @see  #gets.
     #
-    def each_line
-      return to_enum :each_line unless block_given?
+    def each_line(sep=$/)
+      return to_enum :each_line, sep unless block_given?
       return nil unless advance!
 
-      while line = gets()
+      while line = gets(sep)
         yield line
       end
       self
     end
-
-    #
-    # Linewise iteration.
-    #
-    # @see  #each_line.
-    #
-    def each(&block)
-      return to_enum :each unless block_given?
-      each_line &block
-      self
-    end
+    alias_method :lines, :each_line
+    alias_method :each, :each_line
 
     #
     # Bytewise iteration.
@@ -126,11 +84,12 @@ module Rubinius
     #
     def each_byte
       return to_enum :each_byte unless block_given?
-      while ch = getc()
+      while ch = getbyte()
         yield ch
       end
       self
     end
+    alias_method :bytes, :each_byte
 
     #
     # Character-wise iteration.
@@ -143,13 +102,14 @@ module Rubinius
     #
     # @see  #getc
     #
-    def each_char(&block)
+    def each_char
       return to_enum :each_char unless block_given?
       while c = getc()
         yield c.chr
       end
       self
     end
+    alias_method :chars, :each_char
 
     #
     # Query whether stream is at end-of-file.
@@ -201,6 +161,19 @@ module Rubinius
       @stream
     end
 
+    def getbyte
+      while true
+        return nil unless advance!
+        if val = @stream.getbyte
+          return val
+        end
+
+        return nil if @use_stdin_only
+        @stream.close unless @stream.closed?
+        @advance = true
+      end
+    end
+
     #
     # Return one character from stream.
     #
@@ -219,7 +192,6 @@ module Rubinius
         @advance = true
       end
     end
-    alias_method :getbyte, :getc
 
     #
     # Return next line of text from stream.
@@ -246,18 +218,6 @@ module Rubinius
         $. = @lineno
         return line
       end
-    end
-
-    #
-    # Returns Enumerator for linewise iteration.
-    #
-    # Does not iterate directly, returns an Enumerator.
-    # If iteration is desired, use #each_line.
-    #
-    # @see  #each_line.
-    #
-    def lines(*args)
-      to_enum :each_line, *args
     end
 
     #
@@ -336,7 +296,7 @@ module Rubinius
     #
     def read(bytes=nil, output=nil)
       # The user might try to pass in nil, so we have to check here
-      output ||= ""
+      output ||= default_value
 
       if bytes
         bytes_left = bytes
@@ -368,26 +328,6 @@ module Rubinius
 
       output
     end
-
-    #
-    # Read all lines from stream.
-    #
-    # Reads all lines into an Array using #gets and
-    # returns the Array.
-    #
-    # @see  #gets
-    #
-    def readlines(sep=$/)
-      return nil unless advance!
-
-      lines = []
-      while line = gets(sep)
-        lines << line
-      end
-
-      lines
-    end
-    alias_method :to_a, :readlines
 
     #
     # Read next line of text.
@@ -485,7 +425,6 @@ module Rubinius
           @use_stdin_only = true
           return true
         end
-
         @init = true
       end
 
@@ -496,7 +435,7 @@ module Rubinius
       @advance = false
 
       file = ARGV.shift
-      @stream = (file == "-" ? STDIN : File.open(file, "r"))
+      @stream = stream(file) 
       @filename = file
 
       if $-i && @stream != STDIN
@@ -510,7 +449,6 @@ module Rubinius
       return true
     end
     private :advance!
-
   end
 end
 

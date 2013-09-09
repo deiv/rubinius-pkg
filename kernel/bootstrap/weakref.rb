@@ -1,37 +1,40 @@
+# -*- encoding: us-ascii -*-
+
 class WeakRef
 
-  class RefError < RuntimeError; end
+  class RefError < ::RuntimeError; end
 
-  def self.new
+  def self.new(obj)
     Rubinius.primitive :weakref_new
-    raise PrimitiveFailure, "WeakRef.new failed"
+    ::Kernel.raise PrimitiveFailure, "WeakRef.new primitive failed"
   end
 
   def __setobj__(obj)
     Rubinius.primitive :weakref_set_object
-    raise PrimitiveFailure, "WeakRef#__setobj__ failed"
+    ::Kernel.raise PrimitiveFailure, "WeakRef#__setobj__ primitive failed"
   end
 
   def __object__
     Rubinius.primitive :weakref_object
-    raise PrimitiveFailure, "WeakRef#object failed"
+    ::Kernel.raise PrimitiveFailure, "WeakRef#__object__ primitive failed"
   end
 
-  def object
+  def __getobj__
     obj = __object__()
-    raise RefError, "Object has been collected as garbage" unless obj
+    ::Kernel.raise RefError, "Object has been collected as garbage" unless obj
     return obj
-  end
-
-  alias_method :__getobj__, :object
-  alias_method :object=, :__setobj__
-
-  def inspect
-    "#<WeakRef:0x#{object_id.to_s(16)} object=#{object.inspect}>"
   end
 
   def weakref_alive?
     !!__object__
   end
 
+  def method_missing(method, *args, &block)
+    target = __getobj__
+    if target.respond_to?(method)
+      target.__send__(method, *args, &block)
+    else
+      super(method, *args, &block)
+    end
+  end
 end

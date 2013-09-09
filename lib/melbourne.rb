@@ -26,13 +26,27 @@ module Rubinius
     attr_accessor :transforms
     attr_accessor :magic_handler
     attr_accessor :references
+    attr_reader   :pre_exe
 
     def self.parse_string(string, name="(eval)", line=1)
-      new(name, line).parse_string string
+      system_parser.new(name, line).parse_string string
     end
 
     def self.parse_file(name, line=1)
-      new(name, line).parse_file
+      system_parser.new(name, line).parse_file
+    end
+
+    def self.system_parser
+      case
+      when Rubinius.ruby18?
+        Melbourne
+      when Rubinius.ruby19?
+        Melbourne19
+      when Rubinius.ruby20?
+        Melbourne20
+      else
+        raise Exception, "no processor is defined for Parser compiler stage."
+      end
     end
 
     def initialize(name, line, transforms=[])
@@ -41,12 +55,17 @@ module Rubinius
       @transforms = transforms
       @magic_handler = nil
       @data_offset = nil
+      @pre_exe = []
 
       # There can be multiple reported, we need to track them all.
       @syntax_errors = []
     end
 
     attr_reader :syntax_errors
+
+    def add_pre_exe(node)
+      @pre_exe << node if node
+    end
 
     def add_magic_comment(str)
       if @magic_handler

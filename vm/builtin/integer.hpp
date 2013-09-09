@@ -2,13 +2,14 @@
 #define RBX_BUILTIN_INTEGER_HPP
 
 #include "builtin/object.hpp"
-#include "type_info.hpp"
 
 namespace rubinius {
 
   class Numeric : public Object {
   public:
     static const object_type type = NumericType;
+
+    static void init(STATE);
 
     class Info : public TypeInfo {
     public:
@@ -21,6 +22,8 @@ namespace rubinius {
   public:
     static const object_type type = IntegerType;
 
+    static void init(STATE);
+
     static Integer* from(STATE, int i);
     static Integer* from(STATE, unsigned int i);
     static Integer* from(STATE, long i);
@@ -28,6 +31,9 @@ namespace rubinius {
     static Integer* from(STATE, long long i);
     static Integer* from(STATE, unsigned long long i);
 
+    static Integer* from_cstr(STATE, const char* str, const char* end, int base, Object* strict);
+
+    unsigned int        to_uint();
     long                to_long();
     unsigned long       to_ulong();
     long long           to_long_long();

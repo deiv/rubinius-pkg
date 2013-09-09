@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 class NilClass
   def &(other)
     false
@@ -18,8 +20,6 @@ class NilClass
   def nil?
     true
   end
-
-  alias_method :__nil__, :nil?
 
   def to_a
     []

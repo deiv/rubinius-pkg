@@ -9,6 +9,16 @@
 namespace rubinius {
   class LookupTable;
 
+  struct ClassFlags {
+    uint32_t class_id;
+    uint32_t serial_id;
+  };
+
+  union ClassData {
+    struct ClassFlags f;
+    uint64_t raw;
+  };
+
   class Class : public Module {
   public:
     const static object_type type = ClassType;
@@ -19,7 +29,7 @@ namespace rubinius {
 
     TypeInfo* type_info_;
 
-    int class_id_;
+    ClassData data_;
     uint32_t packed_size_;
 
   public:
@@ -28,7 +38,7 @@ namespace rubinius {
     attr_accessor(packed_ivar_info, LookupTable);
     attr_accessor(instance_type, Fixnum);
 
-    TypeInfo* type_info() {
+    TypeInfo* type_info() const {
       return type_info_;
     }
 
@@ -36,15 +46,31 @@ namespace rubinius {
       type_info_ = ti;
     }
 
-    int class_id() {
-      return class_id_;
+    ClassData data() const {
+      return data_;
     }
 
-    void set_class_id(int id) {
-      class_id_ = id;
+    uint64_t data_raw() const {
+      return data_.raw;
     }
 
-    uint32_t packed_size() {
+    uint32_t class_id() const {
+      return data_.f.class_id;
+    }
+
+    uint32_t serial_id() const {
+      return data_.f.serial_id;
+    }
+
+    void increment_serial() {
+      atomic::fetch_and_add(&data_.f.serial_id, 1U);
+    }
+
+    void set_class_id(uint32_t id) {
+      data_.f.class_id = id;
+    }
+
+    uint32_t packed_size() const {
       return packed_size_;
     }
 
@@ -54,7 +80,7 @@ namespace rubinius {
 
     /* interface */
 
-    void init(int id);
+    void init(STATE);
 
     /** Returns actual superclass, skipping over IncludedModules */
     Class* true_superclass(STATE);
@@ -69,12 +95,12 @@ namespace rubinius {
     static Class* s_allocate(STATE);
 
     // Rubinius.primitive+ :class_allocate
-    Object* allocate(STATE, CallFrame* calling_environment);
+    Object* allocate(STATE, GCToken gct, CallFrame* calling_environment);
 
     // Rubinius.primitive :class_set_superclass
     Object* set_superclass(STATE, Object* sup);
 
-    void auto_pack(STATE);
+    void auto_pack(STATE, GCToken gct, CallFrame* call_frame);
 
     class Info : public Module::Info {
     public:
@@ -82,8 +108,8 @@ namespace rubinius {
     };
   };
 
-  class CompiledMethod;
-  class StaticScope;
+  class CompiledCode;
+  class ConstantScope;
 
   class SingletonClass : public Class {
   public:

@@ -27,6 +27,9 @@ extern "C" int pthread_setname_np(const char*);
 #define HAVE_PTHREAD_SETNAME
 #endif
 
+namespace rubinius {
+namespace utilities {
+
 namespace thread {
 
   static inline void fail(const char* str) {
@@ -56,7 +59,7 @@ namespace thread {
       pthread_check(pthread_key_delete(native_));
     }
 
-    T get() {
+    T get() const {
       return reinterpret_cast<T>(pthread_getspecific(native_));
     }
 
@@ -82,6 +85,7 @@ namespace thread {
     Thread(size_t stack_size = 0, bool delete_on_exit = true)
       : delete_on_exit_(delete_on_exit)
       , stack_size_(stack_size)
+      , name_(NULL)
     {}
 
     virtual ~Thread() { }
@@ -89,11 +93,15 @@ namespace thread {
     // Set the name of the thread. Be sure to call this inside perform
     // so that the system can see the proper thread to set if that is
     // available (OS X only atm)
-    void set_name(const char* name) {
-      name_ = name;
+    static void set_os_name(const char* name) {
 #ifdef HAVE_PTHREAD_SETNAME
       pthread_setname_np(name);
 #endif
+    }
+
+    void set_name(const char* name) {
+      name_ = name;
+      set_os_name(name);
     }
 
     static pthread_t self() {
@@ -108,11 +116,11 @@ namespace thread {
       pthread_kill(thr, signal);
     }
 
-    pthread_t* native() {
+    const pthread_t* native() const {
       return &native_;
     }
 
-    size_t stack_size() {
+    size_t stack_size() const {
       return stack_size_;
     }
 
@@ -133,7 +141,7 @@ namespace thread {
       pthread_check(pthread_detach(native_));
     }
 
-    bool equal(Thread& other) {
+    bool equal(Thread& other) const {
       if(pthread_equal(native_, *other.native())) {
         return true;
       }
@@ -147,7 +155,7 @@ namespace thread {
       if(err != 0) {
         if(err == EDEADLK) {
           std::cout << "Thread deadlock in ::join()!\n";
-          abort();   
+          abort();
         }
 
         // Ignore the other errors, since they mean there is no thread
@@ -155,7 +163,7 @@ namespace thread {
       }
     }
 
-    bool in_self_p() {
+    bool in_self_p() const {
       return pthread_equal(pthread_self(), native_);
     }
 
@@ -205,7 +213,7 @@ namespace thread {
       return true;
     }
 
-    bool delete_on_exit() {
+    bool delete_on_exit() const {
       return delete_on_exit_;
     }
 
@@ -298,7 +306,6 @@ namespace thread {
   private:
     pthread_mutex_t native_;
     pthread_t owner_;
-    bool locked_;
 
   public:
     void init(bool rec=false) {
@@ -326,7 +333,7 @@ namespace thread {
       }
     }
 
-    pthread_t owner() {
+    pthread_t owner() const {
       return owner_;
     }
 
@@ -355,7 +362,6 @@ namespace thread {
       }
 
       owner_ = pthread_self();
-      locked_ = true;
 
       if(cDebugLockGuard) {
         std::cout << "[[ " << thread_debug_self() << "    MLocked " << describe() << " ]]\n";
@@ -370,7 +376,6 @@ namespace thread {
       }
 
       owner_ = pthread_self();
-      locked_ = true;
 
       return cLocked;
     }
@@ -379,8 +384,6 @@ namespace thread {
       if(cDebugLockGuard) {
         std::cout << "[[ " << thread_debug_self() << "   MUnlocking " << describe() << " ]]\n";
       }
-
-      locked_ = false;
 
       int err = pthread_mutex_unlock(&native_);
       if(err != 0) {
@@ -391,8 +394,8 @@ namespace thread {
       return cUnlocked;
     }
 
-    std::string describe() {
-      std::stringstream ss;
+    std::string describe() const {
+      std::ostringstream ss;
       ss << "Mutex ";
       ss << (void*)this;
       return ss.str();
@@ -469,27 +472,16 @@ namespace thread {
     }
   };
 
-  // Useful for stubbing out lock usage. Either based on a compile time
-  // decision about not needing a lock around something or for while debugging.
-  class NullLock {
-  public:
-    void lock() {}
-    void unlock() {}
-    bool try_lock() { return cLocked; }
-
-    std::string describe() {
-      std::stringstream ss;
-      ss << "NullLock ";
-      ss << (void*)this;
-      return ss.str();
-    }
-  };
+}
+}
 }
 
 #ifdef HAVE_OSX_SPINLOCK
 
 #include <libkern/OSAtomic.h>
 
+namespace rubinius {
+namespace utilities {
 namespace thread {
 
   class SpinLock {
@@ -504,6 +496,10 @@ namespace thread {
     SpinLock()
       : native_(0)
     {}
+
+    void init() {
+      native_ = 0;
+    }
 
     void lock() {
       OSSpinLockLock(&native_);
@@ -521,17 +517,21 @@ namespace thread {
       return cLocked;
     }
 
-    std::string describe() {
-      std::stringstream ss;
+    std::string describe() const {
+      std::ostringstream ss;
       ss << "SpinLock ";
       ss << (void*)this;
       return ss.str();
     }
   };
 };
+}
+}
 
 #else
 
+namespace rubinius {
+namespace utilities {
 namespace thread {
   class SpinLock {
   public: // Types
@@ -543,32 +543,40 @@ namespace thread {
 
   public:
     SpinLock()
-      : lock_(1)
+      : lock_(0)
     {}
 
+    void init() {
+      lock_ = 0;
+    }
+
     void lock() {
-      while(!atomic::compare_and_swap(&lock_, 1, 0));
+      while(!atomic::compare_and_swap(&lock_, 0, 1)) {
+        atomic::pause();
+      }
     }
 
     void unlock() {
-      lock_ = 1;
+      atomic::compare_and_swap(&lock_, 1, 0);
     }
 
     Code try_lock() {
-      if(atomic::compare_and_swap(&lock_, 1, 0)) {
+      if(atomic::compare_and_swap(&lock_, 0, 1)) {
         return cLocked;
       }
 
       return cLockBusy;
     }
 
-    std::string describe() {
-      std::stringstream ss;
+    std::string describe() const {
+      std::ostringstream ss;
       ss << "SpinLock ";
       ss << (void*)this;
       return ss.str();
     }
   };
+}
+}
 }
 
 #endif

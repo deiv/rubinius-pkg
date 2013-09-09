@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Math
-  module_function :gamma, :lgamma
+  module_function :cbrt, :gamma, :lgamma
 end

@@ -4,6 +4,7 @@
 #include <map>
 #include <stdexcept>
 #include <vector>
+#include <string>
 
 #include "object_types.hpp"
 #include "prelude.hpp"
@@ -14,9 +15,12 @@ namespace rubinius {
   class Class;
   class Object;
   class ObjectMark;
-  class ObjectVisitor;
   class ObjectMemory;
   class ObjectHeader;
+
+  class GCTokenImpl {};
+
+  typedef GCTokenImpl& GCToken;
 
   /**
    *  Static type information for the VM.
@@ -35,6 +39,7 @@ namespace rubinius {
   public: // Types
 
     typedef std::map<native_int, long> Slots;
+    typedef std::vector<object_type> SlotTypes;
     typedef std::vector<executor> AccessorPrimitives;
     typedef std::vector<uintptr_t> SlotLocations;
 
@@ -46,10 +51,11 @@ namespace rubinius {
     size_t      instance_size;
     static size_t instance_sizes[(int)LastObjectType];
     Slots       slots;
+    SlotTypes   slot_types;
     AccessorPrimitives slot_accessors;
     SlotLocations slot_locations;
-    object_type type;
     std::string type_name;
+    object_type type;
     bool        allow_user_allocate;
 
   public: /* Class initializers */
@@ -58,7 +64,6 @@ namespace rubinius {
     static void auto_init(ObjectMemory* om);
     static void auto_learn_fields(STATE);
     virtual void auto_mark(Object* obj, ObjectMark& mark) = 0;
-    virtual void auto_visit(Object* obj, ObjectVisitor& visit);
 
   public:   /* Ctors */
 
@@ -76,16 +81,13 @@ namespace rubinius {
 
   public:   /* Interface */
 
-    void set_state(STATE) {
-      state_ = state;
-    }
+    void set_state(STATE);
 
     VM* state() {
       return state_;
     }
 
     virtual void mark(Object* obj, ObjectMark& mark);
-    virtual void visit(Object* obj, ObjectVisitor& visit);
 
     virtual void set_field(STATE, Object* target, size_t index, Object* val);
     virtual Object* get_field(STATE, Object* target, size_t index);
@@ -101,7 +103,7 @@ namespace rubinius {
      * Currently prints the same output as show_simple. Is specialized by
      * complex classes to e.g. limit the recursion into nested
      * objects to make the output more manageable. See e.g. Tuple
-     * and CompiledMethod. Immediates and numeric classes print
+     * and CompiledCode. Immediates and numeric classes print
      * their value for both show and show_simple.
      */
     virtual void show(STATE, Object* self, int level);
@@ -159,7 +161,6 @@ namespace rubinius {
 #define BASIC_TYPEINFO(super) \
   Info(object_type type) : super(type) { } \
   virtual void auto_mark(Object* obj, ObjectMark& mark); \
-  virtual void auto_visit(Object* obj, ObjectVisitor& visit); \
   virtual void set_field(STATE, Object* target, size_t index, Object* val); \
   virtual Object* get_field(STATE, Object* target, size_t index); \
   virtual void populate_slot_locations();

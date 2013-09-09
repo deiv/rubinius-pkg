@@ -1,9 +1,8 @@
 #ifndef RBX_CONFIG_PARSER
 #define RBX_CONFIG_PARSER
 
+#include <string>
 #include <iostream>
-#include <sstream>
-#include <map>
 #include <vector>
 
 namespace rubinius {
@@ -22,10 +21,10 @@ namespace rubinius {
       long to_i() const;
     };
 
-    typedef std::map<std::string, Entry*> ConfigMap;
+    typedef std::vector< std::pair<std::string, Entry*> > ConfigVector;
     typedef std::vector<Entry*> EntryList;
 
-    ConfigMap variables;
+    ConfigVector variables;
 
     virtual ~ConfigParser();
 

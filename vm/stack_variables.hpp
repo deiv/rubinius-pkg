@@ -23,18 +23,18 @@ namespace rubinius {
       self_ = self;
       block_ = block;
       module_ = module;
-      last_match_ = Qnil;
+      last_match_ = cNil;
 
       for(int i = 0; i < locals; i++) {
-        locals_[i] = Qnil;
+        locals_[i] = cNil;
       }
     }
 
-    VariableScope* on_heap() {
+    VariableScope* on_heap() const {
       return on_heap_;
     }
 
-    VariableScope* parent() {
+    VariableScope* parent() const {
       return parent_;
     }
 
@@ -42,23 +42,27 @@ namespace rubinius {
       parent_ = scope;
     }
 
-    Object* self() {
+    void set_block(Object* block) {
+      block_ = block;
+    }
+
+    Object* self() const {
       return self_;
     }
 
-    Object* block() {
+    Object* block() const {
       return block_;
     }
 
-    Module* module() {
+    Module* module() const {
       return module_;
     }
 
-    bool made_alias_p() {
+    bool made_alias_p() const {
       return on_heap_ != 0;
     }
 
-    Object* get_local(int which) {
+    Object* get_local(int which) const {
       return locals_[which];
     }
 
@@ -75,6 +79,9 @@ namespace rubinius {
 
     friend class GarbageCollector;
   };
+
+#define ALLOCA_STACKVARIABLES(local_size) \
+  reinterpret_cast<StackVariables*>(alloca(sizeof(StackVariables) + (sizeof(Object*) * local_size)))
 }
 
 #endif

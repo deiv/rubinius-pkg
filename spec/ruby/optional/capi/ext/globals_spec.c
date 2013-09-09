@@ -67,6 +67,43 @@ static VALUE global_spec_rb_set_kcode(VALUE self, VALUE code) {
 }
 #endif
 
+#ifdef HAVE_RB_RS
+static VALUE global_spec_rb_rs(VALUE self) {
+  return rb_rs;
+}
+#endif
+
+#ifdef HAVE_RB_DEFAULT_RS
+static VALUE global_spec_rb_default_rs(VALUE self) {
+  return rb_default_rs;
+}
+#endif
+
+#ifdef HAVE_RB_OUTPUT_RS
+static VALUE global_spec_rb_output_rs(VALUE self) {
+  return rb_output_rs;
+}
+#endif
+
+#ifdef HAVE_RB_OUTPUT_FS
+static VALUE global_spec_rb_output_fs(VALUE self) {
+  return rb_output_fs;
+}
+#endif
+
+#ifdef HAVE_RB_LASTLINE_SET
+static VALUE global_spec_rb_lastline_set(VALUE self, VALUE line) {
+  rb_lastline_set(line);
+  return Qnil;
+}
+#endif
+
+#ifdef HAVE_RB_LASTLINE_GET
+static VALUE global_spec_rb_lastline_get(VALUE self) {
+  return rb_lastline_get();
+}
+#endif
+
 void Init_globals_spec() {
   VALUE cls;
   cls = rb_define_class("CApiGlobalSpecs", rb_cObject);
@@ -98,6 +135,30 @@ void Init_globals_spec() {
 
 #ifdef HAVE_RB_SET_KCODE
   rb_define_method(cls, "rb_set_kcode", global_spec_rb_set_kcode, 1);
+#endif
+
+#ifdef HAVE_RB_RS
+  rb_define_method(cls, "rb_rs", global_spec_rb_rs, 0);
+#endif
+
+#ifdef HAVE_RB_DEFAULT_RS
+  rb_define_method(cls, "rb_default_rs", global_spec_rb_default_rs, 0);
+#endif
+
+#ifdef HAVE_RB_OUTPUT_RS
+  rb_define_method(cls, "rb_output_rs", global_spec_rb_output_rs, 0);
+#endif
+
+#ifdef HAVE_RB_OUTPUT_FS
+  rb_define_method(cls, "rb_output_fs", global_spec_rb_output_fs, 0);
+#endif
+
+#ifdef HAVE_RB_LASTLINE_SET
+  rb_define_method(cls, "rb_lastline_set", global_spec_rb_lastline_set, 1);
+#endif
+
+#ifdef HAVE_RB_LASTLINE_GET
+  rb_define_method(cls, "rb_lastline_get", global_spec_rb_lastline_get, 0);
 #endif
 }
 

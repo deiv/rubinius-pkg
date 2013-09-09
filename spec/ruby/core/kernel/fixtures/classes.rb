@@ -9,6 +9,14 @@ module KernelSpecs
     Kernel.Array(arg)
   end
 
+  def self.Hash_function(arg)
+    Hash(arg)
+  end
+
+  def self.Hash_method(arg)
+    Kernel.Hash(arg)
+  end
+
   def self.putc_function(arg)
     putc arg
   end
@@ -17,10 +25,37 @@ module KernelSpecs
     Kernel.putc arg
   end
 
+  def self.has_private_method(name)
+    cmd = <<-EOC
+| #{RUBY_EXE} -n -e '
+m = Kernel.private_instance_methods(false).grep(/^#{name}$/)
+print m.map { |x| x.to_s }.join("")
+'
+    EOC
+    ruby_exe("puts", :args => cmd) == name.to_s
+  end
+
+  def self.chop(str, method)
+    cmd = "| #{RUBY_EXE} -n -e '$_ = #{str.inspect}; #{method}; print $_'"
+    ruby_exe "puts", :args => cmd
+  end
+
+  def self.encoded_chop(file)
+    ruby_exe "puts", :args => "| #{RUBY_EXE} -n #{file}"
+  end
+
+  def self.chomp(str, method, sep="\n")
+    cmd = "| #{RUBY_EXE} -n -e '$_ = #{str.inspect}; $/ = #{sep.inspect}; #{method}; print $_'"
+    ruby_exe "puts", :args => cmd
+  end
+
+  def self.encoded_chomp(file)
+    ruby_exe "puts", :args => "| #{RUBY_EXE} -n #{file}"
+  end
+
   class Method
-    def abort(*msg)
-      super
-    end
+    public :abort, :exec, :exit, :exit!, :fork, :system
+    public :spawn if respond_to?(:spawn, true)
   end
 
   class Methods
@@ -109,6 +144,12 @@ module KernelSpecs
 
   class B < A
     alias aliased_pub_method pub_method
+  end
+
+  class VisibilityChange
+    class << self
+      private :new
+    end
   end
 
   class Binding
@@ -240,10 +281,6 @@ module KernelSpecs
     end
   end
 
-  def self.helper_script
-    File.dirname(__FILE__) + '/check_expansion.rb'
-  end
-
   module DuplicateM
     def repr
       self.class.name.to_s
@@ -260,6 +297,18 @@ module KernelSpecs
 
     def initialize_copy(other)
       ScratchPad.record object_id
+    end
+  end
+
+  class Clone
+    def initialize_clone(other)
+      ScratchPad.record other.object_id
+    end
+  end
+
+  class Dup
+    def initialize_dup(other)
+      ScratchPad.record other.object_id
     end
   end
 
@@ -326,9 +375,29 @@ module KernelSpecs
     end
   end
 
-  class Ivar
+  class InstanceVariable
     def initialize
       @greeting = "hello"
+    end
+  end
+
+  class PrivateToAry
+    private
+
+    def to_ary
+      [1, 2]
+    end
+
+    def to_a
+      [3, 4]
+    end
+  end
+
+  class PrivateToA
+    private
+
+    def to_a
+      [3, 4]
     end
   end
 end
@@ -338,6 +407,16 @@ class EvalSpecs
     eval "class B; end"
     def c
       eval "class C; end"
+    end
+  end
+
+  class CoercedObject
+    def to_str
+      '2 + 3'
+    end
+
+    def hash
+      nil
     end
   end
 

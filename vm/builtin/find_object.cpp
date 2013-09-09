@@ -2,29 +2,28 @@
 // because it uses a whole bunch of local classes and it's cleaner to have
 // all that be in it's own file.
 
-#include "vm/vm.hpp"
-
+#include "builtin/array.hpp"
+#include "builtin/class.hpp"
+#include "builtin/exception.hpp"
+#include "builtin/object.hpp"
+#include "builtin/symbol.hpp"
+#include "builtin/tuple.hpp"
+#include "builtin/variable_scope.hpp"
+#include "builtin/system.hpp"
 #include "gc/gc.hpp"
 #include "gc/walker.hpp"
 #include "objectmemory.hpp"
-
-#include "builtin/object.hpp"
-#include "builtin/array.hpp"
-#include "builtin/symbol.hpp"
-#include "builtin/module.hpp"
-#include "builtin/class.hpp"
-#include "builtin/tuple.hpp"
-#include "builtin/variable_scope.hpp"
-
-#include "builtin/system.hpp"
-
 #include "object_utils.hpp"
+#include "on_stack.hpp"
 
 namespace rubinius {
   class QueryCondition {
   public:
     virtual ~QueryCondition() { }
     virtual bool perform(STATE, Object* obj) = 0;
+    virtual Object* immediate() {
+      return 0;
+    }
   };
 
   class AndCondition : public QueryCondition {
@@ -95,23 +94,22 @@ namespace rubinius {
       return id_;
     }
 
-    Object* immediate() {
+    virtual bool perform(STATE, Object* obj) {
+      return obj->has_id(state) && obj->id(state) == id_;
+    }
+
+    virtual Object* immediate() {
       native_int id = id_->to_native();
 
-      // immediates have an odd object id, references even
-      if((id & 1) == 1) {
-        Object* obj = reinterpret_cast<Object*>(id >> 1);
+      if(id & TAG_REF_MASK) {
+        Object* obj = reinterpret_cast<Object*>(id);
 
         // Be sure to not leak a bad reference leak out here.
-        if(obj->reference_p()) return Qnil;
+        if(obj->reference_p()) return cNil;
         return obj;
       }
 
       return 0;
-    }
-
-    virtual bool perform(STATE, Object* obj) {
-      return obj->has_id(state) && obj->id(state) == id_;
     }
   };
 
@@ -137,7 +135,7 @@ namespace rubinius {
     {}
 
     virtual bool perform(STATE, Object* obj) {
-      return obj->respond_to(state, name_, Qtrue)->true_p();
+      return obj->respond_to(state, name_, cTrue)->true_p();
     }
   };
 
@@ -157,7 +155,7 @@ namespace rubinius {
       if(obj->ivars() == target_) return true;
 
       // Check slots.
-      TypeInfo* ti = state->om->type_info[obj->type_id()];
+      TypeInfo* ti = state->memory()->type_info[obj->type_id()];
       for(TypeInfo::Slots::iterator i = ti->slots.begin();
           i != ti->slots.end();
           ++i) {
@@ -174,7 +172,7 @@ namespace rubinius {
 
       obj->ivar_names(state, tmp_);
 
-      for(size_t i = 0; i < tmp_->size(); i++) {
+      for(native_int i = 0; i < tmp_->size(); i++) {
         if(Symbol* sym = try_as<Symbol>(tmp_->get(state, i))) {
           if(obj->get_ivar(state, sym) == target_) return true;
         }
@@ -254,14 +252,16 @@ namespace rubinius {
     return 0;
   }
 
-  Object* System::vm_find_object(STATE, Array* arg, Object* callable,
+  Object* System::vm_find_object(STATE, GCToken gct,
+                                 Array* arg, Object* callable,
                                  CallFrame* calling_environment)
   {
-    ObjectMemory::GCInhibit inhibitor(state->om);
+    ObjectMemory::GCInhibit inhibitor(state->memory());
 
     // Support an aux mode, where callable is an array and we just append
     // objects to it rather than #call it.
     Array* ary = try_as<Array>(callable);
+    if(!ary) ary = nil<Array>();
 
     Array* args = Array::create(state, 1);
 
@@ -270,31 +270,45 @@ namespace rubinius {
     QueryCondition* condition = create_condition(state, arg);
     if(!condition) return Fixnum::from(0);
 
-    Object* ret = Qnil;
+    Object* ret = cNil;
 
-    // Special case for looking for an object_id of an immediate
-    if(ObjectIdCondition* oic = dynamic_cast<ObjectIdCondition*>(condition)) {
-      if(Object* obj = oic->immediate()) {
-        if(ary) {
-          ary->append(state, obj);
-        } else {
-          args->set(state, 0, obj);
-          ret = callable->send(state, calling_environment, G(sym_call),
-                               args, Qnil, false);
+    // Special case for looking for an immediate
+    if(Object* obj = condition->immediate()) {
+      if(Symbol* sym = try_as<Symbol>(obj)) {
+        // Check whether this is actually a valid symbol, not
+        // some random non existing symbol.
+        if(!state->shared().symbols.lookup_string(state, sym)) {
+          delete condition;
+          std::ostringstream msg;
+          msg << "Invalid symbol 0x" << std::hex << reinterpret_cast<uintptr_t>(sym);
+          Exception::range_error(state, msg.str().c_str());
+          return 0;
         }
-
-        delete condition;
-        if(!ret) return 0;
-        return Fixnum::from(1);
       }
+      if(!ary->nil_p()) {
+        ary->append(state, obj);
+      } else {
+        args->set(state, 0, obj);
+        ret = callable->send(state, calling_environment, G(sym_call),
+                             args, cNil, false);
+      }
+
+      delete condition;
+      if(!ret) return 0;
+      return Fixnum::from(1);
     }
 
-    state->set_call_frame(calling_environment);
-    ObjectWalker walker(state->om);
-    GCData gc_data(state);
+    OnStack<2> os(state, ary, args);
 
-    // Seed it with the root objects.
-    walker.seed(gc_data);
+    state->set_call_frame(calling_environment);
+    ObjectWalker walker(state->memory());
+    GCData gc_data(state->vm());
+
+    {
+      StopTheWorld stw(state, gct, calling_environment);
+      // Seed it with the root objects.
+      walker.seed(gc_data);
+    }
 
     Object* obj = walker.next();
 
@@ -302,12 +316,25 @@ namespace rubinius {
       if(condition->perform(state, obj)) {
         total++;
 
-        if(ary) {
+        if(!ary->nil_p()) {
           ary->append(state, obj);
         } else {
+          // We call back into Ruby land here, so that might trigger a GC
+          // This ensures we mark all the locations of the current search
+          // queue for the walker, so we update these object references
+          // properly.
+          Object** stack_buf = walker.stack_buf();
+          size_t stack_size  = walker.stack_size();
+
+          Object** variable_buffer[stack_size];
+          for(size_t i = 0; i < stack_size; ++i) {
+            variable_buffer[i] = &stack_buf[i];
+          }
+          VariableRootBuffer vrb(state->vm()->current_root_buffers(),
+                                 variable_buffer, stack_size);
           args->set(state, 0, obj);
           ret = callable->send(state, calling_environment, G(sym_call),
-                               args, Qnil, false);
+                               args, cNil, false);
           if(!ret) break;
         }
       }

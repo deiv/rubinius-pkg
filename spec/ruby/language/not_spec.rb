@@ -26,11 +26,13 @@ describe "The not keyword" do
   end
 
   it "returns true if the argument is nil" do
-    (not(false)).should be_true
+    (not(nil)).should be_true
   end
 end
 
-language_version __FILE__, "not"
+ruby_version_is "1.9" do
+  require File.expand_path("../versions/not_1.9", __FILE__)
+end
 
 describe "The `!' keyword" do
   it "negates a `true' value" do

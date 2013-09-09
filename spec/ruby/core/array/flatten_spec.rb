@@ -81,10 +81,10 @@ describe "Array#flatten" do
   end
 
   it "returns subclass instance for Array subclasses" do
-    ArraySpecs::MyArray[].flatten.should be_kind_of(ArraySpecs::MyArray)
-    ArraySpecs::MyArray[1, 2, 3].flatten.should be_kind_of(ArraySpecs::MyArray)
-    ArraySpecs::MyArray[1, [2], 3].flatten.should be_kind_of(ArraySpecs::MyArray)
-    [ArraySpecs::MyArray[1, 2, 3]].flatten.should be_kind_of(Array)
+    ArraySpecs::MyArray[].flatten.should be_an_instance_of(ArraySpecs::MyArray)
+    ArraySpecs::MyArray[1, 2, 3].flatten.should be_an_instance_of(ArraySpecs::MyArray)
+    ArraySpecs::MyArray[1, [2], 3].flatten.should be_an_instance_of(ArraySpecs::MyArray)
+    [ArraySpecs::MyArray[1, 2, 3]].flatten.should be_an_instance_of(Array)
   end
 
   it "is not destructive" do
@@ -112,6 +112,16 @@ describe "Array#flatten" do
       lambda { [@obj].flatten }.should raise_error(TypeError)
     end
   end
+
+  it "returns a tainted array if self is tainted" do
+    [].taint.flatten.tainted?.should be_true
+  end
+
+  ruby_version_is "1.9" do
+    it "returns an untrusted array if self is untrusted" do
+      [].untrust.flatten.untrusted?.should be_true
+    end
+  end
 end
 
 describe "Array#flatten!" do
@@ -131,6 +141,12 @@ describe "Array#flatten!" do
     a.flatten!.should == nil
     a = [1, [2, 3]]
     a.flatten!.should_not == nil
+  end
+
+  it "should not check modification by size" do
+    a = [1, 2, [3]]
+    a.flatten!.should_not == nil
+    a.should == [1, 2, 3]
   end
 
   ruby_version_is "1.8.7" do
@@ -200,7 +216,7 @@ describe "Array#flatten!" do
 
     ary = [ArraySpecs::MyArray[1, 2, 3]]
     ary.flatten!
-    ary.should be_kind_of(Array)
+    ary.should be_an_instance_of(Array)
     ary.should == [1, 2, 3]
   end
 

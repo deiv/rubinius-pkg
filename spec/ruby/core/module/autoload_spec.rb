@@ -19,6 +19,7 @@ describe "Module#autoload" do
 
   before :each do
     @loaded_features = $".dup
+    @frozen_module = Module.new.freeze
 
     ScratchPad.clear
   end
@@ -154,52 +155,32 @@ describe "Module#autoload" do
     ModuleSpecs::Autoload.use_ex1.should == :good
   end
 
-  ruby_version_is "" ... "1.9" do
-    it "removes the constant from the constant table if load fails" do
-      ModuleSpecs::Autoload.autoload :Fail, @non_existent
-      ModuleSpecs::Autoload.should have_constant(:Fail)
-
-      lambda { ModuleSpecs::Autoload::Fail }.should raise_error(LoadError)
-      ModuleSpecs::Autoload.should_not have_constant(:Fail)
+  it "does not load the file when refering to the constant in defined?" do
+    module ModuleSpecs::Autoload::Q
+      autoload :R, fixture(__FILE__, "autoload.rb")
+      defined?(R).should == "constant"
     end
-
-    it "removes the constant from the constant table if the loaded files does not define it" do
-      ModuleSpecs::Autoload.autoload :O, fixture(__FILE__, "autoload_o.rb")
-      ModuleSpecs::Autoload.should have_constant(:O)
-
-      lambda { ModuleSpecs::Autoload::O }.should raise_error(NameError)
-      ModuleSpecs::Autoload.should_not have_constant(:O)
-    end
-
-    it "does not load the file when refering to the constant in defined?" do
-      module ModuleSpecs::Autoload::Q
-        autoload :R, fixture(__FILE__, "autoload.rb")
-        defined?(R).should == "constant"
-      end
-      ModuleSpecs::Autoload::Q.should have_constant(:R)
-    end
+    ModuleSpecs::Autoload::Q.should have_constant(:R)
   end
 
-  ruby_version_is "1.9" do
-    it "does not remove the constant from the constant table if load fails" do
-      ModuleSpecs::Autoload.autoload :Fail, @non_existent
-      ModuleSpecs::Autoload.should have_constant(:Fail)
+  it "does not remove the constant from the constant table if load fails" do
+    ModuleSpecs::Autoload.autoload :Fail, @non_existent
+    ModuleSpecs::Autoload.should have_constant(:Fail)
 
-      lambda { ModuleSpecs::Autoload::Fail }.should raise_error(LoadError)
-      ModuleSpecs::Autoload.should have_constant(:Fail)
-    end
+    lambda { ModuleSpecs::Autoload::Fail }.should raise_error(LoadError)
+    ModuleSpecs::Autoload.should have_constant(:Fail)
+  end
 
-    it "does not remove the constant from the constant table if the loaded files does not define it" do
-      ModuleSpecs::Autoload.autoload :O, fixture(__FILE__, "autoload_o.rb")
-      ModuleSpecs::Autoload.should have_constant(:O)
+  it "does not remove the constant from the constant table if the loaded files does not define it" do
+    ModuleSpecs::Autoload.autoload :O, fixture(__FILE__, "autoload_o.rb")
+    ModuleSpecs::Autoload.should have_constant(:O)
 
-      lambda { ModuleSpecs::Autoload::O }.should raise_error(NameError)
-      ModuleSpecs::Autoload.should have_constant(:O)
-    end
+    lambda { ModuleSpecs::Autoload::O }.should raise_error(NameError)
+    ModuleSpecs::Autoload.should have_constant(:O)
   end
 
   ruby_version_is '1.9' ... '1.9.3' do
-    it "return nil on refering the constant with defined?()" do
+    it "returns nil on refering the constant with defined?()" do
       module ModuleSpecs::Autoload::Q
         autoload :R, fixture(__FILE__, "autoload.rb")
         defined?(R).should be_nil
@@ -209,7 +190,7 @@ describe "Module#autoload" do
   end
 
   ruby_version_is '1.9.3' do
-    it "return 'constant' on refering the constant with defined?()" do
+    it "returns 'constant' on refering the constant with defined?()" do
       module ModuleSpecs::Autoload::Q
         autoload :R, fixture(__FILE__, "autoload.rb")
         defined?(R).should == 'constant'
@@ -241,6 +222,41 @@ describe "Module#autoload" do
     end
 
     ModuleSpecs::Autoload::U::V::X.should == :autoload_uvx
+  end
+
+  it "loads the file that defines subclass XX::YY < YY and YY is a top level constant" do
+
+    module ModuleSpecs::Autoload::XX
+      autoload :YY, fixture(__FILE__, "autoload_subclass.rb")
+    end
+
+    ModuleSpecs::Autoload::XX::YY.superclass.should == YY
+  end
+
+
+  it "looks up the constant in the scope where it is referred" do
+    module ModuleSpecs
+      module Autoload
+        autoload :QQ, fixture(__FILE__, "autoload_scope.rb")
+        class PP
+          QQ.new.should be_kind_of(ModuleSpecs::Autoload::PP::QQ)
+        end
+      end
+    end
+  end
+
+  it "looks up the constant when in a meta class scope" do
+    module ModuleSpecs
+      module Autoload
+        autoload :R, fixture(__FILE__, "autoload_r.rb")
+        class << self
+          def r
+            R.new
+          end
+        end
+      end
+    end
+    ModuleSpecs::Autoload.r.should be_kind_of(ModuleSpecs::Autoload::R)
   end
 
   ruby_version_is "1.9" do
@@ -353,6 +369,117 @@ describe "Module#autoload" do
       name.should_receive(:to_path).and_return("autoload_name.rb")
 
       lambda { ModuleSpecs::Autoload.autoload :Str, name }.should_not raise_error
+    end
+  end
+
+  describe "on a frozen module" do
+    ruby_version_is "" ... "1.9" do
+      it "raises a TypeError before setting the name" do
+        lambda { @frozen_module.autoload :Foo, @non_existent }.should raise_error(TypeError)
+        @frozen_module.should_not have_constant(:Foo)
+      end
+    end
+
+    ruby_version_is "1.9" do
+      it "raises a RuntimeError before setting the name" do
+        lambda { @frozen_module.autoload :Foo, @non_existent }.should raise_error(RuntimeError)
+        @frozen_module.should_not have_constant(:Foo)
+      end
+    end
+  end
+
+  describe "(concurrently)" do
+    it "blocks a second thread while a first is doing the autoload" do
+      ModuleSpecs::Autoload.autoload :Concur, fixture(__FILE__, "autoload_concur.rb")
+
+      start = false
+
+      ScratchPad.record []
+
+      t1_val = nil
+      t2_val = nil
+
+      fin = false
+
+      t1 = Thread.new do
+        Thread.pass until start
+        t1_val = ModuleSpecs::Autoload::Concur
+        ScratchPad.recorded << :t1_post
+        fin = true
+      end
+
+      t2_exc = nil
+
+      t2 = Thread.new do
+        Thread.pass until t1 and t1[:in_autoload_rb]
+        begin
+          t2_val = ModuleSpecs::Autoload::Concur
+        rescue Exception => e
+          t2_exc = e
+        else
+          Thread.pass until fin
+          ScratchPad.recorded << :t2_post
+        end
+      end
+
+      start = true
+
+      t1.join
+      t2.join
+
+      ScratchPad.recorded.should == [:con_pre, :con_post, :t1_post, :t2_post]
+
+      t1_val.should == 1
+      t2_val.should == t1_val
+
+      t2_exc.should be_nil
+    end
+  end
+
+  ruby_version_is "2.0" do
+    describe "(concurrently)" do
+      it "blocks others threads while doing an autoload" do
+        file_path     = fixture(__FILE__, "repeated_concurrent_autoload.rb")
+        autoload_path = file_path.sub /\.rb\Z/, ''
+        mod_count     = 30
+        thread_count  = 16
+
+        mod_names = []
+        mod_count.times do |i|
+          mod_name = :"Mod#{i}"
+          autoload mod_name, autoload_path
+          mod_names << mod_name
+        end
+
+        barrier = ModuleSpecs::CyclicBarrier.new thread_count
+        ScratchPad.record ModuleSpecs::ThreadSafeCounter.new
+
+        threads = (1..thread_count).map do
+          Thread.new do
+            mod_names.each do |mod_name|
+              break false unless barrier.enabled?
+
+              was_last_one_in = barrier.await # wait for all threads to finish the iteration
+              # clean up so we can autoload the same file again
+              $LOADED_FEATURES.delete(file_path) if was_last_one_in && $LOADED_FEATURES.include?(file_path)
+              barrier.await # get ready for race
+
+              begin
+                Object.const_get(mod_name).foo
+              rescue NoMethodError
+                barrier.disable!
+                break false
+              end
+            end
+          end
+        end
+
+        # check that no thread got a NoMethodError because of partially loaded module
+        threads.all? {|t| t.value}.should be_true
+
+        # check that the autoloaded file was evaled exactly once
+        ScratchPad.recorded.get.should == mod_count
+      end
     end
   end
 end

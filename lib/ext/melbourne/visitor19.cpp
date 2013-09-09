@@ -1,8 +1,6 @@
 #include <sstream>
-#include <stdint.h>
 
-#include "ruby.h"
-
+#include "melbourne.hpp"
 #include "parser_state19.hpp"
 #include "visitor19.hpp"
 #include "symbols.hpp"
@@ -19,7 +17,7 @@ namespace melbourne {
       if(start_lines->size() > 0) {
         StartPosition& pos = start_lines->back();
 
-        std::stringstream ss;
+        std::ostringstream ss;
         ss << "missing 'end' for '"
            << pos.kind
            << "' started on line "
@@ -54,7 +52,7 @@ namespace melbourne {
                rb_intern("process_parse_error"),4,
                err_msg,
                INT2FIX(col),
-               INT2FIX(ruby_sourceline),
+               INT2FIX(sourceline),
                lex_lastline);
 
     parse_error = true;
@@ -710,19 +708,31 @@ namespace melbourne {
       NODE* masgn = 0;
       NODE* next = 0;
 
-      if(node->nd_argc > 0) {
-        total_args = (int)locals[0];
-        args_ary = locals + 1;
-
-        if(post_args && post_args->nd_next && nd_type(post_args->nd_next) == NODE_AND) {
-          if(nd_type(post_args->nd_next->nd_head) == NODE_BLOCK) {
+      if(post_args && post_args->nd_next && nd_type(post_args->nd_next) == NODE_AND) {
+        if(post_args->nd_next->nd_head) {
+          if (nd_type(post_args->nd_next->nd_head) == NODE_BLOCK) {
             masgn = post_args->nd_next->nd_head->nd_head;
             next = post_args->nd_next->nd_head->nd_next;
           } else {
             masgn = post_args->nd_next->nd_head;
             next = masgn->nd_next;
+            // -1 comes from: mlhs_head tSTAR
+            if(masgn->nd_cnt == -1) next = 0;
+          }
+        } else {
+          masgn = post_args->nd_next->nd_2nd;
+          if(masgn) {
+            next = masgn->nd_next;
+            if (nd_type(masgn) == NODE_BLOCK) {
+              masgn = masgn->nd_head;
+            }
           }
         }
+      }
+
+      if(node->nd_argc > 0) {
+        total_args = (int)locals[0];
+        args_ary = locals + 1;
 
         args = rb_ary_new();
         for(int i = 0; i < node->nd_argc && i < total_args; i++) {
@@ -773,7 +783,21 @@ namespace melbourne {
 
         post = rb_ary_new();
         for(int i = 0; i < post_args->nd_argc && start + i < total_args; i++) {
-          rb_ary_push(post, ID2SYM(args_ary[start + i]));
+          VALUE arg = Qnil;
+
+          if(!INTERNAL_ID_P(args_ary[start + i])) {
+            arg = ID2SYM(args_ary[start + i]);
+          } else if(masgn) {
+            arg = process_parse_tree(parser_state, ptp, masgn, locals);
+            if(next && nd_type(next) == NODE_BLOCK) {
+              masgn = next->nd_head;
+              next = next->nd_next;
+            } else {
+              masgn = next;
+              if(masgn) next = masgn->nd_next;
+            }
+          }
+          rb_ary_push(post, arg);
         }
       }
 
@@ -891,6 +915,10 @@ namespace melbourne {
       tree = rb_funcall(ptp, rb_sFile, 1, line);
       break;
 
+    case NODE_ENCODING:
+      tree = rb_funcall(ptp, rb_sEncoding, 2, line, node->nd_lit);
+      break;
+
     case NODE_SPLAT: {
       VALUE expr = process_parse_tree(parser_state, ptp, node->nd_head, locals);
       tree = rb_funcall(ptp, rb_sSplat, 2, line, expr);
@@ -918,6 +946,11 @@ namespace melbourne {
     case NODE_EVSTR: {
       VALUE value = process_parse_tree(parser_state, ptp, node->nd_2nd, locals);
       tree = rb_funcall(ptp, rb_sEvStr, 2, line, value);
+      break;
+    }
+    case NODE_PREEXE: {           /* BEGIN { ... } */
+      VALUE scope = process_parse_tree(parser_state, ptp, node->nd_2nd, locals);
+      tree = rb_funcall(ptp, rb_sPreExe, 2, line, scope);
       break;
     }
     case NODE_POSTEXE: {          /* END { ... } */

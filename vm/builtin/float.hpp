@@ -1,9 +1,8 @@
 #ifndef RBX_FLOAT_HPP
 #define RBX_FLOAT_HPP
 
-#include "builtin/class.hpp"
 #include "builtin/object.hpp"
-#include "type_info.hpp"
+#include "builtin/integer.hpp"
 
 /* Begin borrowing from MRI 1.8.6 stable */
 #if defined(__FreeBSD__) && __FreeBSD__ < 4
@@ -31,6 +30,8 @@ namespace rubinius {
     double to_double(STATE) { return val; }
     void into_string(STATE, char* buf, size_t sz);
 
+    static Float* from_cstr(STATE, const char* str, const char* end, Object* strict);
+
     // Rubinius.primitive! :float_add
     Float* add(STATE, Float* other);
     // Rubinius.primitive! :float_add
@@ -47,7 +48,7 @@ namespace rubinius {
     Float* mul(STATE, Integer* other);
 
     // Rubinius.primitive! :float_pow
-    Float* fpow(STATE, Float* other);
+    Object* fpow(STATE, Float* other);
     // Rubinius.primitive! :float_pow
     Float* fpow(STATE, Integer* other);
 
@@ -104,10 +105,10 @@ namespace rubinius {
     // Rubinius.primitive! :float_le
     Object* le(STATE, Integer* other);
 
-    // Rubinius.primitive :float_isinf
+    // Rubinius.primitive+ :float_isinf
     Object* fisinf(STATE);
 
-    // Rubinius.primitive :float_isnan
+    // Rubinius.primitive+ :float_isnan
     Object* fisnan(STATE);
 
     // Rubinius.primitive :float_round
@@ -122,8 +123,14 @@ namespace rubinius {
     // Rubinius.primitive :float_to_s_minimal
     String* to_s_minimal(STATE);
 
+    // Rubinius.primitive :float_dtoa
+    Tuple* dtoa(STATE);
+
     // Rubinius.primitive :float_to_packed
     String* to_packed(STATE, Object* want_double);
+
+    // Rubinius.primitive :float_negative
+    Object* negative(STATE);
 
     static int radix()      { return FLT_RADIX; }
     static int rounds()     { return FLT_ROUNDS; }
@@ -136,6 +143,10 @@ namespace rubinius {
     static int dig()        { return DBL_DIG; }
     static int mant_dig()   { return DBL_MANT_DIG; }
     static double epsilon() { return DBL_EPSILON; }
+
+    static double string_to_double(const char* buf, size_t len, bool strict, char** end);
+    static int double_to_string(char* buf, size_t len, double val);
+    static int double_to_ascii(char* buf, size_t len, double val, bool* sign, int* decpt);
 
     class Info : public TypeInfo {
     public:

@@ -8,7 +8,7 @@ rule ".o" do |t|
   source = t.prerequisites.first
 
   report_command "CXX #{source}"
-  qsh "#{$CXX} -c -o #{t.name} #{$CXXFLAGS} #{$DEBUGFLAGS} #{File.expand_path(source)}"
+  qsh "#{$CXX} -c -o #{t.name} #{$CFLAGS} #{$CXXFLAGS} #{$DEBUGFLAGS} #{File.expand_path(source)}"
 end
 
 def set_ext_dir(dir)
@@ -61,8 +61,17 @@ when ["build:build"]
     end
   else
     puts "Building bootstrap Melbourne for Rubinius"
-    add_cflag "-ggdb3 -O2"
-    add_cxxflag "-ggdb3 -O2"
+    add_cflag "-g"
+    add_cflag "-fPIC"
+    add_cxxflag "-g"
+    add_cxxflag "-fPIC"
+    if ENV['DEV']
+      add_cflag "-O0"
+      add_cxxflag "-O0"
+    else
+      add_cflag "-O2"
+      add_cxxflag "-O2"
+    end
     add_include_dir RbConfig::CONFIG["rubyhdrdir"]
   end
 end

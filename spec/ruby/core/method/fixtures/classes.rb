@@ -35,6 +35,14 @@ module MethodSpecs
       [:handled_via_method_missing, :also_handled].include? method
     end
 
+    def method_missing(method, *arguments)
+      if [:handled_via_method_missing, :also_handled].include? method
+        arguments
+      else
+        super
+      end
+    end
+
     attr_accessor :attr
 
     def zero; end
@@ -149,6 +157,7 @@ module MethodSpecs
 
   class ToProcBeta
     def method_called(a)
+      ScratchPad << a
       a
     end
 

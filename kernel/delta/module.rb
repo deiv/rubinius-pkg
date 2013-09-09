@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 class Module
   def alias_method(new_name, current_name)
     new_name = Rubinius::Type.coerce_to_symbol(new_name)
@@ -5,6 +7,8 @@ class Module
     mod, entry = lookup_method(current_name, true, false)
 
     if entry
+      method_visibility = visibility_for_aliased_method(new_name, entry.visibility)
+
       # If we're aliasing a method we contain, just reference it directly, no
       # need for the alias wrapper
       #
@@ -12,16 +16,25 @@ class Module
       # when the original method exists only to change the visibility of
       # a parent method.
       if mod == self and entry.method
-        @method_table.store new_name, entry.method, entry.visibility
+        @method_table.store new_name, entry.method, method_visibility
       else
-        @method_table.alias new_name, entry.visibility, current_name,
+        @method_table.alias new_name, method_visibility, current_name,
                             entry.method, mod
       end
 
-      Rubinius::VM.reset_method_cache(new_name)
+      Rubinius::VM.reset_method_cache self, new_name
+
+      if ai = Rubinius::Type.singleton_class_object(self)
+        Rubinius.privately do
+          ai.singleton_method_added new_name
+        end
+      else
+        method_added new_name
+      end
+
+      self
     else
-      if Rubinius::Type.object_kind_of?(self, Class) and
-         ai = Rubinius::Type.singleton_class_object(self)
+      if ai = Rubinius::Type.singleton_class_object(self)
         raise NameError, "Unable to find '#{current_name}' for object #{ai.inspect}"
       else
         thing = Rubinius::Type.object_kind_of?(self, Class) ? "class" : "module"
@@ -31,22 +44,24 @@ class Module
   end
 
   def module_function(*args)
+    if kind_of? Class
+      raise TypeError, "invalid receiver class #{__class__}, expected Module"
+    end
+
     if args.empty?
       vs = Rubinius::VariableScope.of_sender
-      if scr = vs.method.scope.script
-        if scr.eval? and scr.eval_binding
-          scr.eval_binding.variables.method_visibility = :module
-        end
+      until vs.top_level_visibility?
+        break unless vs.parent
+        vs = vs.parent
       end
-
-      Rubinius::VariableScope.of_sender.method_visibility = :module
+      vs.method_visibility = :module
     else
       sc = Rubinius::Type.object_singleton_class(self)
       args.each do |meth|
         method_name = Rubinius::Type.coerce_to_symbol meth
         mod, method = lookup_method(method_name)
         sc.method_table.store method_name, method.method, :public
-        Rubinius::VM.reset_method_cache method_name
+        Rubinius::VM.reset_method_cache self, method_name
         set_visibility method_name, :private
       end
     end
@@ -56,11 +71,17 @@ class Module
 
   def private(*args)
     if args.empty?
-      Rubinius::VariableScope.of_sender.method_visibility = :private
-      return
+      vs = Rubinius::VariableScope.of_sender
+      until vs.top_level_visibility?
+        break unless vs.parent
+        vs = vs.parent
+      end
+      vs.method_visibility = :private
+    else
+      args.each { |meth| set_visibility(meth, :private) }
     end
 
-    args.each { |meth| set_visibility(meth, :private) }
+    self
   end
 
   # Invokes <code>Module#append_features</code> and
@@ -94,71 +115,14 @@ class Module
       raise TypeError, "invalid argument class #{klass.class}, expected Module"
     end
 
-    # check other.frozen
-    # taint other from self
-
-    insert_at = klass
-    mod = self
-    changed = false
-
-    while mod
-
-      # Check for a cyclic include
-      if mod == klass
-        raise ArgumentError, "cyclic include detected"
-      end
-
-      # Try and detect check_mod in klass's heirarchy, and where.
-      #
-      # I (emp) tried to use Module#< here, but we need to also know
-      # where in the heirarchy the module is to change the insertion point.
-      # Since Module#< doesn't report that, we're going to just search directly.
-      #
-      superclass_seen = false
-      add = true
-
-      k = klass.direct_superclass
-      while k
-        if k.kind_of? Rubinius::IncludedModule
-          # Oh, we found it.
-          if k == mod
-            # ok, if we're still within the directly included modules
-            # of klass, then put future things after mod, not at the
-            # beginning.
-            insert_at = k unless superclass_seen
-            add = false
-            break
-          end
-        else
-          superclass_seen = true
-        end
-
-        k = k.direct_superclass
-      end
-
-      if add
-        if mod.kind_of? Rubinius::IncludedModule
-          original_mod = mod.module
-        else
-          original_mod = mod
-        end
-
-        im = Rubinius::IncludedModule.new(original_mod).attach_to insert_at
-        insert_at = im
-
-        changed = true
-      end
-
-      mod = mod.direct_superclass
+    if kind_of? Class
+      raise TypeError, "invalid receiver class #{__class__}, expected Module"
     end
 
-    if changed
-      method_table.each do |meth, obj, vis|
-        Rubinius::VM.reset_method_cache meth
-      end
-    end
+    Rubinius::Type.include_modules_from(self, klass.origin)
+    Rubinius::Type.infect(klass, self)
 
-    return self
+    self
   end
 
   # Called when this Module is being included in another Module.
@@ -197,14 +161,8 @@ class Module
     return nil
   end
 
-  def attr(name,writeable=false)
-    vis = Rubinius::VariableScope.of_sender.method_visibility
-
-    Rubinius.add_reader name, self, vis
-    Rubinius.add_writer name, self, vis if writeable
-
-    return nil
-  end
-
-  private :alias_method
+  private :remove_method, :undef_method, :alias_method,
+          :module_function, :append_features, :extend_object,
+          :include, :public, :private, :protected,
+          :attr_reader, :attr_writer, :attr_accessor
 end

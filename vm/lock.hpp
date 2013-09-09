@@ -28,11 +28,11 @@ namespace rubinius {
       return locking_thread_;
     }
 
-    const char* lock_file() {
+    const char* lock_file() const {
       return lock_file_;
     }
 
-    int lock_line() {
+    int lock_line() const {
       return lock_line_;
     }
 
@@ -49,21 +49,21 @@ namespace rubinius {
     }
   };
 
-  class Mutex : public Lock, public thread::Mutex {
+  class Mutex : public Lock, public utilities::thread::Mutex {
   public:
     bool mutex_p() {
       return true;
     }
 
     void lock(ManagedThread* th) {
-      thread::Mutex::lock();
+      utilities::thread::Mutex::lock();
       locking_thread_ = th;
       lock_file_ = "unknown";
       lock_line_ = 0;
     }
 
     void lock(ManagedThread* th, const char* file, int line) {
-      thread::Mutex::lock();
+      utilities::thread::Mutex::lock();
       locking_thread_ = th;
       lock_file_ = file;
       lock_line_ = line;
@@ -71,25 +71,27 @@ namespace rubinius {
 
     void unlock(ManagedThread* th) {
       locking_thread_ = 0;
-      thread::Mutex::unlock();
+      utilities::thread::Mutex::unlock();
+      lock_file_ = "";
+      lock_line_ = 0;
     }
   };
 
-  class SpinLock : public Lock, public thread::SpinLock {
+  class SpinLock : public Lock, public utilities::thread::SpinLock {
   public:
     bool mutex_p() {
       return false;
     }
 
     void lock(ManagedThread* th) {
-      thread::SpinLock::lock();
+      utilities::thread::SpinLock::lock();
       locking_thread_ = th;
       lock_file_ = "unknown";
       lock_line_ = 0;
     }
 
     void lock(ManagedThread* th, const char* file, int line) {
-      thread::SpinLock::lock();
+      utilities::thread::SpinLock::lock();
       locking_thread_ = th;
       lock_file_ = file;
       lock_line_ = line;
@@ -97,7 +99,9 @@ namespace rubinius {
 
     void unlock(ManagedThread* th) {
       locking_thread_ = 0;
-      thread::SpinLock::lock();
+      utilities::thread::SpinLock::unlock();
+      lock_file_ = "";
+      lock_line_ = 0;
     }
   };
 
@@ -153,6 +157,10 @@ namespace rubinius {
       return mutex_;
     }
 
+    void lock_init(ManagedThread* th) {
+      mutex_.init(th);
+    }
+
     void lock(ManagedThread* th) {
       mutex_.lock(th);
     }
@@ -189,6 +197,9 @@ namespace rubinius {
       }
     }
 
+    LockableScopedLock(State* state, Lockable* lock,
+                       const char* file="unknown", int line=0);
+
     void unlock() {
       if(recursive_) return;
 
@@ -213,7 +224,7 @@ namespace rubinius {
   };
 
 
-#define SYNC(vm) LockableScopedLock __lsl_guard__(vm, this, __FILE__, __LINE__)
+#define SYNC(__state) LockableScopedLock __lsl_guard__(__state, this, __FILE__, __LINE__)
 #define SYNC_TL LockableScopedLock __lsl_guard__(ManagedThread::current(), this, __FILE__, __LINE__)
 
 #define UNSYNC __lsl_guard__.unlock()

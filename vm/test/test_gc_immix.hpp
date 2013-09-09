@@ -41,12 +41,12 @@ public:
     return copy;
   }
 
-  bool mark_address(memory::Address addr, immix::MarkStack& ms) {
+  bool mark_address(memory::Address addr, immix::MarkStack& ms, bool push = true) {
     SimpleObject* obj = addr.as<SimpleObject>();
     if(obj->marked) return false;
 
     obj->marked = true;
-    ms.push_back(obj);
+    if(push) ms.push_back(obj);
     return true;
   }
 
@@ -90,21 +90,23 @@ public:
     TS_ASSERT_EQUALS(block.size(), immix::cBlockSize);
     TS_ASSERT(block.address() != 0);
     TS_ASSERT_EQUALS(block.status(), immix::cFree);
-    TS_ASSERT_EQUALS(block.lines_used(), 1);
+    TS_ASSERT_EQUALS(block.lines_used(), 1U);
   }
 
   void test_Block_is_line_free() {
     immix::Block& block = gc->get_block();
     TS_ASSERT(block.is_line_free(1));
     block.mark_line(1);
+    TS_ASSERT(block.is_line_free(1));
+    block.copy_marks();
     TS_ASSERT(!block.is_line_free(1));
   }
 
   void test_Block_address_of_line() {
     immix::Block& block = gc->get_block();
     memory::Address top = block.address();
-    TS_ASSERT_EQUALS(block.address_of_line(0), top);
-    TS_ASSERT_EQUALS(block.address_of_line(1), top + immix::cLineSize);
+    TS_ASSERT_EQUALS(block.address_of_line(0U), top);
+    TS_ASSERT_EQUALS(block.address_of_line(1U), top + immix::cLineSize);
   }
 
   void test_SingleBlockAllocator_allocate() {
@@ -123,6 +125,7 @@ public:
     memory::Address top  = block.first_address();
 
     block.mark_line(2);
+    block.copy_marks();
     immix::SingleBlockAllocator alloc(block);
     alloc.allocate(96);
 
@@ -170,6 +173,7 @@ public:
     block.mark_line(4);
     block.mark_line(5);
     block.mark_line(7);
+    block.copy_marks();
 
     immix::SingleBlockAllocator alloc(block);
     memory::Address addr = alloc.allocate(24);
@@ -188,11 +192,12 @@ public:
   void test_SingleBlockAllocator_allocate_indicates_failure() {
     immix::Block& block = gc->get_block();
 
-    for(int i = 0; i < immix::cLineTableSize; i++) {
+    for(uint32_t i = 0; i < immix::cLineTableSize; i++) {
       block.mark_line(i);
     }
 
     block.free_line(1);
+    block.copy_marks();
     immix::SingleBlockAllocator alloc(block);
     memory::Address small = alloc.allocate(24);
     TS_ASSERT(!small.is_null());
@@ -236,8 +241,8 @@ public:
 
     block.update_stats();
     TS_ASSERT_EQUALS(block.status(), immix::cRecyclable);
-    TS_ASSERT_EQUALS(block.holes(), 5);
-    TS_ASSERT_EQUALS(block.lines_used(), 6);
+    TS_ASSERT_EQUALS(block.holes(), 5U);
+    TS_ASSERT_EQUALS(block.lines_used(), 6U);
   }
 
   void test_Block_update_stats_finds_empty_blocks() {
@@ -246,20 +251,20 @@ public:
     block.set_status(immix::cRecyclable);
     block.update_stats();
     TS_ASSERT_EQUALS(block.status(), immix::cFree);
-    TS_ASSERT_EQUALS(block.holes(), 1);
-    TS_ASSERT_EQUALS(block.lines_used(), 1);
+    TS_ASSERT_EQUALS(block.holes(), 1U);
+    TS_ASSERT_EQUALS(block.lines_used(), 1U);
   }
 
   void test_Block_update_stats_finds_unavailable_blocks() {
     immix::Block& block = gc->get_block();
 
-    for(int i = 0; i < immix::cLineTableSize; i++) {
+    for(uint32_t i = 0; i < immix::cLineTableSize; i++) {
       block.mark_line(i);
     }
 
     block.update_stats();
     TS_ASSERT_EQUALS(block.status(), immix::cUnavailable);
-    TS_ASSERT_EQUALS(block.holes(), 0);
+    TS_ASSERT_EQUALS(block.holes(), 0U);
     TS_ASSERT_EQUALS(block.lines_used(), immix::cLineTableSize);
   }
 
@@ -281,6 +286,7 @@ public:
 
     TS_ASSERT(block.is_line_free(1));
     gc->mark_address(addr, alloc);
+    block.copy_marks();
     TS_ASSERT(!block.is_line_free(1));
   }
 
@@ -293,6 +299,7 @@ public:
 
     TS_ASSERT(block.is_line_free(1));
     gc->mark_address(addr, alloc);
+    block.copy_marks();
     TS_ASSERT(block.is_line_free(1));
   }
 
@@ -364,6 +371,7 @@ public:
     memory::Address addr = alloc.allocate(sizeof(SimpleObject));
 
     gc->mark_address(addr, alloc);
+    block.copy_marks();
     TS_ASSERT(!block.is_line_free(0));
     TS_ASSERT(!block.is_line_free(1));
 
@@ -372,13 +380,14 @@ public:
     addr2.as<SimpleObject>()->size = big_size;
 
     gc->mark_address(addr2, alloc);
+    block.copy_marks();
     TS_ASSERT(!block.is_line_free(1));
     TS_ASSERT(!block.is_line_free(2));
     TS_ASSERT(!block.is_line_free(3));
     TS_ASSERT(!block.is_line_free(4));
   }
 
-  void test_process_mark_stack() {
+  void test_process_mark_stack_enabled() {
     immix::Block& block = gc->get_block();
     immix::SingleBlockAllocator alloc(block);
     memory::Address addr = alloc.allocate(sizeof(SimpleObject));
@@ -404,17 +413,43 @@ public:
     TS_ASSERT_EQUALS(sub->body_checked, true);
   }
 
+  void test_process_mark_stack_disabled() {
+    immix::Block& block = gc->get_block();
+    immix::SingleBlockAllocator alloc(block);
+    memory::Address addr = alloc.allocate(sizeof(SimpleObject));
+    memory::Address addr2 = alloc.allocate(sizeof(SimpleObject));
+
+    SimpleObject* obj = addr.as<SimpleObject>();
+    SimpleObject* sub = addr2.as<SimpleObject>();
+
+    obj->marked = false;
+    obj->sub = sub;
+    obj->body_checked = false;
+
+    sub->marked = false;
+    sub->sub = 0;
+    sub->body_checked = false;
+
+    gc->mark_address(addr, alloc, false);
+    TS_ASSERT_EQUALS(obj->marked, true);
+
+    gc->process_mark_stack(alloc);
+    TS_ASSERT_EQUALS(obj->body_checked, false);
+    TS_ASSERT_EQUALS(sub->marked, false);
+    TS_ASSERT_EQUALS(sub->body_checked, false);
+  }
+
   void test_BlockAllocator_reset_updates_block_stats() {
     immix::Block& block = gc->get_block();
 
     block.mark_line(1);
     block.mark_line(3);
 
-    TS_ASSERT_EQUALS(block.lines_used(), 1);
+    TS_ASSERT_EQUALS(block.lines_used(), 1U);
     immix::BlockAllocator& ba = gc->block_allocator();
     ba.reset();
 
-    TS_ASSERT_EQUALS(block.lines_used(), 3);
+    TS_ASSERT_EQUALS(block.lines_used(), 3U);
   }
 
   void test_BlockAllocator_get_free_block() {
@@ -433,7 +468,7 @@ public:
 
     TS_ASSERT_EQUALS(&ba.current_chunk(), c1);
 
-    for(int i = 0; i < immix::cBlocksPerChunk + 1; i++) {
+    for(uint32_t i = 0; i < immix::cBlocksPerChunk + 1; i++) {
       ba.get_block();
     }
 
@@ -466,11 +501,12 @@ public:
     immix::ExpandingAllocator ea(gc->block_allocator());
     immix::Block& block = ea.current_block();
 
-    for(int i = 0; i < immix::cLineTableSize; i++) {
+    for(uint32_t i = 0; i < immix::cLineTableSize; i++) {
       block.mark_line(i);
     }
 
     block.free_line(1);
+    block.copy_marks();
 
     ea.resync_position();
 
@@ -519,6 +555,7 @@ public:
   void test_HoleFinder_find_hole_with_hole_in_middle() {
     immix::Block& block = gc->get_block();
     block.mark_line(11);
+    block.copy_marks();
 
     immix::HoleFinder alloc;
 
@@ -526,11 +563,11 @@ public:
     alloc.reset(&block);
 
     TS_ASSERT_EQUALS(alloc.cursor(), block.first_address());
-    TS_ASSERT_EQUALS(alloc.limit(),  block.address_of_line(11));
-    TS_ASSERT_EQUALS(alloc.hole_start_line(), 11);
+    TS_ASSERT_EQUALS(alloc.limit(),  block.address_of_line(11U));
+    TS_ASSERT_EQUALS(alloc.hole_start_line(), 11U);
 
     alloc.find_hole();
-    TS_ASSERT_EQUALS(alloc.cursor(), block.address_of_line(12));
+    TS_ASSERT_EQUALS(alloc.cursor(), block.address_of_line(12U));
     TS_ASSERT_EQUALS(alloc.limit(),  block.address() + immix::cBlockSize);
     TS_ASSERT_EQUALS(alloc.hole_start_line(), immix::cLineTableSize);
   }

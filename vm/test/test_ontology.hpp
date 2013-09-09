@@ -1,4 +1,5 @@
 #include "vm/test/test.hpp"
+#include "version.h"
 
 class TestObjects : public CxxTest::TestSuite, public VMTest {
 public:
@@ -15,10 +16,10 @@ public:
 
   void test_object() {
     TS_ASSERT_EQUALS(G(object)->class_object(state), G(klass));
-    if(LANGUAGE_19_ENABLED(state) || LANGUAGE_20_ENABLED(state)) {
+    if(!LANGUAGE_18_ENABLED) {
       TS_ASSERT_EQUALS(G(object)->superclass(), G(basicobject));
     } else {
-      TS_ASSERT_EQUALS(G(object)->superclass(), Qnil);
+      TS_ASSERT_EQUALS(G(object)->superclass(), cNil);
     }
     check_const(object, "Object");
   }
@@ -37,17 +38,17 @@ public:
     Class *cls;
     SingletonClass *sc;
 
-    cls = (Class*)G(klass);
-    sc = (SingletonClass*)cls->klass();
+    cls = G(klass);
+    sc = as<SingletonClass>(cls->klass());
     TS_ASSERT(kind_of<SingletonClass>(G(object)->klass()));
     TS_ASSERT(kind_of<MethodTable>(sc->method_table()));
-    TS_ASSERT(kind_of<LookupTable>(sc->constants()));
+    TS_ASSERT(kind_of<ConstantTable>(sc->constant_table()));
   }
 
   void test_module() {
     Class *mod;
 
-    mod = (Class*)G(module);
+    mod = G(module);
     TS_ASSERT_EQUALS(mod->class_object(state), G(klass));
     TS_ASSERT_EQUALS(mod->superclass(), G(object));
     check_const(module, "Module");
@@ -118,17 +119,6 @@ public:
     TS_ASSERT_EQUALS(G(rubinius)->get_const(state, "ByteArray"), G(bytearray));
   }
 
-  void test_chararray() {
-    Class *cls;
-
-    cls = G(chararray);
-
-    TS_ASSERT_EQUALS(cls->class_object(state), G(klass));
-    TS_ASSERT_EQUALS(cls->superclass(), G(object));
-    TS_ASSERT_EQUALS((object_type)cls->instance_type()->to_native(), CharArrayType);
-    TS_ASSERT_EQUALS(G(rubinius)->get_const(state, "CharArray"), G(chararray));
-  }
-
   void test_string() {
     Class *cls;
 
@@ -140,14 +130,14 @@ public:
     check_const(string, "String");
   }
 
-  void test_cmethod() {
+  void test_compiled_code() {
     Class *cls;
 
-    cls = G(cmethod);
+    cls = G(compiled_code);
 
     TS_ASSERT_EQUALS(cls->class_object(state), G(klass));
     TS_ASSERT_EQUALS(cls->superclass(), G(executable));
-    TS_ASSERT_EQUALS(G(rubinius)->get_const(state, "CompiledMethod"), G(cmethod));
+    TS_ASSERT_EQUALS(G(rubinius)->get_const(state, "CompiledCode"), G(compiled_code));
   }
 
   void test_dir() {
@@ -196,7 +186,7 @@ public:
     TS_ASSERT_EQUALS(cls->class_object(state), G(klass));
     TS_ASSERT_EQUALS(cls->superclass(), G(object));
 
-    Module* ffi = as<Module>(G(object)->get_const(state, "FFI"));
+    Module* ffi = as<Module>(G(rubinius)->get_const(state, "FFI"));
     TS_ASSERT_EQUALS(cls, ffi->get_const(state, "Pointer"));
   }
 

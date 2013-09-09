@@ -8,6 +8,12 @@ ruby_version_is "1.9" do
       Random.new.seed.should be_an_instance_of(Bignum)
     end
 
+    it "returns Random instances initialized with different seeds" do
+      first = Random.new
+      second = Random.new
+      (0..20).map { first.rand } .should_not == (0..20).map { second.rand }
+    end
+
     it "accepts an Integer seed value as an argument" do
       Random.new(2).seed.should == 2
     end
@@ -20,7 +26,7 @@ ruby_version_is "1.9" do
       Random.new(Rational(20,2)).seed.should == 10
     end
 
-    it "accepts (and converts to Integer) a Complex (w/ imaginary part) seed value as an argument" do
+    it "accepts (and converts to Integer) a Complex (without imaginary part) seed value as an argument" do
       Random.new(Complex(20)).seed.should == 20
     end
 

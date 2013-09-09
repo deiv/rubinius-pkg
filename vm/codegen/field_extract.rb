@@ -4,25 +4,18 @@ class BasicPrimitive
   attr_accessor :pass_call_frame
   attr_accessor :pass_message
   attr_accessor :pass_arguments
+  attr_accessor :pass_gctoken
   attr_accessor :raw
   attr_accessor :safe
   attr_accessor :can_fail
 
-  def emit_counter
-    @@counter ||= 0
-    str = "  check_counter(state, call_frame, #{@@counter});\n"
-    @@counter += 1
-    return str
-  end
-
   def output_header(str)
     str << "Object* Primitives::#{@name}(STATE, CallFrame* call_frame, Executable* exec, Module* mod, Arguments& args) {\n"
     str << "  state->set_call_frame(call_frame);\n"
-    str << emit_counter
-    # str << " std::cout << \"[Primitive #{@name}]\\n\";\n"
     str << "  Object* ret;\n"
     return str if @raw
     str << "  Object* self;\n" if @pass_self
+    str << "  GCTokenImpl gct;\n" if @pass_gctoken
   end
 
   def output_args(str, arg_types)
@@ -46,6 +39,7 @@ class BasicPrimitive
         args << "a#{i}"
       end
     end
+    args.unshift "gct" if @pass_gctoken
     args.unshift "self" if @pass_self
     args.unshift "state" if @pass_state
 
@@ -66,19 +60,26 @@ class BasicPrimitive
     str << "\n"
     str << "  try {\n"
     str << "#ifdef RBX_PROFILER\n"
-    str << "    if(unlikely(state->tooling())) {\n"
+    str << "    if(unlikely(state->vm()->tooling())) {\n"
     str << "      tooling::MethodEntry method(state, exec, mod, args);\n"
+    str << "      RUBINIUS_METHOD_PRIMITIVE_ENTRY_HOOK(state, mod, args.name(), call_frame);\n"
     str << "      ret = #{call}(#{args.join(', ')});\n"
+    str << "      RUBINIUS_METHOD_PRIMITIVE_RETURN_HOOK(state, mod, args.name(), call_frame);\n"
     str << "    } else {\n"
+    str << "      RUBINIUS_METHOD_PRIMITIVE_ENTRY_HOOK(state, mod, args.name(), call_frame);\n"
     str << "      ret = #{call}(#{args.join(', ')});\n"
+    str << "      RUBINIUS_METHOD_PRIMITIVE_RETURN_HOOK(state, mod, args.name(), call_frame);\n"
     str << "    }\n"
     str << "#else\n"
+    str << "    RUBINIUS_METHOD_PRIMITIVE_ENTRY_HOOK(state, mod, args.name(), call_frame);\n"
     str << "    ret = #{call}(#{args.join(', ')});\n"
+    str << "    RUBINIUS_METHOD_PRIMITIVE_RETURN_HOOK(state, mod, args.name(), call_frame);\n"
     str << "#endif\n"
     str << "  } catch(const RubyException& exc) {\n"
     str << "    exc.exception->locations(state,\n"
     str << "          Location::from_call_stack(state, call_frame));\n"
-    str << "    state->thread_state()->raise_exception(exc.exception);\n"
+    str << "    state->raise_exception(exc.exception);\n"
+    str << "    RUBINIUS_METHOD_PRIMITIVE_RETURN_HOOK(state, mod, args.name(), call_frame);\n"
     str << "    return NULL;\n"
     str << "  }\n"
     str << "\n"
@@ -86,7 +87,7 @@ class BasicPrimitive
     str << "    goto fail;\n\n"
     prim_return(str);
     str << "fail:\n"
-    str << "  return CompiledMethod::primitive_failed(state, call_frame, exec, mod, args);\n"
+    str << "  return CompiledCode::primitive_failed(state, call_frame, exec, mod, args);\n"
     str << "}\n\n"
   end
 
@@ -125,14 +126,14 @@ class CPPPrimitive < BasicPrimitive
       str << "  } catch(const RubyException& exc) {\n"
       str << "    exc.exception->locations(state,\n"
       str << "          Location::from_call_stack(state, call_frame));\n"
-      str << "    state->thread_state()->raise_exception(exc.exception);\n"
+      str << "    state->raise_exception(exc.exception);\n"
       str << "    return NULL;\n"
       str << "  }\n"
       str << "  if(ret == Primitives::failure()) goto fail;\n"
       str << "  return ret;\n"
       str << "\n"
       str << "fail:\n"
-      str << "  return CompiledMethod::primitive_failed(state, call_frame, exec, mod, args);\n"
+      str << "  return CompiledCode::primitive_failed(state, call_frame, exec, mod, args);\n"
       str << "}\n\n"
     else
       args = output_args str, arg_types
@@ -145,7 +146,7 @@ class CPPPrimitive < BasicPrimitive
   end
 
   def generate_jit_stub
-    return if @raw or @pass_call_frame or @pass_message or @pass_arguments
+    return if @raw or @pass_message or @pass_arguments
 
     # Default value, overriden below
     @can_fail = true
@@ -159,13 +160,14 @@ class CPPPrimitive < BasicPrimitive
       arg_list = ", " + list.join(", ")
     end
 
-    if @safe
+    if @safe && !@pass_call_frame
       str << "extern \"C\" Object* jit_stub_#{@name}(STATE, Object* recv #{arg_list}) {\n"
     else
       str << "extern \"C\" Object* jit_stub_#{@name}(STATE, CallFrame* call_frame, Object* recv #{arg_list}) {\n"
     end
 
     str << "  Object* ret;\n"
+    str << "  GCTokenImpl gct;\n" if @pass_gctoken
 
     emit_fail = false
 
@@ -180,7 +182,7 @@ class CPPPrimitive < BasicPrimitive
     else
       emit_fail = true
       str << "  #{@type}* self = try_as<#{@type}>(recv);\n"
-      str << "  if(unlikely(recv == NULL)) goto fail;\n"
+      str << "  if(unlikely(self == NULL)) goto fail;\n"
     end
 
     args = []
@@ -193,8 +195,14 @@ class CPPPrimitive < BasicPrimitive
       i += 1
     end
 
+    unless @safe
+      str << "  state->set_call_frame(call_frame);\n"
+    end
+
+    args.unshift "gct" if @pass_gctoken
     args.unshift "recv" if @pass_self
     args.unshift "state" if @pass_state
+    args.push "call_frame" if @pass_call_frame
 
     if @safe
       str << "  ret = self->#{@cpp_name}(#{args.join(', ')});\n"
@@ -206,7 +214,7 @@ class CPPPrimitive < BasicPrimitive
       str << "  } catch(const RubyException& exc) {\n"
       str << "    exc.exception->locations(state,\n"
       str << "          Location::from_call_stack(state, call_frame));\n"
-      str << "    state->thread_state()->raise_exception(exc.exception);\n"
+      str << "    state->raise_exception(exc.exception);\n"
       str << "    return NULL;\n"
       str << "  }\n"
       str << "\n"
@@ -217,7 +225,7 @@ class CPPPrimitive < BasicPrimitive
 
     if !@safe or emit_fail
       str << "fail:\n"
-      str << "  return Qundef;\n"
+      str << "  return cUndef;\n"
     end
 
     if @safe and !emit_fail
@@ -242,6 +250,7 @@ class CPPPrimitive < BasicPrimitive
     str << "extern \"C\" Object* invoke_#{@name}(STATE, CallFrame* call_frame, Object** args, int arg_count) {\n"
 
     str << "  Object* ret;\n"
+    str << "  GCTokenImpl gct;\n" if @pass_gctoken
 
     i = 0
     arg_types.each do |t|
@@ -276,6 +285,7 @@ class CPPPrimitive < BasicPrimitive
       i += 1
     end
 
+    args.unshift "gct" if @pass_gctoken
     args.unshift "recv" if @pass_self
     args.unshift "state" if @pass_state
     args.push "call_frame" if @pass_call_frame
@@ -286,7 +296,7 @@ class CPPPrimitive < BasicPrimitive
     str << "  } catch(const RubyException& exc) {\n"
     str << "    exc.exception->locations(state,\n"
     str << "          Location::from_call_stack(state, call_frame));\n"
-    str << "    state->thread_state()->raise_exception(exc.exception);\n"
+    str << "    state->raise_exception(exc.exception);\n"
     str << "    return NULL;\n"
     str << "  }\n"
     str << "\n"
@@ -314,7 +324,7 @@ class CPPStaticPrimitive < CPPPrimitive
       str << "  } catch(const RubyException& exc) {\n"
       str << "    exc.exception->locations(state,\n"
       str << "          Location::from_call_stack(state, call_frame));\n"
-      str << "    state->thread_state()->raise_exception(exc.exception);\n"
+      str << "    state->raise_exception(exc.exception);\n"
       str << "    return NULL;\n"
       str << "  }\n"
       str << "\n"
@@ -328,7 +338,7 @@ class CPPStaticPrimitive < CPPPrimitive
   end
 
   def generate_jit_stub
-    return if @raw or @pass_call_frame or @pass_arguments
+    return if @raw or @pass_arguments
 
     # Default value, overriden below
     @can_fail = true
@@ -342,13 +352,14 @@ class CPPStaticPrimitive < CPPPrimitive
       arg_list = ", " + list.join(", ")
     end
 
-    if @safe
+    if @safe && !@pass_call_frame
       str << "extern \"C\" Object* jit_stub_#{@name}(STATE, Object* recv #{arg_list}) {\n"
     else
       str << "extern \"C\" Object* jit_stub_#{@name}(STATE, CallFrame* call_frame, Object* recv #{arg_list}) {\n"
     end
 
     str << "  Object* ret;\n"
+    str << "  GCTokenImpl gct;\n" if @pass_gctoken
 
     i = 0
     arg_types.each do |t|
@@ -368,8 +379,10 @@ class CPPStaticPrimitive < CPPPrimitive
       i += 1
     end
 
+    args.unshift "gct" if @pass_gctoken
     args.unshift "recv" if @pass_self
     args.unshift "state" if @pass_state
+    args.push "call_frame" if @pass_call_frame
 
     if @safe
       str << "  ret = #{@type}::#{@cpp_name}(#{args.join(', ')});\n"
@@ -381,7 +394,7 @@ class CPPStaticPrimitive < CPPPrimitive
       str << "  } catch(const RubyException& exc) {\n"
       str << "    exc.exception->locations(state,\n"
       str << "          Location::from_call_stack(state, call_frame));\n"
-      str << "    state->thread_state()->raise_exception(exc.exception);\n"
+      str << "    state->raise_exception(exc.exception);\n"
       str << "    return NULL;\n"
       str << "  }\n"
       str << "\n"
@@ -392,7 +405,7 @@ class CPPStaticPrimitive < CPPPrimitive
 
     if !@safe or emit_fail
       str << "fail:\n"
-      str << "  return Qundef;\n"
+      str << "  return cUndef;\n"
     end
 
     if @safe and !emit_fail
@@ -417,6 +430,7 @@ class CPPStaticPrimitive < CPPPrimitive
     str << "extern \"C\" Object* invoke_#{@name}(STATE, CallFrame* call_frame, Object** args, int arg_count) {\n"
 
     str << "  Object* ret;\n"
+    str << "  GCTokenImpl gct;\n" if @pass_gctoken
 
     i = 0
     arg_types.each do |t|
@@ -437,6 +451,7 @@ class CPPStaticPrimitive < CPPPrimitive
       i += 1
     end
 
+    args.unshift "gct" if @pass_gctoken
     args.unshift "args[arg_count-1]" if @pass_self
     args.unshift "state" if @pass_state
     args.push "call_frame" if @pass_call_frame
@@ -447,7 +462,7 @@ class CPPStaticPrimitive < CPPPrimitive
     str << "  } catch(const RubyException& exc) {\n"
     str << "    exc.exception->locations(state,\n"
     str << "          Location::from_call_stack(state, call_frame));\n"
-    str << "    state->thread_state()->raise_exception(exc.exception);\n"
+    str << "    state->raise_exception(exc.exception);\n"
     str << "    return NULL;\n"
     str << "  }\n"
     str << "\n"
@@ -496,7 +511,7 @@ class CPPOverloadedPrimitive < BasicPrimitive
         call = "        ret = recv->#{@cpp_name}(arg);\n"
       end
       str << "#ifdef RBX_PROFILER\n"
-      str << "        if(unlikely(state->tooling())) {\n"
+      str << "        if(unlikely(state->vm()->tooling())) {\n"
       str << "          tooling::MethodEntry method(state, exec, mod, args);\n"
       str << "  " << call
       str << "        } else {\n"
@@ -508,7 +523,7 @@ class CPPOverloadedPrimitive < BasicPrimitive
       str << "      } catch(const RubyException& exc) {\n"
       str << "        exc.exception->locations(state,\n"
       str << "              Location::from_call_stack(state, call_frame));\n"
-      str << "        state->thread_state()->raise_exception(exc.exception);\n"
+      str << "        state->raise_exception(exc.exception);\n"
       str << "        return NULL;\n"
       str << "      }\n"
       str << "      if(likely(ret != reinterpret_cast<Object*>(kPrimitiveFailed))) {\n"
@@ -520,7 +535,7 @@ class CPPOverloadedPrimitive < BasicPrimitive
 
     str << "  }\n"
     str << "fail:\n"
-    str << "  return CompiledMethod::primitive_failed(state, call_frame, exec, mod, args);\n"
+    str << "  return CompiledCode::primitive_failed(state, call_frame, exec, mod, args);\n"
     str << "}\n\n"
     return str
   end
@@ -657,7 +672,7 @@ class CPPClass
   def generate_accessors
     str = ""
     all_fields.each do |name, type, idx, flags|
-      str << "Object* Primitives::access_#{@name}_#{name}(STATE, CallFrame* call_frame, Executable* exec, Module* mod, 
+      str << "Object* Primitives::access_#{@name}_#{name}(STATE, CallFrame* call_frame, Executable* exec, Module* mod,
                    Arguments& args) {\n"
       str << "  AccessVariable* access = as<AccessVariable>(exec);\n"
       str << "  if(access->write()->true_p()) {\n"
@@ -707,12 +722,12 @@ Object* #{@name}::Info::get_field(STATE, Object* _t, size_t index) {
   switch(index) {
 #{generate_gets}  }
 
-  std::stringstream error;
+  std::ostringstream error;
   error << "Unable to access field " << index << " in a #{@name} instance";
 
   Exception::assertion_error(state, error.str().c_str());
 
-  return Qnil; // never reached
+  return cNil; // never reached
 }
 
     EOF
@@ -727,8 +742,9 @@ Object* #{@name}::Info::get_field(STATE, Object* _t, size_t index) {
       str << <<-EOF
   {
     if(target->#{name}()->reference_p()) {
-      Object* res = mark.call(target->#{name}());
-      if(res) target->#{name}(mark.state(), (#{type}*)res);
+      Object* old = target->#{name}();
+      Object* cur = mark.call(old);
+      if(cur && cur != old) target->#{name}(mark.state(), force_as<#{type}>(cur));
     }
   }
 
@@ -770,37 +786,20 @@ void #{@name}::Info::auto_mark(Object* _t, ObjectMark& mark) {
     str
   end
 
-  def generate_visit
-    marks = generate_visits(self).rstrip
-
-    str = ''
-
-    str << <<-EOF unless marks.empty?
-void #{@name}::Info::auto_visit(Object* _t, ObjectVisitor& visit) {
-  #{@name}* target = as<#{@name}>(_t);
-
-#{marks}
-}
-
-    EOF
-
-    str
-  end
-
   def kind_of_code(what)
     case @name
     when "Fixnum"
-      return "FIXNUM_P(#{what})"
+      return "#{what}->fixnum_p()"
     when "Symbol"
-      return "SYMBOL_P(#{what})"
+      return "#{what}->symbol_p()"
     when "TrueClass"
-      return "#{what} == Qtrue"
+      return "#{what}->true_p()"
     when "FalseClass"
-      return "#{what} == Qfalse"
+      return "#{what}->false_p()"
     when "NilClass"
-      return "#{what} == Qnil"
+      return "#{what}->nil_p()"
     else
-      return "(REFERENCE_P(#{what}) && #{what}->type_id() == #{@name}Type)"
+      return "(#{what}->reference_p() && #{what}->type_id() == #{@name}Type)"
     end
   end
 
@@ -846,10 +845,10 @@ class CPPParser
       "Object" => :Object,
       "Tuple"  => :Tuple,
       "MemoryPointer" => :MemoryPointer,
-      "StaticScope" => :StaticScope,
+      "ConstantScope" => :ConstantScope,
       "Integer" => :Integer,
       "Fixnum" => :Fixnum,
-      "CompiledMethod" => :CompiledMethod,
+      "CompiledCode" => :CompiledCode,
       "String" => :String,
       "Module" => :Module,
       "Class" => :Class,
@@ -944,6 +943,7 @@ class CPPParser
           pass_call_frame = false
           pass_message = false
           pass_arguments = false
+          pass_gctoken = false
 
           m = prototype_pattern.match(prototype)
           unless m
@@ -953,6 +953,13 @@ class CPPParser
           # If the first argument is the +STATE+ macro, handle it in +output_args+
           if args.first == "STATE"
             args.shift and pass_state = true
+
+            if args.first =~ /GCToken .*/
+              args.shift
+              pass_gctoken = true
+            end
+
+
             # If the second argument is +Object* self+, we will automatically pass
             # in the receiver of the primitive message in +output_call+
             if args.first == "Object* self"
@@ -963,10 +970,6 @@ class CPPParser
           if args.last == "CallFrame* calling_environment"
             pass_call_frame = true
             args.pop
-          end
-
-          if args.last == "Message& msg"
-            raise "Unsupported"
           end
 
           if i = args.index("Arguments& args")
@@ -1003,6 +1006,7 @@ class CPPParser
           obj.pass_call_frame = pass_call_frame
           obj.pass_message = pass_message
           obj.pass_arguments = pass_arguments
+          obj.pass_gctoken = pass_gctoken
         elsif object_size_pattern.match(l)
           cpp.class_has_object_size
         end
@@ -1079,7 +1083,7 @@ end
 write_if_new "vm/gen/typechecks.gen.cpp" do |f|
   f.puts "size_t TypeInfo::instance_sizes[(int)LastObjectType] = {ObjectHeader::align(sizeof(Object))};"
   f.puts "void TypeInfo::auto_init(ObjectMemory* om) {"
-  parser.classes.each do |n, cpp|
+  parser.classes.sort_by {|n, _| n }.each do |n, cpp|
     f.puts "  {"
     f.puts "    TypeInfo *ti = new #{n}::Info(#{n}::type);"
     f.puts "    ti->type_name = std::string(\"#{n}\");"
@@ -1097,28 +1101,30 @@ write_if_new "vm/gen/typechecks.gen.cpp" do |f|
   f.puts
 
   f.puts "void TypeInfo::auto_learn_fields(STATE) {"
-  parser.classes.each do |n, cpp|
+  parser.classes.sort_by {|n, _| n }.each do |n, cpp|
     f.puts "  {"
-    f.puts "    TypeInfo* ti = state->find_type(#{n}::type);"
+    f.puts "    TypeInfo* ti = state->vm()->find_type(#{n}::type);"
     f.puts "    ti->set_state(state);"
 
     fields = cpp.all_fields
     f.puts "    ti->slot_accessors.resize(#{fields.size});\n"
+    f.puts "    ti->slot_types.resize(#{fields.size});\n"
     fields.each do |name, type, idx|
+      symbol_name = "access_#{n}_#{name}"
       f.puts "    ti->slots[state->symbol(\"@#{name}\")->index()] = #{idx};"
-      f.puts "    ti->slot_accessors[#{idx}] = Primitives::resolve_primitive(state, state->symbol(\"access_#{n}_#{name}\"));"
+      f.puts "    ti->slot_types[#{idx}] = #{type}::type;"
+      f.puts "    ti->slot_accessors[#{idx}] = &Primitives::#{symbol_name};"
     end
-    f.puts "  ti->populate_slot_locations();"
+    f.puts "    ti->populate_slot_locations();"
     f.puts "  }"
     f.puts
   end
   f.puts "}"
 
-  parser.classes.each do |n, cpp|
+  parser.classes.sort_by {|n, _| n }.each do |n, cpp|
     next if cpp.all_fields.size == 0
 
     f.puts "void #{n}::Info::populate_slot_locations() {"
-    f.puts "  slot_locations.resize(#{cpp.all_fields.size});\n"
 
     if cpp.super
       f.puts "  this->#{cpp.super.name}::Info::populate_slot_locations();\n"
@@ -1127,29 +1133,30 @@ write_if_new "vm/gen/typechecks.gen.cpp" do |f|
       offset = 0
     end
 
+    f.puts "  slot_locations.resize(#{cpp.all_fields.size});\n"
+
     cpp.fields.each do |name, type, idx|
       f.puts "  slot_locations[#{offset + idx}] = FIELD_OFFSET(#{n}, #{name}_);\n"
     end
     f.puts "}"
   end
 
-  parser.classes.each do |n, cpp|
+  parser.classes.sort_by {|n, _| n }.each do |n, cpp|
     f.puts cpp.generate_typechecks
     f.puts cpp.generate_mark
-    f.puts cpp.generate_visit
   end
 end
 
 write_if_new "vm/gen/primitives_declare.hpp" do |f|
   total_prims = 0
-  parser.classes.each do |n, cpp|
+  parser.classes.sort_by {|n, _| n }.each do |n, cpp|
     total_prims += cpp.primitives.size
-    cpp.primitives.each do |pn, prim|
+    cpp.primitives.map{|pn, prim| pn }.sort.each do |pn|
       f.puts "static Object* #{pn}(STATE, CallFrame* call_frame, Executable* exec, Module* mod, Arguments& args);"
     end
 
     total_prims += cpp.access_primitives.size
-    cpp.access_primitives.each do |name|
+    cpp.access_primitives.sort.each do |name|
       f.puts "static Object* #{name}(STATE, CallFrame* call_frame, Executable* exec, Module* mod, Arguments& args);"
     end
   end
@@ -1174,96 +1181,152 @@ write_if_new "vm/gen/object_types.hpp" do |f|
 end
 
 write_if_new "vm/gen/kind_of.hpp" do |f|
-  parser.classes.each do |n, cpp|
+  parser.classes.sort_by {|n, _| n }.each do |n, cpp|
     next if cpp.name == "Object"
     f.puts "class #{cpp.name};"
     f.puts cpp.generate_kind_of
   end
 end
 
-write_if_new "vm/gen/primitives_glue.gen.cpp" do |f|
-  names = []
-  jit_stubs = []
-  invoke_stubs = []
+class PrimitiveCodeGenerator
+  def initialize(parser)
+    classes = parser.classes.sort_by { |n, | n }
 
-  parser.classes.sort_by { |name,| name }.each do |n, cpp|
-    cpp.primitives.sort_by { |name,| name }.each do |pn, prim|
-      names << pn
+    @indexes = {}
+    @jit_functions = []
+    @invoke_functions = []
 
-      f << prim.generate_glue
+    @names = []
+    @primitives = []
 
-      if prim.respond_to?(:generate_jit_stub) and jit = prim.generate_jit_stub
-        f << jit
-        jit_stubs << [prim, pn]
-      end
+    @files = classes.map do |n, file|
+      primitives = file.primitives.sort_by { |n, | n }
+      primitives.each { |n, p| @names << n }
 
-      if prim.respond_to?(:generate_invoke_stub) and is = prim.generate_invoke_stub
-        f << is
-        invoke_stubs << [prim, pn]
-      end
+      @names += file.access_primitives
 
+      @primitives += primitives
+
+      file
     end
 
-    f << cpp.generate_accessors
-    names += cpp.access_primitives
+    @names.sort!
   end
 
-  f.puts "executor Primitives::resolve_primitive(STATE, Symbol* name, int* index) {"
+  def generate
+    method_primitives
+    jit_primitives
+    invoke_primitives
+    accessor_primitives
+    method_resolver
+    jit_resolver
+    invoke_resolver
+  end
 
-  indexes = {}
+  def method_primitives
+    write_if_new "vm/gen/method_primitives.cpp" do |f|
+      @primitives.each { |_, p| f << p.generate_glue }
+    end
+  end
 
-  i = 0
-  names.sort.each do |name|
-    indexes[name] = i
+  def jit_primitives
+    write_if_new "vm/gen/jit_primitives.cpp" do |f|
+      @primitives.each do |n, p|
+        if p.respond_to? :generate_jit_stub
+          code = p.generate_jit_stub
+          if code
+            f << code
+            @jit_functions << [n, p]
+          end
+        end
+      end
+    end
+  end
 
-    f.puts <<-EOF
-  if(name == state->symbol("#{name}")) {
-    if(index) *index = #{i};
+  def invoke_primitives
+    write_if_new "vm/gen/invoke_primitives.cpp" do |f|
+      @primitives.each do |n, p|
+        if p.respond_to? :generate_invoke_stub
+          code = p.generate_invoke_stub
+          if code
+            f << code
+            @invoke_functions << [n, p]
+          end
+        end
+      end
+    end
+  end
+
+  def accessor_primitives
+    write_if_new "vm/gen/accessor_primitives.cpp" do |f|
+      @files.each { |file| f << file.generate_accessors }
+    end
+  end
+
+  def method_resolver
+    write_if_new "vm/gen/method_resolver.cpp" do |f|
+      f.puts "executor Primitives::resolve_primitive(STATE, Symbol* name, int* index) {"
+
+      @names.each_with_index do |name, index|
+        @indexes[name] = index
+
+        f.puts <<-EOC
+  if(name == state->symbol("#{name}", #{name.bytesize})) {
+    if(index) *index = #{index};
     return &Primitives::#{name};
   }
 
-    EOF
+        EOC
+      end
 
-    i += 1
-  end
-
-  f.puts <<-EOF
-//  if(!state->probe()->nil_p()) {
-//    state->probe()->missing_primitive(state, name->c_str(state));
-//  }
-return &Primitives::unknown_primitive;
-// commented out while we have soft primitive failures
-// throw std::runtime_error(msg.c_str());
+      f.puts <<-EOC
+  //  if(!state->probe()->nil_p()) {
+  //    state->probe()->missing_primitive(state, name->c_str(state));
+  //  }
+  return &Primitives::unknown_primitive;
+  // commented out while we have soft primitive failures
+  // throw std::runtime_error(msg.c_str());
 }
-  EOF
-
-  f.puts "bool Primitives::get_jit_stub(int index, JITStubResults& res) {"
-  f.puts "  switch(index) {"
-
-  jit_stubs.each do |prim, name|
-    f.puts "  case #{indexes[name]}: // #{name}"
-    f.puts "    res.set_arg_count(#{prim.arg_count});"
-    f.puts "    res.set_name(\"jit_stub_#{name}\");"
-    f.puts "    res.set_pass_callframe(false);" if prim.safe
-    f.puts "    res.set_can_fail(false);" if !prim.can_fail
-    f.puts "    return true;"
+      EOC
+    end
   end
 
-  f.puts "  }"
+  def jit_resolver
+    write_if_new "vm/gen/jit_resolver.cpp" do |f|
+      f.puts "bool Primitives::get_jit_stub(int index, JITStubResults& res) {"
+      f.puts "  switch(index) {"
 
-  f.puts "  return false;"
+      @jit_functions.each do |n, p|
+        f.puts "  case #{@indexes[n]}: // #{n}"
+        f.puts "    res.set_arg_count(#{p.arg_count});"
+        f.puts "    res.set_name(\"jit_stub_#{n}\");"
+        f.puts "    res.set_pass_callframe(false);" if p.safe && !p.pass_call_frame
+        f.puts "    res.set_can_fail(false);" unless p.can_fail
+        f.puts "    return true;"
+      end
 
-  f.puts "}"
+      f.puts "  }"
+      f.puts "  return false;"
+      f.puts "}"
+    end
+  end
 
-  f.puts "InvokePrimitive Primitives::get_invoke_stub(STATE, Symbol* name) {"
-  invoke_stubs.each do |prim, name|
-    f.puts <<-EOF
-  if(name == state->symbol("#{name}")) {
-    return &invoke_#{name};
+  def invoke_resolver
+    write_if_new "vm/gen/invoke_resolver.cpp" do |f|
+      f.puts "InvokePrimitive Primitives::get_invoke_stub(STATE, Symbol* name) {"
+
+      @invoke_functions.each do |n, |
+        f.puts <<-EOC
+  if(name == state->symbol("#{n}", #{n.bytesize})) {
+    return &invoke_#{n};
   }
-    EOF
-  end
+        EOC
+      end
 
-  f.puts "  return &invoke_unknown_primitive;"
-  f.puts "}"
+      f.puts "  return &invoke_unknown_primitive;"
+      f.puts "}"
+    end
+  end
 end
+
+PrimitiveCodeGenerator.new(parser).generate

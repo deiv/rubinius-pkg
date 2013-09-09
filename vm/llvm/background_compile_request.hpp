@@ -3,58 +3,77 @@
 
 #include "llvm/state.hpp"
 
-#include "builtin/compiledmethod.hpp"
+#include "builtin/compiledcode.hpp"
 #include "builtin/class.hpp"
 
 #include "object_utils.hpp"
 
 namespace rubinius {
   class BlockEnvironment;
-  class CompiledMethod;
+  class CompiledCode;
 
   class BackgroundCompileRequest {
-    TypedRoot<CompiledMethod*> method_;
-    TypedRoot<Object*> extra_;
+    CompiledCode* method_;
+    Class* receiver_class_;
+    BlockEnvironment* block_env_;
+
+    utilities::thread::Condition* waiter_;
+    int hits_;
     bool is_block_;
-    thread::Condition* waiter_;
 
   public:
-    BackgroundCompileRequest(STATE, CompiledMethod* cm, Object* extra, bool is_block=false)
-      : method_(state)
-      , extra_(state)
-      , is_block_(is_block)
+    BackgroundCompileRequest(STATE, CompiledCode* code, Class* receiver_class,
+                             int hits, BlockEnvironment* block_env = NULL, bool is_block=false)
+      : method_(code)
+      , receiver_class_(receiver_class)
+      , block_env_(block_env)
       , waiter_(0)
-    {
-      method_.set(cm);
-      extra_.set(extra);
+      , hits_(hits)
+      , is_block_(is_block)
+    {}
+
+    MachineCode* machine_code() {
+      return method_->machine_code();
     }
 
-    VMMethod* vmmethod() {
-      return method_->backend_method();
-    }
-
-    CompiledMethod* method() {
-      return method_.get();
+    CompiledCode* method() {
+      return method_;
     }
 
     BlockEnvironment* block_env() {
-      return try_as<BlockEnvironment>(extra_.get());
+      return block_env_;
     }
 
     Class* receiver_class() {
-      return try_as<Class>(extra_.get());
+      return receiver_class_;
     }
 
     bool is_block() {
       return is_block_;
     }
 
-    void set_waiter(thread::Condition* cond) {
+    int hits() {
+      return hits_;
+    }
+
+    void set_waiter(utilities::thread::Condition* cond) {
       waiter_ = cond;
     }
 
-    thread::Condition* waiter() {
+    utilities::thread::Condition* waiter() {
       return waiter_;
+    }
+
+    void set_method(CompiledCode* meth) {
+      method_ = meth;
+    }
+
+    void set_receiver_class(Class* receiver_class) {
+      receiver_class_ = receiver_class;
+    }
+
+    void set_block_env(BlockEnvironment* block_env) {
+      block_env_ = block_env;
     }
   };
 

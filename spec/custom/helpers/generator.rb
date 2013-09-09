@@ -89,9 +89,9 @@ module Rubinius
     # utility methods below clearer
     attr_reader   :g
     attr_accessor :stream, :ip, :redo, :break, :next, :retry,
-                  :name, :file, :line, :primitive, :for_block,
+                  :name, :file, :line, :primitive, :for_block, :for_module_body,
                   :required_args, :post_args, :total_args, :splat_index,
-                  :local_count, :local_names
+                  :local_count, :local_names, :block_index
 
 
     def initialize
@@ -348,13 +348,9 @@ module Rubinius
 
       return unless block_given?
 
-      g.dup
-      g.push_rubinius
-      g.swap
-      g.push_literal :__class_init__
-      g.swap
+      d = new_generator(g, :Y)
 
-      d = new_generator(g, name)
+      g.create_block d
 
       d.push_self
       d.add_scope
@@ -363,14 +359,10 @@ module Rubinius
 
       d.ret
 
-      g.push_literal(d)
-
       g.swap
       g.push_scope
-      g.swap
-      g.send :attach_method, 4
-      g.pop
-      g.send :__class_init__, 0
+      g.push_true
+      g.send :call_under, 3
     end
 
     def in_singleton_method(name, sing)
@@ -442,13 +434,9 @@ module Rubinius
 
       return unless block_given?
 
-      g.dup
-      g.push_rubinius
-      g.swap
-      g.push_literal :__module_init__
-      g.swap
+      d = new_generator(g, :Y)
 
-      d = new_generator(g)
+      g.create_block d
 
       d.push_self
       d.add_scope
@@ -457,14 +445,10 @@ module Rubinius
 
       d.ret
 
-      g.push_literal(d)
-
       g.swap
       g.push_scope
-      g.swap
-      g.send :attach_method, 4
-      g.pop
-      g.send :__module_init__, 0
+      g.push_true
+      g.send :call_under, 3
     end
 
     def save_exception
@@ -515,12 +499,12 @@ module Rubinius
         @body ||= block
       end
 
-      def condition(klass, &block)
-        @conditions << [klass, block]
+      def condition(klass, top_level = false, &block)
+        @conditions << [klass, block, top_level]
       end
 
       def raw_condition(&block)
-        @conditions << [nil, block]
+        @conditions << [nil, block, false]
       end
 
       def els(&block)
@@ -624,13 +608,18 @@ module Rubinius
 
       g.push_current_exception
 
-      rb.conditions.each do |klass, code|
+      rb.conditions.each do |klass, code, top_level|
         jump_body = g.new_label
         jump_next = g.new_label
 
         if klass
           g.dup
-          g.push_const klass
+          if top_level
+            g.push_cpath_top
+            g.find_const klass
+          else
+            g.push_const klass
+          end
           g.swap
           g.send :===, 1
           g.git jump_body

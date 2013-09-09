@@ -1,3 +1,6 @@
+# -*- encoding: us-ascii -*-
+
+module Rubinius
 module FFI
   ##
   # Represents a C struct as ruby class.
@@ -18,7 +21,7 @@ module FFI
           raise ArgumentError, "index out of range (#{idx} >= #{@size})"
         end
 
-        @pointer.get_at_offset(idx * @size, @type)
+        @pointer.get_at_offset(idx * @type, @type)
       end
 
       def []=(idx, val)
@@ -26,12 +29,12 @@ module FFI
           raise ArgumentError, "index out of range (#{idx} >= #{@size})"
         end
 
-        @pointer.set_at_offset(idx * @size, @type, val)
+        @pointer.set_at_offset(idx * @type, @type, val)
       end
 
       def each
         @size.times do |ele|
-          yield @pointer.get_at_offset(ele * @size, @type)
+          yield @pointer.get_at_offset(ele * @type, @type)
         end
       end
 
@@ -59,9 +62,12 @@ module FFI
       end
 
       alias_method :to_str, :to_s
+      alias_method :inspect, :to_s
     end
 
     def self.find_nested_parent
+      return nil if self.name.nil?
+
       path = self.name.split("::")
       path.pop # remove ourself
 
@@ -74,9 +80,7 @@ module FFI
         return nil
       end
 
-      return mod if mod.respond_to?(:find_type)
-
-      nil
+      mod.respond_to?(:find_type) ? mod : nil
     end
 
     attr_reader :pointer
@@ -85,7 +89,7 @@ module FFI
       return @layout if spec.size == 0
 
       # Pick up a enclosing FFI::Library
-      @enclosing_module = find_nested_parent
+      @enclosing_module ||= find_nested_parent
 
       cspec = Rubinius::LookupTable.new
       i = 0
@@ -121,6 +125,9 @@ module FFI
 
           type = FFI::Type::Array.new(type_code, ary_size, klass)
           element_size = type_size * ary_size
+        elsif f.kind_of?(Class) and (f < FFI::Struct || f < FFI::Union)
+          type = FFI::Type::StructByValue.new(f)
+          element_size = type_size = f.size
         else
           if @enclosing_module
             type_code = @enclosing_module.find_type(f)
@@ -129,7 +136,7 @@ module FFI
           type_code ||= FFI.find_type(f)
 
           type = type_code
-          element_size = FFI.type_size(type_code)
+          element_size = type_size = FFI.type_size(type_code)
         end
 
         offset = spec[i + 2]
@@ -137,12 +144,16 @@ module FFI
         if offset.kind_of?(Fixnum)
           i += 3
         else
-          offset = @size
+          if self < FFI::Union
+            offset = 0
+          else
+            offset = @size
 
-          mod = offset % element_size
-          unless mod == 0
-            # we need to align it.
-            offset += (element_size - mod)
+            mod = offset % type_size
+            unless mod == 0
+              # we need to align it.
+              offset += (type_size - mod)
+            end
           end
 
           i += 2
@@ -188,13 +199,23 @@ module FFI
     end
 
     def self.offset_of(name)
-      offset, type = @cspec[name]
-      return offset
+      @layout[name].first
     end
 
     def offset_of(name)
-      offset, type = @cspec[name]
-      return offset
+      @cspec[name].first
+    end
+
+    def self.offsets
+      members.map do |member|
+        [member, @layout[member].first]
+      end
+    end
+
+    def offsets
+      members.map do |member|
+        [member, @cspec[member].first]
+      end
     end
 
     def self.members
@@ -223,6 +244,11 @@ module FFI
       @pointer.free
     end
 
+    def ==(other)
+      return false unless other.is_a?(self.class)
+      @pointer == other.pointer
+    end
+
     def initialize_copy(ptr)
       @pointer = ptr.pointer.dup
     end
@@ -232,6 +258,8 @@ module FFI
       raise "Unknown field #{field}" unless offset
 
       case type
+      when Fixnum
+        @pointer.set_at_offset(offset, type, val)
       when FFI::Type::Array
         if type.implementation == InlineCharArray
           (@pointer + offset).write_string StringValue(val), type.size
@@ -255,8 +283,12 @@ module FFI
       case type
       when FFI::TYPE_CHARARR
         (@pointer + offset).read_string
+      when Fixnum
+        @pointer.get_at_offset(offset, type)
       when FFI::Type::Array
         type.implementation.new(type, @pointer + offset)
+      when FFI::Type::StructByValue
+        type.implementation.new(@pointer + offset)
       when Rubinius::NativeFunction
         ptr = @pointer.get_at_offset(offset, FFI::TYPE_PTR)
         if ptr
@@ -273,6 +305,10 @@ module FFI
       members.map { |m| self[m] }
     end
 
+    def null?
+      @pointer == FFI::Pointer::NULL
+    end
+
   end
 end
-
+end

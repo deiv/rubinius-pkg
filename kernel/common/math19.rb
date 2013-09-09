@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Math
   FactorialTable = [
     1.0,
@@ -25,13 +27,45 @@ module Math
     1124000727777607680000.0
   ]
 
+  def asin(x)
+    return Float::NAN if x.kind_of? Float and x.nan?
+
+    x = Rubinius::Type.coerce_to_float(x)
+    raise DomainError, 'asin' unless x.abs <= 1.0
+    FFI::Platform::Math.asin x
+  end
+
+  def acos(x)
+    return Float::NAN if x.kind_of? Float and x.nan?
+
+    x = Rubinius::Type.coerce_to_float(x)
+    raise DomainError, 'acos' unless x.abs <= 1.0
+
+    FFI::Platform::POSIX.errno = 0
+
+    ret = FFI::Platform::Math.acos x
+    Errno.handle
+    ret
+  end
+
+  def acosh(x)
+    return Float::NAN if x.kind_of? Float and x.nan?
+
+    x = Rubinius::Type.coerce_to_float(x)
+    raise DomainError, 'acosh' unless x >= 1.0
+    FFI::Platform::Math.acosh x
+  end
+
   def cbrt(x)
     x = Rubinius::Type.coerce_to_float x
+    FFI::Platform::Math.cbrt x
   end
 
   def gamma(x)
     x = Rubinius::Type.coerce_to_float x
 
+    # if x is negative zero, return -infinity
+    return -Float::INFINITY if (1 / x) == -Float::INFINITY
     return Float::INFINITY if x == 0.0
     return Float::NAN if x.nan?
 
@@ -47,7 +81,7 @@ module Math
 
       if fractional == 0.0
         raise DomainError, "gamma" if int < 0
-        return FactorialTable[int - 1]
+        return FactorialTable[int - 1] if int <= FactorialTable.size
       end
     end
 
@@ -64,20 +98,48 @@ module Math
     end
 
     FFI::MemoryPointer.new :int do |sign|
+      sign.write_int 1
       result = FFI::Platform::Math.lgamma_r x, sign
       [result, sign.read_int]
     end
   end
 
   def log(x, base=undefined)
+    return Float::NAN if x.kind_of? Float and x.nan?
+
     x = Rubinius::Type.coerce_to_float x
     raise DomainError, 'log' unless x >= 0.0
     return -Float::INFINITY if x == 0.0
     y = FFI::Platform::Math.log x
-    unless base.equal? undefined
+    unless undefined.equal? base
       base = Rubinius::Type.coerce_to_float base
       y /= log(base)
     end
     y
   end
+
+  def log2(x)
+    return Float::NAN if x.kind_of? Float and x.nan?
+
+    x = Rubinius::Type.coerce_to_float(x)
+    raise DomainError, 'log2' unless x >= 0.0
+    FFI::Platform::Math.log2 x
+  end
+
+  def log10(x)
+    return Float::NAN if x.kind_of? Float and x.nan?
+
+    x = Rubinius::Type.coerce_to_float(x)
+    raise DomainError, 'log10' unless x >= 0.0
+    FFI::Platform::Math.log10 x
+  end
+
+  def sqrt(x)
+    return Float::NAN if x.kind_of? Float and x.nan?
+
+    x = Rubinius::Type.coerce_to_float(x)
+    raise DomainError, 'sqrt' unless x >= 0.0
+    FFI::Platform::Math.sqrt x
+  end
+
 end

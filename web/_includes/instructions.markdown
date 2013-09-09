@@ -775,7 +775,7 @@
    2. If the input is an array, it is unmodified.
    3. If in 1.9 mode and the input is nil, an empty Array is returned
 
-   If the input is any other type, call `Array.coerce_into_array(value)`.
+   If the input is any other type, call `Rubinius::Type.coerce_to_array(value)`.
    If the return value of the method call is an `Array`, make it the result.
    Otherwise make the result an 1 element `Array` contain the original value.
 
@@ -815,10 +815,10 @@
 </td></tr>
 </tbody>
 </table>
-<h3><a class="instruction" name="set_ivar">set_ivar(index)</a></h3>
+<h3><a class="instruction" name="set_ivar">set_ivar(literal)</a></h3>
 
    Pops a value off the stack, and uses it to set the value of the instance
-   variable identifies by the literal specified by operand _index_.  The
+   variable identifies by the literal specified by operand _literal_.  The
    value popped off the stack is then pushed back on again.
 
 
@@ -831,9 +831,9 @@
 <tr><td>...</td><td>...</td></tr>
 </tbody>
 </table>
-<h3><a class="instruction" name="push_ivar">push_ivar(index)</a></h3>
+<h3><a class="instruction" name="push_ivar">push_ivar(literal)</a></h3>
 
-   Pushes the instance variable identified by _index_ onto the stack.
+   Pushes the instance variable identified by _literal_ onto the stack.
 
 
 <table class="stack_effect">
@@ -866,10 +866,10 @@
 #### Example
      engine = RUBY_ENGINE # RUBY_ENGINE is a constant defined by Rubinius
 
-<h3><a class="instruction" name="set_const">set_const(index)</a></h3>
+<h3><a class="instruction" name="set_const">set_const(literal)</a></h3>
 
    Pops an object off the stack, and uses value to set a constant named
-   by the literal _index_. The value is pushed back onto the stack.
+   by the _literal_. The value is pushed back onto the stack.
 
 
 <table class="stack_effect">
@@ -881,9 +881,9 @@
 <tr><td>...</td><td>...</td></tr>
 </tbody>
 </table>
-<h3><a class="instruction" name="set_const_at">set_const_at(index)</a></h3>
+<h3><a class="instruction" name="set_const_at">set_const_at(literal)</a></h3>
 
-   Pop a value from the literals table specified by the operand _index_ and
+   Pop a value from the literals table specified by the operand _literal_ and
    use it as the value of a constant named inside a Module object popped from
    the stack.  The _value_ is pushed back on the stack.
 
@@ -903,10 +903,10 @@
 </td><td></td></tr>
 </tbody>
 </table>
-<h3><a class="instruction" name="find_const">find_const(index)</a></h3>
+<h3><a class="instruction" name="find_const">find_const(literal)</a></h3>
 
    Pops _module_ off the stack, and searches within its namespace for the
-   constant named by the literal specified by the operand _index_. If found,
+   constant named by the literal specified by the operand _literal_. If found,
    it is pushed onto the stack; otherwise, nothing is pushed onto the stack,
    and a `NameError` exception is raised.
 
@@ -941,7 +941,7 @@
 <tr><td></td><td>...</td></tr>
 </tbody>
 </table>
-<h3><a class="instruction" name="push_const_fast">push_const_fast(literal, association)</a></h3>
+<h3><a class="instruction" name="push_const_fast">push_const_fast(literal)</a></h3>
 
    Pushes a constant onto the stack. Caches the lookup to provide faster
    future lookup. This instruction is normally emitted only by the Generator.
@@ -964,6 +964,32 @@
 <h4>See Also</h4>
 <ul class="insn_cross_ref">
 <li><a href="#push_const">push_const</a></li>
+</ul>
+<h3><a class="instruction" name="find_const_fast">find_const_fast(literal)</a></h3>
+
+   Pushes a constant onto the stack scoped under the module on the top of
+   the stack. Caches the lookup to provide faster future lookup. This
+   instruction is normally emitted only by the Generator.
+
+
+<table class="stack_effect">
+<thead>
+<tr><th>Before</th><th>After</th></tr>
+</thead>
+<tbody>
+<tr><td>module</td><td>constant</td></tr>
+<tr><td>...</td><td>...</td></tr>
+</tbody>
+</table>
+
+#### Example
+     str = "abc"
+     enum = Enumerable::Enumerator(str, :each_byte)
+
+
+<h4>See Also</h4>
+<ul class="insn_cross_ref">
+<li><a href="#find_const">find_const</a></li>
 </ul>
 <h3><a class="instruction" name="set_call_flags">set_call_flags(flags)</a></h3>
 
@@ -1219,7 +1245,7 @@
 
 <h3><a class="instruction" name="create_block">create_block(literal)</a></h3>
 
-   Read a CompiledMethod specified by the operand +literal+ and create a
+   Read a CompiledCode specified by the operand +literal+ and create a
    `BlockEnvironment`.  Push the new `BlockEnvironment` object on the stack.
 
 
@@ -1447,7 +1473,7 @@
 </table>
 <h3><a class="instruction" name="push_scope">push_scope()</a></h3>
 
-   Pushes the current `StaticScope` object on the stack. Many operations are
+   Pushes the current `ConstantScope` object on the stack. Many operations are
    defered to the current scope. This operation retrieves the current scope
    so methods can be called on it.
 
@@ -1463,11 +1489,8 @@
 </table>
 <h3><a class="instruction" name="add_scope">add_scope()</a></h3>
 
-   Create a new `StaticScope` object for the given Module on the stack.
+   Create a new `ConstantScope` object for the given Module on the stack.
    This scope is chained off the current scope of the method.
-
-   This also sets the scope of the current `CompiledMethod` to the new
-   `StaticScope`.
 
 
 <table class="stack_effect">
@@ -1573,7 +1596,7 @@
    method has been overridden. The serial number check is used to determine
    each time the code is executed, whether or not the standard `Fixnum#times`
    has been overridden. It leverages the serial number field on a
-   `CompiledMethod`, is initialised to either 0 (for kernel land methods) or
+   `CompiledCode`, is initialised to either 0 (for kernel land methods) or
    1 (for user land methods).
 
 <h3><a class="instruction" name="check_serial_private">check_serial_private(literal, serial)</a></h3>
@@ -2147,7 +2170,7 @@
 </table>
 <h3><a class="instruction" name="push_rubinius">push_rubinius()</a></h3>
 
-   Pushes the top-level global `Rubinius` constant onto the stack.  Generally
+   Pushes the top-level global `Rubinius` constant onto the stack. Generally
    this is done to call a utility method.
 
 
@@ -2183,7 +2206,7 @@
 </td><td></td></tr>
 <tr><td>   arg1
 </td><td></td></tr>
-<tr><td>   reciever
+<tr><td>   receiver
 </td><td></td></tr>
 </tbody>
 </table>
@@ -2210,6 +2233,21 @@
 
 <h3><a class="instruction" name="push_type">push_type()</a></h3>
 
+   Pushes the distinguished module `Rubinius::Type` onto the stack.
+
+
+<table class="stack_effect">
+<thead>
+<tr><th>Before</th><th>After</th></tr>
+</thead>
+<tbody>
+<tr><td>...</td><td>constant</td></tr>
+<tr><td></td><td>...</td></tr>
+</tbody>
+</table>
+<h3><a class="instruction" name="push_mirror">push_mirror()</a></h3>
+
+   Pushes the distinguished class `Rubinius::Mirror` onto the stack.
 
 
 <table class="stack_effect">

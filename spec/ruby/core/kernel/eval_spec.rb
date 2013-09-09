@@ -16,6 +16,10 @@ describe "Kernel#eval" do
     eval("2 + 3").should == 5
   end
 
+  it "coerces an object to string" do
+    eval(EvalSpecs::CoercedObject.new).should == 5
+  end
+
   it "evaluates within the scope of the eval" do
     EvalSpecs::A::B.name.should == "EvalSpecs::A::B"
   end
@@ -57,6 +61,10 @@ describe "Kernel#eval" do
     es = EvalSpecs.new
     eval("es.f { es.f { a = 2 } }")
     a.should == 2
+  end
+
+  it "finds locals in a nested eval" do
+    eval('test = 10; eval("test")').should == 10
   end
 
   ruby_version_is ""..."1.9" do
@@ -152,6 +160,13 @@ describe "Kernel#eval" do
       eval("y=3", level2)
       eval("y", level2).should == 3
     end
+
+    it "uses the same scope for local variables when given the same binding" do
+      outer_binding = binding
+
+      eval("if false; a = 1; end", outer_binding)
+      eval("a", outer_binding).should be_nil
+    end
   end
 
   ruby_version_is ""..."1.9" do
@@ -227,7 +242,7 @@ describe "Kernel#eval" do
     lambda {
       eval('if true',TOPLEVEL_BINDING,expected)
     }.should raise_error(SyntaxError) { |e|
-      e.message.should =~ /^#{expected}:1:.+/
+      e.message.should =~ /#{expected}:1:.+/
     }
   end
 
@@ -281,5 +296,32 @@ describe "Kernel#eval" do
     lambda {
       eval('KernelSpecs::EvalTest.call_yield') { "content" }
     }.should raise_error(LocalJumpError)
+  end
+
+  it "returns from the scope calling #eval when evaluating 'return'" do
+    lambda { eval("return :eval") }.call.should == :eval
+  end
+
+  ruby_bug "#", "1.9" do
+    # TODO: investigate this further on 1.8.7. This is one oddity:
+    #
+    # In a script body:
+    #
+    #   lambda { return }
+    #     works as expected
+    #
+    #   def quix; yield; end
+    #   lambda { quix { return } }
+    #     raises a LocalJumpError
+
+    it "unwinds through a Proc-style closure and returns from a lambda-style closure in the closure chain" do
+      code = fixture __FILE__, "eval_return_with_lambda.rb"
+      ruby_exe(code).chomp.should == "a,b,c,eval,f"
+    end
+  end
+
+  it "raises a LocalJumpError if there is no lambda-style closure in the chain" do
+    code = fixture __FILE__, "eval_return_without_lambda.rb"
+    ruby_exe(code).chomp.should == "a,b,c,e,LocalJumpError,f"
   end
 end

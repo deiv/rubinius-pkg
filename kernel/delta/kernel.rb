@@ -1,8 +1,10 @@
+# -*- encoding: us-ascii -*-
+
 module Kernel
 
   def raise(exc=undefined, msg=undefined, ctx=nil)
     skip = false
-    if exc.equal? undefined
+    if undefined.equal? exc
       exc = $!
       if exc
         skip = true
@@ -10,13 +12,13 @@ module Kernel
         exc = RuntimeError.new("No current exception")
       end
     elsif exc.respond_to? :exception
-      if msg.equal? undefined
+      if undefined.equal? msg
         exc = exc.exception
       else
         exc = exc.exception msg
       end
       raise ::TypeError, 'exception class/object expected' unless exc.kind_of?(::Exception)
-    elsif exc.kind_of? String or !exc
+    elsif exc.kind_of? String
       exc = ::RuntimeError.exception exc
     else
       raise ::TypeError, 'exception class/object expected'
@@ -63,7 +65,7 @@ module Kernel
 
     object_class = Rubinius::Type.object_class(self)
 
-    if __kind_of__(Module)
+    if Rubinius::Type.object_kind_of?(self, Module)
       msg << " on #{self} (#{object_class})"
 
     # A separate case for nil, because people like to patch methods to
@@ -85,10 +87,18 @@ module Kernel
   # that the compiler can't see.
   Rubinius::Globals.set_hook(:$!) { $! }
 
-  Rubinius::Globals.set_hook(:$~) do
+  get = proc do
     # We raise an exception here because Regexp.last_match won't work
-    raise TypeError, "Unable to handle $! in this context"
+    raise TypeError, "Unable to handle $~ in this context"
   end
+  set = proc do |key, val|
+    if val.nil? || val.kind_of?(MatchData)
+      Rubinius.invoke_primitive :regexp_set_last_match, val
+    else
+      raise TypeError, "Cannot assign #{val.class}, expexted nil or instance MatchData."
+    end
+  end
+  Rubinius::Globals.set_hook(:$~, get, set)
 
   Rubinius::Globals.set_hook(:$*) { ARGV }
 
@@ -106,38 +116,27 @@ module Kernel
     io
   end
 
+  get = proc { |key| Thread.current[:$_] }
+  set = proc { |key, val| Thread.current[:$_] = val }
+  Rubinius::Globals.set_hook(:$_, get, set)
+
   Rubinius::Globals.add_alias :$stdout, :$>
   Rubinius::Globals.set_filter(:$stdout, write_filter)
   Rubinius::Globals.set_filter(:$stderr, write_filter)
-
-  get = proc do
-    warn "$defout is obsolete; it will be removed any day now"
-    $stdout
-  end
-
-  set = proc do |key, io|
-    warn "$defout is obsolete; it will be removed any day now"
-    $stdout = io
-  end
-
-  Rubinius::Globals.set_hook(:$defout, get, set)
-
-  get = proc do
-    warn "$deferr is obsolete; it will be removed any day now"
-    $stderr
-  end
-
-  set = proc do |key, io|
-    warn "$deferr is obsolete; it will be removed any day now"
-    $stderr = io
-  end
-
-  Rubinius::Globals.set_hook(:$deferr, get, set)
 
   # Proper kcode support
   get = proc { |key| Rubinius.kcode.to_s }
   set = proc { |key, val| Rubinius.kcode = val }
   Rubinius::Globals.set_hook(:$KCODE, get, set)
+
+  set = proc do |key, val|
+    val = Rubinius::Type.coerce_to val, String, :to_str
+    Rubinius.invoke_primitive :vm_set_process_title, val
+  end
+  Rubinius::Globals.set_hook(:$0, :[], set)
+
+  set = proc { |key, val| STDERR.puts("WARNING: $SAFE is not supported on Rubinius."); val }
+  Rubinius::Globals.set_hook(:$SAFE, :[], set)
 
   # Alias $0 $PROGRAM_NAME
   Rubinius::Globals.add_alias(:$0, :$PROGRAM_NAME)
@@ -145,5 +144,26 @@ module Kernel
   Rubinius::Globals.read_only :$:, :$LOAD_PATH, :$-I
   Rubinius::Globals.read_only :$", :$LOADED_FEATURES
   Rubinius::Globals.read_only :$<
-  Rubinius::Globals.read_only :$?
+
+  Rubinius::Globals[:$-a] = false
+  Rubinius::Globals[:$-l] = false
+  Rubinius::Globals[:$-p] = false
+  Rubinius::Globals.read_only :$-a, :$-l, :$-p
+
+  Rubinius::Globals.add_alias :$DEBUG,   :$-d
+  Rubinius::Globals.add_alias :$VERBOSE, :$-v
+  Rubinius::Globals.add_alias :$VERBOSE, :$-w
+
+  set_string = proc do |key, value|
+    unless value.nil? or value.kind_of? String
+      raise TypeError, "value of #{key} must be a String"
+    end
+
+    Rubinius::Globals.set! key, value
+  end
+
+  Rubinius::Globals.set_filter :$/, set_string
+  Rubinius::Globals.add_alias :$/, :$-0
+
+  Rubinius::Globals.set_filter :$,, set_string
 end

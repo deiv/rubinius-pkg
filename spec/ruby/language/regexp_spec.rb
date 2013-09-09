@@ -80,7 +80,7 @@ describe "Literal Regexps" do
   # Specs for the matching semantics
   #############################################################################
 
-  it 'supports . (any character except line terminator)' do
+  it "supports . (any character except line terminator)" do
     # Basic matching
     /./.match("foo").to_a.should == ["f"]
     # Basic non-matching
@@ -90,19 +90,21 @@ describe "Literal Regexps" do
   end
 
 
-  it 'supports | (alternations)' do
+  it "supports | (alternations)" do
     /a|b/.match("a").to_a.should == ["a"]
   end
 
-  it 'supports (?> ) (embedded subexpression)' do
+  it "supports (?> ) (embedded subexpression)" do
     /(?>foo)(?>bar)/.match("foobar").to_a.should == ["foobar"]
     /(?>foo*)obar/.match("foooooooobar").should be_nil # it is possesive
   end
 
-  it 'supports (?# )' do
+  it "supports (?# )" do
     /foo(?#comment)bar/.match("foobar").to_a.should == ["foobar"]
     /foo(?#)bar/.match("foobar").to_a.should == ["foobar"]
   end
 end
 
-language_version __FILE__, "regexp"
+ruby_version_is "1.9" do
+  require File.expand_path("../versions/regexp_1.9", __FILE__)
+end

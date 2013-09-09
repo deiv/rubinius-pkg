@@ -9,34 +9,23 @@ describe "An Sclass node" do
 
     compile do |g|
       g.push :self
-      g.push_rubinius
-      g.find_const :Type
+      g.push_type
       g.swap
       g.send :object_singleton_class, 1
-      g.dup
-
-      g.push_rubinius
-      g.swap
-      g.push_literal :__metaclass_init__
-      g.swap
 
       d = new_generator(g)
+
+      g.create_block d
 
       d.push_self
       d.add_scope
       d.push 42
       d.ret
 
-      g.push_literal(d)
-
       g.swap
       g.push_scope
-      g.swap
-      g.send :attach_method, 4
-
-      g.pop
-      g.push_block
-      g.send_with_block :__metaclass_init__, 0
+      g.push_true
+      g.send :call_under, 3
     end
   end
 
@@ -52,19 +41,16 @@ describe "An Sclass node" do
 
     compile do |g|
       in_class :A do |d|
+
+
         d.push :self
-        d.push_rubinius
-        d.find_const :Type
+        d.push_type
         d.swap
         d.send :object_singleton_class, 1
-        d.dup
-
-        d.push_rubinius
-        d.swap
-        d.push_literal :__metaclass_init__
-        d.swap
 
         e = new_generator(g)
+
+        d.create_block(e)
 
         e.push_self
         e.add_scope
@@ -72,16 +58,11 @@ describe "An Sclass node" do
         e.send :a, 0, true
         e.ret
 
-        d.push_literal(e)
-
         d.swap
         d.push_scope
-        d.swap
-        d.send :attach_method, 4
+        d.push_true
+        d.send :call_under, 3
 
-        d.pop
-        d.push_block
-        d.send_with_block :__metaclass_init__, 0
         d.pop
         d.in_class :B
         d.pop
@@ -102,8 +83,7 @@ describe "An Sclass node" do
       g.set_local 0
       g.pop
       g.push_local 0
-      g.push_rubinius
-      g.find_const :Type
+      g.push_type
       g.swap
       g.send :object_singleton_class, 1
       g.pop
@@ -129,8 +109,7 @@ describe "An Sclass node" do
 
       g.in_block_send :m, :none do |d|
         d.push_local_depth 1, 0
-        d.push_rubinius
-        d.find_const :Type
+        d.push_type
         d.swap
         d.send :object_singleton_class, 1
         d.pop
@@ -153,8 +132,7 @@ describe "An Sclass node" do
       g.pop
 
       g.push_local 0
-      g.push_rubinius
-      g.find_const :Type
+      g.push_type
       g.swap
       g.send :object_singleton_class, 1
     end

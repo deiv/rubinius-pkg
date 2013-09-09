@@ -35,7 +35,12 @@ describe "YAML.load" do
   end
 
   it "fails on invalid keys" do
-    lambda { YAML.load("key1: value\ninvalid_key") }.should raise_error(ArgumentError)
+    if YAML.to_s == "Psych"
+      error = Psych::SyntaxError
+    else
+      error = ArgumentError
+    end
+    lambda { YAML.load("key1: value\ninvalid_key") }.should raise_error(error)
   end
 
   it "accepts symbols" do
@@ -60,11 +65,13 @@ describe "YAML.load" do
     YAML.load("--- abc").should == "abc"
   end
 
-  it "does not escape symbols" do
-    YAML.load("foobar: >= 123").should == { "foobar" => ">= 123"}
-    YAML.load("foobar: |= 567").should == { "foobar" => "|= 567"}
-    YAML.load("--- \n*.rb").should == "*.rb"
-    YAML.load("--- \n&.rb").should == "&.rb"
+  ruby_version_is "" ... "2.0" do
+    it "does not escape symbols" do
+      YAML.load("foobar: >= 123").should == { "foobar" => ">= 123"}
+      YAML.load("foobar: |= 567").should == { "foobar" => "|= 567"}
+      YAML.load("--- \n*.rb").should == "*.rb"
+      YAML.load("--- \n&.rb").should == "&.rb"
+    end
   end
 
   it "works with block sequence shortcuts" do
@@ -88,6 +95,12 @@ describe "YAML.load" do
     YAML.load(string).should == expected
   end
 
+  it "loads a StringIO object as empty" do
+    s = YAML.load("--- !ruby/object:StringIO {}\n\n")
+    s.should be_kind_of(StringIO)
+    s.string.should == ""
+  end
+
   describe "with iso8601 timestamp" do
     it "computes the microseconds" do
       [ [YAML.load("2011-03-22t23:32:11.2233+01:00"),   223300],
@@ -97,7 +110,7 @@ describe "YAML.load" do
     end
 
     ruby_bug "#4571", "1.9.2" do
-      it "rounds values smaller than 1 usec to 0 " do
+      it "rounds values smaller than 1 usec to 0" do
         YAML.load("2011-03-22t23:32:11.000000342222+01:00").usec.should == 0
       end
     end

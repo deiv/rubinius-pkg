@@ -41,8 +41,10 @@ namespace rubinius {
   }
 
   void RubyException::show(STATE) {
-    std::cout << exception->message_c_str(state)
-              << " (" << exception->class_object(state)->name()->c_str(state) << ") \n";
+    std::cout << exception->message_c_str(state) <<
+        " (" <<
+        exception->class_object(state)->debug_str(state) <<
+        ") \n";
     print_backtrace();
   }
 
@@ -89,7 +91,7 @@ namespace rubinius {
       const char* pos = strstr(str, " _Z");
       /* Found a mangle. */
       if(pos) {
-        size_t sz = 1024;
+        size_t sz = 0;
         char *cpp_name = 0;
         char* name = strdup(pos + 1);
         char* end = strstr(name, " + ");
@@ -98,24 +100,26 @@ namespace rubinius {
         int status;
         cpp_name = abi::__cxa_demangle(name, cpp_name, &sz, &status);
 
-        if(!status) {
-          std::string full_cpp = std::string(str, pos - str) + " " + cpp_name +
-            " " + (++end);
-          s[i] = full_cpp;
+        // It's possible for __cxa_demangle to return 0x0, which probably
+        // shouldn't happen with status == 0, but it was observed in OS X
+        // Mavericks Preview 2 so be paranoid.
+        if(cpp_name) {
+          if(!status) {
+            std::string full_cpp = std::string(str, pos - str) + " " + cpp_name +
+              " " + (++end);
+            s[i] = full_cpp;
+          }
+          free(cpp_name);
         }
-        if(cpp_name) free(cpp_name);
         free(name);
       }
     }
   }
 
-
-  static bool hard_abort = true;
-
   void abort() {
     std::cout << "Abort!" << std::endl;
     print_backtrace();
-    if(hard_abort) ::abort();
+    ::abort();
   }
 
   void bug(const char* message) {
@@ -130,6 +134,11 @@ namespace rubinius {
               << "]\n";
     print_backtrace();
     ::abort();
+  }
+
+  void warn(const char* message) {
+    std::cerr << "[WARNING: " << message << "]\n";
+    print_backtrace();
   }
 
   void print_backtrace(size_t max) {
@@ -160,6 +169,16 @@ namespace rubinius {
       backtrace = new VMException::Backtrace(get_cpp_backtrace());
     }
     if(reason) this->reason = strdup(reason);
+  }
+
+  VMException::VMException(const VMException& other)
+      : backtrace(NULL), reason(NULL) {
+    if(other.backtrace) {
+      backtrace = new VMException::Backtrace(*other.backtrace);
+    }
+    if(other.reason) {
+      reason = strdup(reason);
+    }
   }
 
   void VMException::print_backtrace() {

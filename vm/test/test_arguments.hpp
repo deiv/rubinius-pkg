@@ -5,7 +5,7 @@
 #include "builtin/fixnum.hpp"
 #include "builtin/array.hpp"
 #include "builtin/iseq.hpp"
-#include "builtin/compiledmethod.hpp"
+#include "builtin/compiledcode.hpp"
 #include "builtin/symbol.hpp"
 
 #include "arguments.hpp"
@@ -28,7 +28,7 @@ public:
   }
 
   void tearDown() {
-    delete static_args;
+    delete[] static_args;
     destroy();
   }
 
@@ -190,21 +190,35 @@ public:
     Arguments args(state->symbol("blah"), 1, static_args);
 
     Array* ary = args.as_array(state);
-    TS_ASSERT_EQUALS(ary->size(), 1U);
+    TS_ASSERT_EQUALS(ary->size(), 1);
     TS_ASSERT_EQUALS(ary->get(state, 0), three);
 
     args.unshift(state, four);
 
     ary = args.as_array(state);
-    TS_ASSERT_EQUALS(ary->size(), 2U);
+    TS_ASSERT_EQUALS(ary->size(), 2);
     TS_ASSERT_EQUALS(ary->get(state, 0), four);
     TS_ASSERT_EQUALS(ary->get(state, 1), three);
 
     args.shift(state);
 
     ary = args.as_array(state);
-    TS_ASSERT_EQUALS(ary->size(), 1U);
+    TS_ASSERT_EQUALS(ary->size(), 1);
     TS_ASSERT_EQUALS(ary->get(state, 0), three);
 
+  }
+
+  void test_use_array_with_shifted_array() {
+    Arguments args(state->symbol("blah"), 1, static_args);
+
+    Array *ary = Array::create(state, 3);
+    ary->set(state, 0, Fixnum::from(1));
+    ary->set(state, 1, Fixnum::from(2));
+    ary->set(state, 2, Fixnum::from(3));
+    ary->shift(state);
+
+    args.use_array(ary);
+    TS_ASSERT_EQUALS(args.get_argument(0), Fixnum::from(2));
+    TS_ASSERT_EQUALS(args.get_argument(1), Fixnum::from(3));
   }
 };

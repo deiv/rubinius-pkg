@@ -1,6 +1,6 @@
-require File.dirname(__FILE__) + '/../spec_helper'
+require 'spec_helper'
 require 'mspec/expectations/expectations'
-require 'mspec/matchers/raise_error'
+require 'mspec/matchers'
 
 class ExpectedException < Exception; end
 class UnexpectedException < Exception; end
@@ -34,7 +34,12 @@ describe RaiseErrorMatcher do
   end
 
   it "does not match when the proc raises the expected exception with an unexpected message" do
-    proc = Proc.new { raise UnexpectedException, "unexpected" }
+    proc = Proc.new { raise ExpectedException, "unexpected" }
+    RaiseErrorMatcher.new(ExpectedException, "expected").matches?(proc).should == false
+  end
+
+  it "does not match when the proc does not raise an exception" do
+    proc = Proc.new {}
     RaiseErrorMatcher.new(ExpectedException, "expected").matches?(proc).should == false
   end
 
@@ -44,6 +49,14 @@ describe RaiseErrorMatcher do
     matcher.matches?(proc)
     matcher.failure_message.should ==
       ["Expected ExpectedException (expected)", "but got UnexpectedException (unexpected)"]
+  end
+
+  it "provides a useful failure message when no exception is raised" do
+    proc = Proc.new { 120 }
+    matcher = RaiseErrorMatcher.new(ExpectedException, "expected")
+    matcher.matches?(proc)
+    matcher.failure_message.should ==
+      ["Expected ExpectedException (expected)", "but no exception was raised (120 was returned)"]
   end
 
   it "provides a useful negative failure message" do

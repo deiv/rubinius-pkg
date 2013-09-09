@@ -88,6 +88,38 @@ describe "Predefined global $~" do
     lambda { $~ = Object.new }.should raise_error(TypeError)
     lambda { $~ = 1 }.should raise_error(TypeError)
   end
+
+  it "changes the value of derived capture globals when assigned" do
+    "foo" =~ /(f)oo/
+    foo_match = $~
+    "bar" =~ /(b)ar/
+    $~ = foo_match
+    $1.should == "f"
+  end
+
+  it "changes the value of the derived preceding match global" do
+    "foo hello" =~ /hello/
+    foo_match = $~
+    "bar" =~ /(bar)/
+    $~ = foo_match
+    $`.should == "foo "
+  end
+
+  it "changes the value of the derived following match global" do
+    "foo hello" =~ /foo/
+    foo_match = $~
+    "bar" =~ /(bar)/
+    $~ = foo_match
+    $'.should == " hello"
+  end
+
+  it "changes the value of the derived full match global" do
+    "foo hello" =~ /foo/
+    foo_match = $~
+    "bar" =~ /(bar)/
+    $~ = foo_match
+    $&.should == "foo"
+  end
 end
 
 describe "Predefined global $&" do
@@ -95,6 +127,13 @@ describe "Predefined global $&" do
     /foo/ =~ 'barfoobaz'
     $&.should == $~[0]
     $&.should == 'foo'
+  end
+
+  with_feature :encoding do
+    it "sets the encoding to the encoding of the source String" do
+      "abc".force_encoding(Encoding::EUC_JP) =~ /b/
+      $&.encoding.should equal(Encoding::EUC_JP)
+    end
   end
 end
 
@@ -104,6 +143,18 @@ describe "Predefined global $`" do
     $`.should == $~.pre_match
     $`.should == 'bar'
   end
+
+  with_feature :encoding do
+    it "sets the encoding to the encoding of the source String" do
+      "abc".force_encoding(Encoding::EUC_JP) =~ /b/
+      $`.encoding.should equal(Encoding::EUC_JP)
+    end
+
+    it "sets an empty result to the encoding of the source String" do
+      "abc".force_encoding(Encoding::ISO_8859_1) =~ /a/
+      $`.encoding.should equal(Encoding::ISO_8859_1)
+    end
+  end
 end
 
 describe "Predefined global $'" do
@@ -112,6 +163,18 @@ describe "Predefined global $'" do
     $'.should == $~.post_match
     $'.should == 'baz'
   end
+
+  with_feature :encoding do
+    it "sets the encoding to the encoding of the source String" do
+      "abc".force_encoding(Encoding::EUC_JP) =~ /b/
+      $'.encoding.should equal(Encoding::EUC_JP)
+    end
+
+    it "sets an empty result to the encoding of the source String" do
+      "abc".force_encoding(Encoding::ISO_8859_1) =~ /c/
+      $'.encoding.should equal(Encoding::ISO_8859_1)
+    end
+  end
 end
 
 describe "Predefined global $+" do
@@ -119,6 +182,18 @@ describe "Predefined global $+" do
     /(f(o)o)/ =~ 'barfoobaz'
     $+.should == $~.captures.last
     $+.should == 'o'
+  end
+
+  it "captures the last non nil capture" do
+    /(a)|(b)/ =~ 'a'
+    $+.should == 'a'
+  end
+
+  with_feature :encoding do
+    it "sets the encoding to the encoding of the source String" do
+      "abc".force_encoding(Encoding::EUC_JP) =~ /(b)/
+      $+.encoding.should equal(Encoding::EUC_JP)
+    end
   end
 end
 
@@ -142,6 +217,13 @@ describe "Predefined globals $1..N" do
     end
     test("-").should == nil
   end
+
+  with_feature :encoding do
+    it "sets the encoding to the encoding of the source String" do
+      "abc".force_encoding(Encoding::EUC_JP) =~ /(b)/
+      $1.encoding.should equal(Encoding::EUC_JP)
+    end
+  end
 end
 
 describe "Predefined global $stdout" do
@@ -160,14 +242,6 @@ describe "Predefined global $stdout" do
       $stdout = IOStub.new
       $stdout.should == $defout
     end
-  end
-
-  it "is the same as $DEFAULT_OUTPUT from 'English' library" do
-    require 'English'
-    $stdout.should == $DEFAULT_OUTPUT
-
-    $stdout = IOStub.new
-    $stdout.should == $DEFAULT_OUTPUT
   end
 
   it "raises TypeError error if assigned to nil" do
@@ -240,6 +314,110 @@ $stdout          IO              The current standard output. Assignment to $std
                                  $stdout.reopen instead.
 =end
 
+describe "Predefined global $/" do
+  before :each do
+    @dollar_slash = $/
+    @dollar_dash_zero = $-0
+  end
+
+  after :each do
+    $/ = @dollar_slash
+    $-0 = @dollar_dash_zero
+  end
+
+  it "can be assigned a String" do
+    str = "abc"
+    $/ = str
+    $/.should equal(str)
+  end
+
+  it "can be assigned nil" do
+    $/ = nil
+    $/.should be_nil
+  end
+
+  it "returns the value assigned" do
+    ($/ = "xyz").should == "xyz"
+  end
+
+
+  it "changes $-0" do
+    $/ = "xyz"
+    $-0.should equal($/)
+  end
+
+  it "does not call #to_str to convert the object to a String" do
+    obj = mock("$/ value")
+    obj.should_not_receive(:to_str)
+
+    lambda { $/ = obj }.should raise_error(TypeError)
+  end
+
+  it "raises a TypeError if assigned a Fixnum" do
+    lambda { $/ = 1 }.should raise_error(TypeError)
+  end
+
+  it "raises a TypeError if assigned a boolean" do
+    lambda { $/ = true }.should raise_error(TypeError)
+  end
+end
+
+describe "Predefined global $-0" do
+  before :each do
+    @dollar_slash = $/
+    @dollar_dash_zero = $-0
+  end
+
+  after :each do
+    $/ = @dollar_slash
+    $-0 = @dollar_dash_zero
+  end
+
+  it "can be assigned a String" do
+    str = "abc"
+    $-0 = str
+    $-0.should equal(str)
+  end
+
+  it "can be assigned nil" do
+    $-0 = nil
+    $-0.should be_nil
+  end
+
+  it "returns the value assigned" do
+    ($-0 = "xyz").should == "xyz"
+  end
+
+  it "changes $/" do
+    $-0 = "xyz"
+    $/.should equal($-0)
+  end
+
+  it "does not call #to_str to convert the object to a String" do
+    obj = mock("$-0 value")
+    obj.should_not_receive(:to_str)
+
+    lambda { $-0 = obj }.should raise_error(TypeError)
+  end
+
+  it "raises a TypeError if assigned a Fixnum" do
+    lambda { $-0 = 1 }.should raise_error(TypeError)
+  end
+
+  it "raises a TypeError if assigned a boolean" do
+    lambda { $-0 = true }.should raise_error(TypeError)
+  end
+end
+
+describe "Predefined global $," do
+  it "defaults to nil" do
+    $,.should be_nil
+  end
+
+  it "raises TypeError if assigned a non-String" do
+    lambda { $, = Object.new }.should raise_error(TypeError)
+  end
+end
 
 describe "Predefined global $_" do
   it "is set to the last line read by e.g. StringIO#gets" do
@@ -280,6 +458,21 @@ describe "Predefined global $_" do
 
     match.should == "qux\n"
     $_.should == match
+  end
+
+  it "is Thread-local" do
+    $_ = nil
+    running = false
+
+    thr = Thread.new do
+      $_ = "last line"
+      running = true
+    end
+
+    Thread.pass until running
+    $_.should be_nil
+
+    thr.join
   end
 
   it "can be assigned any value" do
@@ -331,7 +524,7 @@ $LOAD_PATH       Array           A synonym for $:. [r/o]
 $-p              Object          Set to true if the -p option (which puts an implicit while gets . . . end
                                  loop around your program) is present on the command line. [r/o]
 $SAFE            Fixnum          The current safe level. This variable’s value may never be
-                                 reduced by assignment. [thread]
+                                 reduced by assignment. [thread] (Not implemented in Rubinius)
 $VERBOSE         Object          Set to true if the -v, --version, -W, or -w option is specified on the com-
                                  mand line. Set to false if no option, or -W1 is given. Set to nil if -W0
                                  was specified. Setting this option to true causes the interpreter and some
@@ -358,12 +551,14 @@ describe "Execution variable $:" do
     end
   end
 
-  it "does not include '.' when the taint check level > 1" do
-    begin
-      orig_opts, ENV['RUBYOPT'] = ENV['RUBYOPT'], '-T'
-      `#{RUBY_EXE} -e 'p $:.include?(".")'`.should == "false\n"
-    ensure
-      ENV['RUBYOPT'] = orig_opts
+  not_compliant_on :rubinius do
+    it "does not include '.' when the taint check level > 1" do
+      begin
+        orig_opts, ENV['RUBYOPT'] = ENV['RUBYOPT'], '-T'
+        `#{RUBY_EXE} -e 'p $:.include?(".")'`.should == "false\n"
+      ensure
+        ENV['RUBYOPT'] = orig_opts
+      end
     end
   end
 
@@ -430,6 +625,21 @@ describe "Global variable $?" do
       $? = nil
     }.should raise_error(NameError)
   end
+
+  ruby_version_is ""..."1.9" do
+    it "is shared across threads" do
+      system("true")
+      pid = $?.pid
+      Thread.new { $?.pid.should == pid }.join
+    end
+  end
+
+  ruby_version_is "1.9" do
+    it "is thread-local" do
+      system("true")
+      Thread.new { $?.should be_nil }.join
+    end
+  end
 end
 
 describe "Global variable $-a" do
@@ -447,6 +657,71 @@ end
 describe "Global variable $-p" do
   it "is read-only" do
     lambda { $-p = true }.should raise_error(NameError)
+  end
+end
+
+describe "Global variable $-d" do
+  before :each do
+    @debug = $DEBUG
+  end
+
+  after :each do
+    $DEBUG = @debug
+  end
+
+  it "is an alias of $DEBUG" do
+    $DEBUG = true
+    $-d.should be_true
+    $-d = false
+    $DEBUG.should be_false
+  end
+end
+
+describe :verbose_global_alias, :shared => true do
+  before :each do
+    @verbose = $VERBOSE
+  end
+
+  after :each do
+    $VERBOSE = @verbose
+  end
+
+  it "is an alias of $VERBOSE" do
+    $VERBOSE = true
+    eval(@method).should be_true
+    eval("#{@method} = false")
+    $VERBOSE.should be_false
+  end
+end
+
+describe "Global variable $-v" do
+  it_behaves_like :verbose_global_alias, '$-v'
+end
+
+describe "Global variable $-w" do
+  it_behaves_like :verbose_global_alias, '$-w'
+end
+
+describe "Global variable $0" do
+  before :each do
+    @orig_program_name = $0
+  end
+
+  after :each do
+    $0 = @orig_program_name
+  end
+
+  it "returns the program name" do
+    $0 = "rbx"
+    $0.should == "rbx"
+  end
+
+  it "returns the given value when set" do
+    ($0 = "rbx").should == "rbx"
+  end
+
+  it "raises a TypeError when not given an object that can be coerced to a String" do
+    lambda { $0 = nil }.should raise_error(TypeError)
   end
 end
 
@@ -603,6 +878,114 @@ describe "The predefined global constants" do
 
 end
 
+with_feature :encoding do
+  describe "The predefined global constant" do
+    before :each do
+      @external = Encoding.default_external
+      @internal = Encoding.default_internal
+    end
+
+    after :each do
+      Encoding.default_external = @external
+      Encoding.default_internal = @internal
+    end
+
+    describe "STDIN" do
+      it "has the same external encoding as Encoding.default_external" do
+        STDIN.external_encoding.should equal(Encoding.default_external)
+      end
+
+      it "has the same external encoding as Encoding.default_external when that encoding is changed" do
+        Encoding.default_external = Encoding::ISO_8859_16
+        STDIN.external_encoding.should equal(Encoding::ISO_8859_16)
+      end
+
+      it "has the encodings set by #set_encoding"do
+        code = "STDIN.set_encoding Encoding::IBM775, Encoding::IBM866; " \
+               "p [STDIN.external_encoding.name, STDIN.internal_encoding.name]"
+        ruby_exe(code).chomp.should == %{["IBM775", "IBM866"]}
+      end
+
+      it "retains the encoding set by #set_encoding when Encoding.default_external is changed" do
+        code = "STDIN.set_encoding Encoding::IBM775, Encoding::IBM866; " \
+               "Encoding.default_external = Encoding::ISO_8859_16;" \
+               "p [STDIN.external_encoding.name, STDIN.internal_encoding.name]"
+        ruby_exe(code).chomp.should == %{["IBM775", "IBM866"]}
+      end
+
+      it "has nil for the internal encoding" do
+        STDIN.internal_encoding.should be_nil
+      end
+
+      it "has nil for the internal encoding despite Encoding.default_internal being changed" do
+        Encoding.default_internal = Encoding::IBM437
+        STDIN.internal_encoding.should be_nil
+      end
+    end
+
+    describe "STDOUT" do
+      it "has nil for the external encoding" do
+        STDOUT.external_encoding.should be_nil
+      end
+
+      it "has nil for the external encoding despite Encoding.default_external being changed" do
+        Encoding.default_external = Encoding::ISO_8859_1
+        STDOUT.external_encoding.should be_nil
+      end
+
+      it "has the encodings set by #set_encoding"do
+        code = "STDOUT.set_encoding Encoding::IBM775, Encoding::IBM866; " \
+               "p [STDOUT.external_encoding.name, STDOUT.internal_encoding.name]"
+        ruby_exe(code).chomp.should == %{["IBM775", "IBM866"]}
+      end
+
+      it "has nil for the internal encoding" do
+        STDOUT.internal_encoding.should be_nil
+      end
+
+      it "has nil for the internal encoding despite Encoding.default_internal being changed" do
+        Encoding.default_internal = Encoding::IBM437
+        STDOUT.internal_encoding.should be_nil
+      end
+    end
+
+    describe "STDERR" do
+      it "has nil for the external encoding" do
+        STDERR.external_encoding.should be_nil
+      end
+
+      it "has nil for the external encoding despite Encoding.default_external being changed" do
+        Encoding.default_external = Encoding::ISO_8859_1
+        STDERR.external_encoding.should be_nil
+      end
+
+      it "has the encodings set by #set_encoding"do
+        code = "STDERR.set_encoding Encoding::IBM775, Encoding::IBM866; " \
+               "p [STDERR.external_encoding.name, STDERR.internal_encoding.name]"
+        ruby_exe(code).chomp.should == %{["IBM775", "IBM866"]}
+      end
+
+      it "has nil for the internal encoding" do
+        STDERR.internal_encoding.should be_nil
+      end
+
+      it "has nil for the internal encoding despite Encoding.default_internal being changed" do
+        Encoding.default_internal = Encoding::IBM437
+        STDERR.internal_encoding.should be_nil
+      end
+    end
+
+    describe "ARGV" do
+      it "contains Strings encoded in locale Encoding" do
+        code = fixture __FILE__, "argv_encoding.rb"
+        result = ruby_exe(code, :args => "a b")
+        encoding = Encoding.default_external
+        result.chomp.should == %{["#{encoding}", "#{encoding}"]}
+      end
+    end
+  end
+end
+
 describe "Processing RUBYOPT" do
   before (:each) do
     @rubyopt, ENV["RUBYOPT"] = ENV["RUBYOPT"], nil
@@ -622,7 +1005,9 @@ describe "Processing RUBYOPT" do
 
   it "sets $DEBUG to true for '-d'" do
     ENV["RUBYOPT"] = '-d'
-    ruby_exe("puts $DEBUG", :escape => true).chomp.should == "true"
+    command = %[puts "value of $DEBUG is \#{$DEBUG}"]
+    result = ruby_exe(command, :escape => true, :args => "2>&1")
+    result.should =~ /value of \$DEBUG is true/
   end
 
   ruby_version_is "1.9" do

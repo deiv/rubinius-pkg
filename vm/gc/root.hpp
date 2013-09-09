@@ -20,7 +20,7 @@ namespace rubinius {
    *  @todo Document methods. --rue
    */
   class Roots : public LinkedList {
-    thread::Mutex lock_;
+    utilities::thread::SpinLock lock_;
 
   public:   /* Ctors */
     Roots()
@@ -58,13 +58,13 @@ namespace rubinius {
     Root()
       : LinkedList::Node()
       , roots_(NULL)
-      , object_(Qundef)
+      , object_(cUndef)
     {}
 
     Root(Roots* roots)
       : LinkedList::Node()
       , roots_(roots)
-      , object_(Qundef)
+      , object_(cUndef)
     {}
 
     Root(Roots* roots, Object* obj)
@@ -78,17 +78,20 @@ namespace rubinius {
     Root(STATE);
     Root(STATE, Object* obj);
 
+    Root(VM*);
+    Root(VM*, Object* obj);
+
     /** Copy construction uses set() semantics. */
     Root(const Root& other)
       : LinkedList::Node()
       , roots_(NULL)
-      , object_(Qundef)
+      , object_(cUndef)
     {
       set(other.object_, other.roots_);
     }
 
     ~Root() {
-      if(roots_ && object_) roots_->remove(this);
+      if(roots_ && object_ && object_ != cUndef) roots_->remove(this);
     }
 
   public: /** Methods */
@@ -100,7 +103,7 @@ namespace rubinius {
     }
 
     /** Obtain the enveloped Object. */
-    Object* get() {
+    Object* get() const {
       return object_;
     }
 
@@ -144,21 +147,28 @@ namespace rubinius {
         : Root(state)
       {}
 
+      TypedRoot(VM* state)
+        : Root(state)
+      {}
       /** As Root::Root(STATE, Object*), but retains object's type. */
       TypedRoot(STATE, ObjType obj)
-        : Root(state, (Object*)obj)
+        : Root(state, reinterpret_cast<Object*>(obj))
+      {}
+
+      TypedRoot(VM* state, ObjType obj)
+        : Root(state, reinterpret_cast<Object*>(obj))
       {}
 
       /** Transparently delegate dereferencing to enveloped object. */
       /** @todo Use as<ObjType>() when using base type instead of pointer. --rue */
-      ObjType operator->() {
+      ObjType operator->() const {
         // assert(object_ && "Using an unassigned root!");
         return reinterpret_cast<ObjType>(object_);
       }
 
       /** Return the enveloped object as the real ObjType. */
       /** @todo Use as<ObjType>() when using base type instead of pointer. --rue */
-      ObjType get() {
+      ObjType get() const {
         // assert(object_ && "Using an unassigned root!");
         return reinterpret_cast<ObjType>(object_);
       }

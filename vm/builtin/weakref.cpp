@@ -1,14 +1,11 @@
-#include "builtin/weakref.hpp"
 #include "builtin/class.hpp"
-
-#include "object_utils.hpp"
+#include "builtin/weakref.hpp"
+#include "configuration.hpp"
 #include "gc/gc.hpp"
+#include "object_utils.hpp"
+#include "ontology.hpp"
 
 namespace rubinius {
-  void WeakRef::init(STATE) {
-    GO(cls_weakref).set(state->new_class("WeakRef", G(object)));
-     G(cls_weakref)->set_object_type(state, WeakRefType);
-  }
 
   WeakRef* WeakRef::create(STATE, Object* obj) {
     WeakRef* ref = state->new_object<WeakRef>(G(cls_weakref));

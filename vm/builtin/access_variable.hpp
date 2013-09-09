@@ -2,13 +2,12 @@
 #define RBX_BUILTIN_ACCESS_VARIABLE_HPP
 
 #include "builtin/executable.hpp"
-#include "vm.hpp"
 
 namespace rubinius {
 
   class InstructionSequence;
-  class VMMethod;
-  class StaticScope;
+  class MachineCode;
+  class ConstantScope;
 
   class AccessVariable : public Executable {
   public:

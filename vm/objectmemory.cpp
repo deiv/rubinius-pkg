@@ -6,11 +6,17 @@
 #include "config.h"
 #include "vm.hpp"
 #include "objectmemory.hpp"
+#include "capi/tag.hpp"
 #include "gc/marksweep.hpp"
 #include "gc/baker.hpp"
 #include "gc/immix.hpp"
 #include "gc/inflated_headers.hpp"
 #include "gc/walker.hpp"
+
+#if ENABLE_LLVM
+#include "llvm/state.hpp"
+#endif
+
 #include "on_stack.hpp"
 
 #include "config_parser.hpp"
@@ -27,13 +33,16 @@
 #include "builtin/dir.hpp"
 #include "builtin/array.hpp"
 #include "builtin/thread.hpp"
+#include "builtin/exception.hpp"
 
-#include "capi/handle.hpp"
+#include "capi/handles.hpp"
 #include "configuration.hpp"
 
 #include "global_cache.hpp"
 
+#include "instruments/timing.hpp"
 #include "instruments/tooling.hpp"
+#include "dtrace/dtrace.h"
 
 // Used by XMALLOC at the bottom
 static long gc_malloc_threshold = 0;
@@ -44,36 +53,41 @@ namespace rubinius {
   Object* object_watch = 0;
 
   /* ObjectMemory methods */
-  ObjectMemory::ObjectMemory(STATE, Configuration& config)
-    : young_(new BakerGC(this, config.gc_bytes))
+  ObjectMemory::ObjectMemory(VM* state, Configuration& config)
+    : young_(new BakerGC(this, config.gc_young_initial_bytes * 2))
     , mark_sweep_(new MarkSweepGC(this, config))
     , immix_(new ImmixGC(this))
-    , inflated_headers_(new InflatedHeaders(state))
-    , mark_(1)
+    , inflated_headers_(new InflatedHeaders)
+    , capi_handles_(new capi::Handles)
     , code_manager_(&state->shared)
+    , mark_(2)
     , allow_gc_(true)
+    , mature_mark_concurrent_(config.gc_immix_concurrent)
+    , mature_gc_in_progress_(false)
     , slab_size_(4096)
-    , running_finalizers_(false)
-    , added_finalizers_(false)
-    , finalizer_thread_(state, nil<Thread>())
+    , shared_(state->shared)
 
     , collect_young_now(false)
     , collect_mature_now(false)
     , root_state_(state)
+    , last_object_id(1)
+    , last_snapshot_id(0)
+    , large_object_threshold(config.gc_large_object)
+    , young_max_bytes(config.gc_young_max_bytes * 2)
+    , young_autotune_factor(config.gc_young_autotune_factor)
+    , young_autotune_size(config.gc_young_autotune_size)
   {
     // TODO Not sure where this code should be...
+#ifdef ENABLE_OBJECT_WATCH
     if(char* num = getenv("RBX_WATCH")) {
-      object_watch = (Object*)strtol(num, NULL, 10);
+      object_watch = reinterpret_cast<Object*>(strtol(num, NULL, 10));
       std::cout << "Watching for " << object_watch << "\n";
     }
+#endif
 
-    collect_mature_now = false;
-    last_object_id = 0;
+    young_->set_lifetime(config.gc_young_lifetime);
 
-    large_object_threshold = config.gc_large_object;
-    young_->set_lifetime(config.gc_lifetime);
-
-    if(config.gc_autotune) young_->set_autotune();
+    if(config.gc_young_autotune_lifetime) young_->set_autotune_lifetime();
 
     for(size_t i = 0; i < LastObjectType; i++) {
       type_info[i] = NULL;
@@ -98,78 +112,76 @@ namespace rubinius {
     delete mark_sweep_;
     delete young_;
 
-    // Must be last
-    // delete inflated_headers_;
+    for(std::list<capi::GlobalHandle*>::iterator i = global_capi_handle_locations_.begin();
+          i != global_capi_handle_locations_.end(); ++i) {
+      delete *i;
+    }
+    global_capi_handle_locations_.clear();
 
+    delete capi_handles_;
+    // Must be last
+    delete inflated_headers_;
   }
 
-  void ObjectMemory::on_fork() {
-    finalizer_lock_.init();
-    finalizer_var_.init();
-    finalizer_thread_.set(nil<Thread>());
+  void ObjectMemory::on_fork(STATE) {
+    lock_init(state->vm());
+    contention_lock_.init();
+    mature_gc_in_progress_ = false;
   }
 
   void ObjectMemory::assign_object_id(STATE, Object* obj) {
-    SYNC(state);
-
     // Double check we've got no id still after the lock.
-    if(obj->object_id() > 0) return;
+    if(obj->object_id(state) > 0) return;
 
-    obj->set_object_id(state, state->om, ++last_object_id);
-  }
-
-  Integer* ObjectMemory::assign_object_id_ivar(STATE, Object* obj) {
-    SYNC(state);
-    Object* id = obj->get_ivar(state, G(sym_object_id));
-    if(id->nil_p()) {
-      /* All references have an even object_id. last_object_id starts out at 0
-       * but we don't want to use 0 as an object_id, so we just add before using */
-      id = Integer::from(state, ++state->om->last_object_id << TAG_REF_WIDTH);
-      obj->set_ivar(state, G(sym_object_id), id);
-    }
-    return as<Integer>(id);
+    obj->set_object_id(state, atomic::fetch_and_add(&last_object_id, (size_t)1));
   }
 
   bool ObjectMemory::inflate_lock_count_overflow(STATE, ObjectHeader* obj,
                                                  int count)
   {
-    SYNC(state);
+    utilities::thread::SpinLock::LockGuard guard(inflation_lock_);
 
-    // Inflation always happens with the ObjectMemory lock held, so we don't
-    // need to worry about another thread concurrently inflating it.
-    //
-    // But we do need to check that it's not already inflated.
-    if(obj->inflated_header_p()) return false;
+    HeaderWord orig = obj->header;
 
-    InflatedHeader* ih = inflated_headers_->allocate(obj);
-    ih->initialize_mutex(state->thread_id(), count);
-
-    if(!obj->set_inflated_header(ih)) {
-      if(obj->inflated_header_p()) return false;
-
-      // Now things are really in a weird state, just abort.
-      rubinius::bug("Massive header state confusion detected. Call a doctor.");
+    if(orig.f.meaning == eAuxWordInflated) {
+      return false;
     }
 
+    uint32_t ih_header = 0;
+    InflatedHeader* ih = inflated_headers_->allocate(state, obj, &ih_header);
+    ih->update(state, orig);
+    ih->initialize_mutex(state->vm()->thread_id(), count);
+    ih->mark(this, mark_);
+
+    while(!obj->set_inflated_header(state, ih_header, orig)) {
+      orig = obj->header;
+
+      if(orig.f.meaning == eAuxWordInflated) {
+        return false;
+      }
+      ih->update(state, orig);
+      ih->initialize_mutex(state->vm()->thread_id(), count);
+    }
     return true;
   }
 
-  LockStatus ObjectMemory::contend_for_lock(STATE, ObjectHeader* obj,
-                                            bool* error, size_t us)
+  LockStatus ObjectMemory::contend_for_lock(STATE, GCToken gct, CallFrame* call_frame,
+                                            ObjectHeader* obj, size_t us, bool interrupt)
   {
     bool timed = false;
     bool timeout = false;
     struct timespec ts = {0,0};
 
+    OnStack<1> os(state, obj);
+
     {
-      thread::Mutex::LockGuard lg(contention_lock_);
+      GCLockGuard lg(state, gct, call_frame, contention_lock_);
 
       // We want to lock obj, but someone else has it locked.
       //
       // If the lock is already inflated, no problem, just lock it!
 
       // Be sure obj is updated by the GC while we're waiting for it
-      OnStack<1> os(state, obj);
 
 step1:
       // Only contend if the header is thin locked.
@@ -178,20 +190,24 @@ step1:
       // that the object is being contended for and then wait on the
       // contention condvar until the object is unlocked.
 
-      HeaderWord orig = obj->header;
-      HeaderWord new_val = orig;
-
-      orig.f.meaning = eAuxWordLock;
-
+      HeaderWord orig         = obj->header;
+      HeaderWord new_val      = orig;
+      orig.f.meaning          = eAuxWordLock;
       new_val.f.LockContended = 1;
 
       if(!obj->header.atomic_set(orig, new_val)) {
+        if(obj->inflated_header_p()) {
+          if(cDebugThreading) {
+            std::cerr << "[LOCK " << state->vm()->thread_id()
+              << " contend_for_lock error: object has been inflated.]" << std::endl;
+          }
+          return eLockError;
+        }
         if(new_val.f.meaning != eAuxWordLock) {
           if(cDebugThreading) {
-            std::cerr << "[LOCK " << state->thread_id()
+            std::cerr << "[LOCK " << state->vm()->thread_id()
               << " contend_for_lock error: not thin locked.]" << std::endl;
           }
-          *error = true;
           return eLockError;
         }
 
@@ -204,7 +220,7 @@ step1:
       // for the us to be told to retry.
 
       if(cDebugThreading) {
-        std::cerr << "[LOCK " << state->thread_id() << " waiting on contention]" << std::endl;
+        std::cerr << "[LOCK " << state->vm()->thread_id() << " waiting on contention]" << std::endl;
       }
 
       if(us > 0) {
@@ -216,46 +232,45 @@ step1:
         ts.tv_nsec = (us % 1000000) * 1000;
       }
 
-      state->set_sleeping();
-
       while(!obj->inflated_header_p()) {
-        GCIndependent gc_guard(state);
+        GCIndependent gc_guard(state, call_frame);
 
+        state->vm()->set_sleeping();
         if(timed) {
-          timeout = (contention_var_.wait_until(contention_lock_, &ts) == thread::cTimedOut);
+          timeout = (contention_var_.wait_until(contention_lock_, &ts) == utilities::thread::cTimedOut);
           if(timeout) break;
         } else {
           contention_var_.wait(contention_lock_);
         }
 
         if(cDebugThreading) {
-          std::cerr << "[LOCK " << state->thread_id() << " notified of contention breakage]" << std::endl;
+          std::cerr << "[LOCK " << state->vm()->thread_id() << " notified of contention breakage]" << std::endl;
         }
 
         // Someone is interrupting us trying to lock.
-        if(state->check_local_interrupts) {
-          state->check_local_interrupts = false;
+        if(interrupt && state->check_local_interrupts()) {
+          state->vm()->clear_check_local_interrupts();
 
-          if(!state->interrupted_exception()->nil_p()) {
+          if(!state->vm()->interrupted_exception()->nil_p()) {
             if(cDebugThreading) {
-              std::cerr << "[LOCK " << state->thread_id() << " detected interrupt]" << std::endl;
+              std::cerr << "[LOCK " << state->vm()->thread_id() << " detected interrupt]" << std::endl;
             }
 
-            state->clear_sleeping();
+            state->vm()->clear_sleeping();
             return eLockInterrupted;
           }
         }
       }
 
-      state->clear_sleeping();
+      state->vm()->clear_sleeping();
 
       if(cDebugThreading) {
-        std::cerr << "[LOCK " << state->thread_id() << " contention broken]" << std::endl;
+        std::cerr << "[LOCK " << state->vm()->thread_id() << " contention broken]" << std::endl;
       }
 
       if(timeout) {
         if(cDebugThreading) {
-          std::cerr << "[LOCK " << state->thread_id() << " contention timed out]" << std::endl;
+          std::cerr << "[LOCK " << state->vm()->thread_id() << " contention timed out]" << std::endl;
         }
 
         return eLockTimeout;
@@ -270,59 +285,66 @@ step1:
     // not access this if there is chance that a call blocked and GC'd
     // (which is true in the case of this function).
 
-    InflatedHeader* ih = obj->inflated_header();
+    InflatedHeader* ih = obj->inflated_header(state);
 
     if(timed) {
-      return ih->lock_mutex_timed(state, &ts);
+      return ih->lock_mutex_timed(state, gct, call_frame, obj, &ts, interrupt);
     } else {
-      return ih->lock_mutex(state);
+      return ih->lock_mutex(state, gct, call_frame, obj, 0, interrupt);
     }
   }
 
-  void ObjectMemory::release_contention(STATE) {
-    thread::Mutex::LockGuard lg(contention_lock_);
+  void ObjectMemory::release_contention(STATE, GCToken gct, CallFrame* call_frame) {
+    GCLockGuard lg(state, gct, call_frame, contention_lock_);
     contention_var_.broadcast();
   }
 
   bool ObjectMemory::inflate_and_lock(STATE, ObjectHeader* obj) {
-    SYNC(state);
+    utilities::thread::SpinLock::LockGuard guard(inflation_lock_);
 
     InflatedHeader* ih = 0;
+    uint32_t ih_index = 0;
     int initial_count = 0;
 
     HeaderWord orig = obj->header;
-    HeaderWord tmp = orig;
 
-    switch(tmp.f.meaning) {
+    switch(orig.f.meaning) {
     case eAuxWordEmpty:
       // ERROR, we can not be here because it's empty. This is only to
       // be called when the header is already in use.
       return false;
-    case eAuxWordInflated:
-      // Already inflated. ERROR, let the caller sort it out.
-      return false;
     case eAuxWordObjID:
       // We could be have made a header before trying again, so
       // keep using the original one.
-      ih = inflated_headers_->allocate(obj);
-      ih->set_object_id(tmp.f.aux_word);
+      ih = inflated_headers_->allocate(state, obj, &ih_index);
+      ih->set_object_id(orig.f.aux_word);
       break;
     case eAuxWordLock:
       // We have to locking the object to inflate it, thats the law.
-      if(tmp.f.aux_word >> cAuxLockTIDShift != state->thread_id()) {
+      if(orig.f.aux_word >> cAuxLockTIDShift != state->vm()->thread_id()) {
         return false;
       }
 
-      ih = inflated_headers_->allocate(obj);
+      ih = inflated_headers_->allocate(state, obj, &ih_index);
       initial_count = orig.f.aux_word & cAuxLockRecCountMask;
+      break;
+    case eAuxWordHandle:
+      // Handle in use so inflate and update handle
+      ih = inflated_headers_->allocate(state, obj, &ih_index);
+      ih->set_handle(state, obj->handle(state));
+      break;
+    case eAuxWordInflated:
+      // Already inflated. ERROR, let the caller sort it out.
+      if(cDebugThreading) {
+        std::cerr << "[LOCK " << state->vm()->thread_id() << " asked to inflated already inflated lock]" << std::endl;
+      }
+      return false;
     }
 
-    ih->initialize_mutex(state->thread_id(), initial_count + 1);
+    ih->initialize_mutex(state->vm()->thread_id(), initial_count);
+    ih->mark(this, mark_);
 
-    tmp.all_flags = ih;
-    tmp.f.meaning = eAuxWordInflated;
-
-    while(!obj->header.atomic_set(orig, tmp)) {
+    while(!obj->set_inflated_header(state, ih_index, orig)) {
       // The header can't have been inflated by another thread, the
       // inflation process holds the OM lock.
       //
@@ -331,73 +353,77 @@ step1:
 
       // Sanity check that the meaning is still the same, if not, then
       // something is really wrong.
-      orig = obj->header;
-      if(orig.f.meaning != tmp.f.meaning) {
+      if(orig.f.meaning != obj->header.f.meaning) {
         if(cDebugThreading) {
           std::cerr << "[LOCK object header consistence error detected.]" << std::endl;
         }
         return false;
       }
-
-      tmp.all_flags = ih;
-      tmp.f.meaning = eAuxWordInflated;
+      orig = obj->header;
+      if(orig.f.meaning == eAuxWordInflated) {
+        return false;
+      }
     }
 
     return true;
   }
 
   bool ObjectMemory::inflate_for_contention(STATE, ObjectHeader* obj) {
-    SYNC(state);
+    utilities::thread::SpinLock::LockGuard guard(inflation_lock_);
 
     for(;;) {
       HeaderWord orig = obj->header;
-      HeaderWord new_val = orig;
 
       InflatedHeader* ih = 0;
+      uint32_t ih_header = 0;
 
       switch(orig.f.meaning) {
       case eAuxWordEmpty:
-        ih = inflated_headers_->allocate(obj);
+        ih = inflated_headers_->allocate(state, obj, &ih_header);
         break;
       case eAuxWordObjID:
         // We could be have made a header before trying again, so
         // keep using the original one.
-        ih = inflated_headers_->allocate(obj);
+        ih = inflated_headers_->allocate(state, obj, &ih_header);
         ih->set_object_id(orig.f.aux_word);
+        break;
+      case eAuxWordHandle:
+        ih = inflated_headers_->allocate(state, obj, &ih_header);
+        ih->set_handle(state, obj->handle(state));
         break;
       case eAuxWordLock:
         // We have to be locking the object to inflate it, thats the law.
-        if(new_val.f.aux_word >> cAuxLockTIDShift != state->thread_id()) {
+        if(orig.f.aux_word >> cAuxLockTIDShift != state->vm()->thread_id()) {
           if(cDebugThreading) {
-            std::cerr << "[LOCK " << state->thread_id() << " object locked by another thread while inflating for contention]" << std::endl;
+            std::cerr << "[LOCK " << state->vm()->thread_id() << " object locked by another thread while inflating for contention]" << std::endl;
           }
           return false;
         }
         if(cDebugThreading) {
-          std::cerr << "[LOCK " << state->thread_id() << " being unlocked and inflated atomicly]" << std::endl;
+          std::cerr << "[LOCK " << state->vm()->thread_id() << " being unlocked and inflated atomicly]" << std::endl;
         }
 
-        ih = inflated_headers_->allocate(obj);
-        ih->flags().meaning = eAuxWordEmpty;
-        ih->flags().aux_word = 0;
+        ih = inflated_headers_->allocate(state, obj, &ih_header);
         break;
       case eAuxWordInflated:
         if(cDebugThreading) {
-          std::cerr << "[LOCK " << state->thread_id() << " asked to inflated already inflated lock]" << std::endl;
+          std::cerr << "[LOCK " << state->vm()->thread_id() << " asked to inflated already inflated lock]" << std::endl;
         }
         return false;
       }
 
-      ih->flags().LockContended = 0;
-
-      new_val.all_flags = ih;
-      new_val.f.meaning = eAuxWordInflated;
+      ih->mark(this, mark_);
 
       // Try it all over again if it fails.
-      if(!obj->header.atomic_set(orig, new_val)) continue;
+      if(!obj->set_inflated_header(state, ih_header, orig)) {
+        ih->clear();
+        continue;
+      }
+
+      obj->clear_lock_contended();
 
       if(cDebugThreading) {
-        std::cerr << "[LOCK " << state->thread_id() << " inflated lock for contention.]" << std::endl;
+        std::cerr << "[LOCK " << state->vm()->thread_id() << " inflated lock for contention.]" << std::endl;
       }
 
       // Now inflated but not locked, which is what we want.
@@ -405,25 +431,8 @@ step1:
     }
   }
 
-  // WARNING: This returns an object who's body may not have been initialized.
-  // It is the callers duty to initialize it.
-  Object* ObjectMemory::new_object_fast(STATE, Class* cls, size_t bytes, object_type type) {
-    SYNC(state);
-
-    if(Object* obj = young_->raw_allocate(bytes, &collect_young_now)) {
-      gc_stats.young_object_allocated(bytes);
-
-      if(collect_young_now) root_state_->interrupts.set_perform_gc();
-      obj->init_header(cls, YoungObjectZone, type);
-      return obj;
-    } else {
-      UNSYNC;
-      return new_object_typed(state, cls, bytes, type);
-    }
-  }
-
   bool ObjectMemory::refill_slab(STATE, gc::Slab& slab) {
-    SYNC(state);
+    utilities::thread::SpinLock::LockGuard guard(allocation_lock_);
 
     Address addr = young_->allocate_for_slab(slab_size_);
 
@@ -458,7 +467,7 @@ step1:
     if(obj->young_object_p()) {
       return young_->validate_object(obj) == cValid;
     } else if(obj->mature_object_p()) {
-      return true;
+      return immix_->validate_object(obj) == cInImmix;
     } else {
       return false;
     }
@@ -483,186 +492,95 @@ step1:
     }
 #endif
 
+    copy->clear_mark();
     return copy;
   }
 
-  void ObjectMemory::collect(STATE, CallFrame* call_frame) {
+  void ObjectMemory::collect_maybe(STATE, GCToken gct, CallFrame* call_frame) {
     // Don't go any further unless we're allowed to GC.
     if(!can_gc()) return;
 
+    while(!state->stop_the_world()) {
+      state->checkpoint(gct, call_frame);
+
+      // Someone else got to the GC before we did! No problem, all done!
+      if(!collect_young_now && !collect_mature_now) return;
+    }
+
+    // Ok, everyone in stopped! LET'S GC!
     SYNC(state);
 
-    // If we were checkpointed, then someone else ran the GC, just return.
-    if(state->shared.should_stop()) {
-      UNSYNC;
-      state->shared.checkpoint(state);
-      return;
-    }
+    state->shared().finalizer_handler()->start_collection(state);
 
     if(cDebugThreading) {
-      std::cerr << std::endl << "[ " << state << " WORLD beginning GC.]" << std::endl;
+      std::cerr << std::endl << "[" << state
+                << " WORLD beginning GC.]" << std::endl;
     }
 
-    // Stops all other threads, so we're only here by ourselves.
-    //
-    // First, ask them to stop.
-    state->shared.ask_for_stopage();
-
-    // Now unlock ObjectMemory so that they can spin to any checkpoints.
-    UNSYNC;
-
-    // Wait for them all to check in.
-    state->shared.stop_the_world(state);
-
-    // Now we're alone, but we lock again just to safe.
-    RESYNC;
-
-    GCData gc_data(state);
-
-    collect_young(gc_data);
-    collect_mature(gc_data);
-
-    // Ok, we're good. Get everyone going again.
-    state->shared.restart_world(state);
-    bool added = added_finalizers_;
-    added_finalizers_ = false;
-
-    UNSYNC;
-
-    if(added) {
-      if(finalizer_thread_.get() == Qnil) {
-        start_finalizer_thread(state);
-      }
-      finalizer_var_.signal();
-    }
-  }
-
-  void ObjectMemory::collect_maybe(STATE, CallFrame* call_frame) {
-    // Don't go any further unless we're allowed to GC.
-    if(!can_gc()) return;
-
-    SYNC(state);
-
-    // If we were checkpointed, then someone else ran the GC, just return.
-    if(state->shared.should_stop()) {
-      UNSYNC;
-      state->shared.checkpoint(state);
-      return;
-    }
-
-    if(cDebugThreading) {
-      std::cerr << std::endl << "[" << state << " WORLD beginning GC.]" << std::endl;
-    }
-
-    // Stops all other threads, so we're only here by ourselves.
-    //
-    // First, ask them to stop.
-    state->shared.ask_for_stopage();
-
-    // Now unlock ObjectMemory so that they can spin to any checkpoints.
-    UNSYNC;
-
-    // Wait for them all to check in.
-    state->shared.stop_the_world(state);
-
-    // Now we're alone, but we lock again just to safe.
-    RESYNC;
-
-    GCData gc_data(state);
-
-    uint64_t start_time = 0;
 
     if(collect_young_now) {
-      if(state->shared.config.gc_show) {
-        start_time = get_current_time();
-      }
-
+      GCData gc_data(state->vm(), gct);
       YoungCollectStats stats;
 
+      RUBINIUS_GC_BEGIN(0);
 #ifdef RBX_PROFILER
-      if(unlikely(state->tooling())) {
+      if(unlikely(state->vm()->tooling())) {
         tooling::GCEntry method(state, tooling::GCYoung);
-        collect_young(gc_data, &stats);
+        collect_young(state, &gc_data, &stats);
       } else {
-        collect_young(gc_data, &stats);
+        collect_young(state, &gc_data, &stats);
       }
 #else
-      collect_young(gc_data, &stats);
+      collect_young(state, &gc_data, &stats);
 #endif
-
-      if(state->shared.config.gc_show) {
-        uint64_t fin_time = get_current_time();
-        int diff = (fin_time - start_time) / 1000000;
-
-        std::cerr << "[GC " << std::fixed << std::setprecision(1) << stats.percentage_used << "% "
-                  << stats.promoted_objects << "/" << stats.excess_objects << " "
-                  << stats.lifetime << " " << diff << "ms]" << std::endl;
-      }
+      RUBINIUS_GC_END(0);
+      print_young_stats(state, &gc_data, &stats);
     }
 
     if(collect_mature_now) {
-      size_t before_kb = 0;
-
-      if(state->shared.config.gc_show) {
-        start_time = get_current_time();
-        before_kb = mature_bytes_allocated() / 1024;
-      }
-
+      GCData* gc_data = new GCData(state->vm(), gct);
+      RUBINIUS_GC_BEGIN(1);
 #ifdef RBX_PROFILER
-      if(unlikely(state->tooling())) {
+      if(unlikely(state->vm()->tooling())) {
         tooling::GCEntry method(state, tooling::GCMature);
-        collect_mature(gc_data);
+        collect_mature(state, gc_data);
       } else {
-        collect_mature(gc_data);
+        collect_mature(state, gc_data);
       }
 #else
-      collect_mature(gc_data);
+      collect_mature(state, gc_data);
 #endif
-
-      if(state->shared.config.gc_show) {
-        uint64_t fin_time = get_current_time();
-        int diff = (fin_time - start_time) / 1000000;
-        size_t kb = mature_bytes_allocated() / 1024;
-        std::cerr << "[Full GC " << before_kb << "kB => " << kb << "kB " << diff << "ms]" << std::endl;
+      if(!mature_mark_concurrent_) {
+        print_mature_stats(state, gc_data);
       }
     }
 
-    state->shared.restart_world(state);
-    bool added = added_finalizers_;
-    added_finalizers_ = false;
+    state->restart_world();
 
     UNSYNC;
-
-    if(added) {
-      if(finalizer_thread_.get() == Qnil) {
-        start_finalizer_thread(state);
-      }
-      finalizer_var_.signal();
-    }
   }
 
-  void ObjectMemory::collect_young(GCData& data, YoungCollectStats* stats) {
+  void ObjectMemory::collect_young(STATE, GCData* data, YoungCollectStats* stats) {
+#ifndef RBX_GC_STRESS_YOUNG
     collect_young_now = false;
+#endif
 
     timer::Running<1000000> timer(gc_stats.total_young_collection_time,
                                   gc_stats.last_young_collection_time);
 
-    // validate_handles(data.handles());
-    // validate_handles(data.cached_handles());
-
+    young_gc_while_marking_++;
     young_->reset_stats();
 
     young_->collect(data, stats);
 
-    prune_handles(data.handles(), true);
-    prune_handles(data.cached_handles(), true);
+    prune_handles(data->handles(), data->cached_handles(), young_);
     gc_stats.young_collection_count++;
 
-    data.global_cache()->prune_young();
+    data->global_cache()->prune_young();
 
-    if(data.threads()) {
-      for(std::list<ManagedThread*>::iterator i = data.threads()->begin();
-          i != data.threads()->end();
+    if(data->threads()) {
+      for(std::list<ManagedThread*>::iterator i = data->threads()->begin();
+          i != data->threads()->end();
           ++i) {
         gc::Slab& slab = (*i)->local_slab();
 
@@ -676,33 +594,48 @@ step1:
       }
     }
 
+    young_->reset();
+#ifdef RBX_GC_DEBUG
+    young_->verify(data);
+#endif
+    if(FinalizerHandler* hdl = state->shared().finalizer_handler()) {
+      hdl->finish_collection(state);
+    }
   }
 
-  void ObjectMemory::collect_mature(GCData& data) {
-
-    // validate_handles(data.handles());
-    // validate_handles(data.cached_handles());
-
-    timer::Running<1000000> timer(gc_stats.total_full_collection_time,
-                                  gc_stats.last_full_collection_time);
-
+  void ObjectMemory::collect_mature(STATE, GCData* data) {
+    timer::Running<1000000> timer(gc_stats.total_full_stop_collection_time,
+                                  gc_stats.last_full_stop_collection_time);
+#ifndef RBX_GC_STRESS_MATURE
     collect_mature_now = false;
+#endif
+
+    // If we're already collecting, ignore this request
+    if(mature_gc_in_progress_) return;
+    young_gc_while_marking_ = 0;
 
     code_manager_.clear_marks();
+    clear_fiber_marks(data->threads());
 
     immix_->reset_stats();
 
-    immix_->collect(data);
+    if(mature_mark_concurrent_) {
+      immix_->start_marker(state);
+      immix_->collect_start(data);
+      mature_gc_in_progress_ = true;
+    } else {
+      immix_->collect(data);
+    }
+  }
 
-    immix_->clean_weakrefs();
+  void ObjectMemory::collect_mature_finish(STATE, GCData* data) {
 
+    immix_->collect_finish(data);
     code_manager_.sweep();
 
-    data.global_cache()->prune_unmarked(mark());
+    data->global_cache()->prune_unmarked(mark());
 
-    prune_handles(data.handles(), false);
-    prune_handles(data.cached_handles(), false);
-
+    prune_handles(data->handles(), data->cached_handles(), NULL);
 
     // Have to do this after all things that check for mark bits is
     // done, as it free()s objects, invalidating mark bits.
@@ -710,148 +643,192 @@ step1:
 
     inflated_headers_->deallocate_headers(mark());
 
-    // We no longer need to unmark all, we use the rotating mark instead.
-    // This means that the mark we just set on all reachable objects will
-    // be ignored next time anyway.
-    //
-    // immix_->unmark_all(data);
+#ifdef RBX_GC_DEBUG
+    immix_->verify(data);
+#endif
+    immix_->sweep();
 
     rotate_mark();
+
     gc_stats.full_collection_count++;
-
-  }
-
-  InflatedHeader* ObjectMemory::inflate_header(STATE, ObjectHeader* obj) {
-    if(obj->inflated_header_p()) return obj->inflated_header();
-
-    SYNC(state);
-
-    // Gotta check again because while waiting for the lock,
-    // the object could have been inflated!
-    if(obj->inflated_header_p()) return obj->inflated_header();
-
-    InflatedHeader* header = inflated_headers_->allocate(obj);
-
-    if(!obj->set_inflated_header(header)) {
-      if(obj->inflated_header_p()) return obj->inflated_header();
-
-      // Now things are really in a weird state, just abort.
-      rubinius::bug("Massive header state confusion detected. Call a doctor.");
+    if(FinalizerHandler* hdl = state->shared().finalizer_handler()) {
+      hdl->finish_collection(state);
     }
 
-    return header;
+    RUBINIUS_GC_END(1);
+    young_autotune();
+    young_gc_while_marking_ = 0;
+  }
+
+  void ObjectMemory::young_autotune() {
+    if(young_autotune_size) {
+      // We autotune the size if we do multiple young
+      // collections during a mature mark phase. This indicates
+      // that memory pressure is higher and we might want to grow
+      // if we haven't met the young size factor yet.
+      //
+      // If we don't see any young GC's we check if we should shrink it
+      if(young_gc_while_marking_ > 1) {
+        if(young_->bytes_size() < young_max_bytes &&
+           young_->bytes_size() < mature_bytes_allocated() / young_autotune_factor) {
+          young_->grow(young_->bytes_size() * 2);
+        }
+      } else if(young_gc_while_marking_ == 0) {
+        if(young_->bytes_size() > mature_bytes_allocated() / young_autotune_factor) {
+          young_->grow(young_->bytes_size() / 2);
+        }
+      }
+    }
+  }
+
+  void ObjectMemory::wait_for_mature_marker(STATE) {
+    immix_->wait_for_marker(state);
+  }
+
+  immix::MarkStack& ObjectMemory::mature_mark_stack() {
+    return immix_->mark_stack();
+  }
+
+
+  void ObjectMemory::print_young_stats(STATE, GCData* data, YoungCollectStats* stats) {
+    if(state->shared().config.gc_show) {
+      size_t before_kb = data->young_bytes_allocated() / 1024;
+      size_t kb = state->memory()->young_bytes_allocated() / 1024;
+      uint64_t diff = gc_stats.last_young_collection_time.value;
+
+      std::cerr << "[Young GC ";
+      if(before_kb != kb) {
+        std::cerr << before_kb << "kB => ";
+      }
+      std::cerr << kb << "kB " << std::fixed << std::setprecision(1) << stats->percentage_used << "% "
+                << stats->promoted_objects << "/" << stats->excess_objects << " "
+                << stats->lifetime << " " << diff << "ms]" << std::endl;
+
+      if(state->shared().config.gc_noisy) {
+        std::cerr << "\a" << std::flush;
+      }
+    }
+  }
+
+  void ObjectMemory::print_mature_stats(STATE, GCData* data) {
+    if(state->shared().config.gc_show) {
+      uint64_t stop = gc_stats.last_full_stop_collection_time.value;
+      uint64_t concur = gc_stats.last_full_concurrent_collection_time.value;
+      size_t before_mature_kb = data->mature_bytes_allocated() / 1024;
+      size_t mature_kb = mature_bytes_allocated() / 1024;
+      size_t before_code_kb = data->code_bytes_allocated() / 1024;
+      size_t code_kb = code_bytes_allocated() / 1024;
+      std::cerr << "[Full GC mature: " << before_mature_kb << "kB => " << mature_kb << "kB, ";
+      std::cerr << "code: " << before_code_kb << "kB => " << code_kb << "kB, ";
+      std::cerr << "symbols: " << data->symbol_bytes_allocated() / 1024 << "kB, ";
+      std::cerr << "jit: " << data->jit_bytes_allocated() / 1024 << "kB, ";
+      std::cerr << "time: " << stop << "ms (" << concur << "ms), ";
+      std::cerr << capi_handles_->size() << " C-API handles, " << inflated_headers_->size() << " inflated headers]" << std::endl;
+
+      if(state->shared().config.gc_noisy) {
+        std::cerr << "\a\a" << std::flush;
+      }
+    }
   }
 
   void ObjectMemory::inflate_for_id(STATE, ObjectHeader* obj, uint32_t id) {
-    SYNC(state);
+    utilities::thread::SpinLock::LockGuard guard(inflation_lock_);
 
     HeaderWord orig = obj->header;
 
     if(orig.f.meaning == eAuxWordInflated) {
-      rubinius::bug("Massive header state confusion detected. Call a doctor.");
+      obj->inflated_header(state)->set_object_id(id);
+      return;
     }
 
-    InflatedHeader* header = inflated_headers_->allocate(obj);
-    header->set_object_id(id);
+    uint32_t ih_index = 0;
+    InflatedHeader* ih = inflated_headers_->allocate(state, obj, &ih_index);
+    ih->update(state, orig);
+    ih->set_object_id(id);
+    ih->mark(this, mark_);
 
-    if(!obj->set_inflated_header(header)) {
-      if(obj->inflated_header_p()) {
-        obj->inflated_header()->set_object_id(id);
+    while(!obj->set_inflated_header(state, ih_index, orig)) {
+      orig = obj->header;
+
+      if(orig.f.meaning == eAuxWordInflated) {
+        obj->inflated_header(state)->set_object_id(id);
+        ih->clear();
         return;
       }
-
-      // Now things are really in a weird state, just abort.
-      rubinius::bug("Massive header state confusion detected. Call a doctor.");
+      ih->update(state, orig);
+      ih->set_object_id(id);
     }
 
   }
 
-  void ObjectMemory::validate_handles(capi::Handles* handles) {
-#ifndef NDEBUG
-    capi::Handle* handle = handles->front();
-    capi::Handle* current;
+  void ObjectMemory::inflate_for_handle(STATE, ObjectHeader* obj, capi::Handle* handle) {
+    utilities::thread::SpinLock::LockGuard guard(inflation_lock_);
 
-    while(handle) {
-      current = handle;
-      handle = static_cast<capi::Handle*>(handle->next());
+    HeaderWord orig = obj->header;
 
-      if(!handle->in_use_p()) continue;
-
-      Object* obj = current->object();
-
-      assert(obj->inflated_header_p());
-      InflatedHeader* ih = obj->inflated_header();
-
-      assert(ih->handle() == current);
-      assert(ih->object() == obj);
+    if(orig.f.meaning == eAuxWordInflated) {
+      obj->inflated_header(state)->set_handle(state, handle);
+      return;
     }
-#endif
-  }
 
-  void ObjectMemory::prune_handles(capi::Handles* handles, bool check_forwards) {
-    capi::Handle* handle = handles->front();
-    capi::Handle* current;
+    uint32_t ih_index = 0;
+    InflatedHeader* ih = inflated_headers_->allocate(state, obj, &ih_index);
+    ih->update(state, orig);
+    ih->set_handle(state, handle);
+    ih->mark(this, mark_);
 
-    int total = 0;
-    int count = 0;
+    while(!obj->set_inflated_header(state, ih_index, orig)) {
+      orig = obj->header;
 
-    while(handle) {
-      current = handle;
-      handle = static_cast<capi::Handle*>(handle->next());
-
-      Object* obj = current->object();
-      total++;
-
-      if(!current->in_use_p()) {
-        count++;
-        handles->remove(current);
-        delete current;
-        continue;
+      if(orig.f.meaning == eAuxWordInflated) {
+        obj->inflated_header(state)->set_handle(state, handle);
+        ih->clear();
+        return;
       }
+      ih->update(state, orig);
+      ih->set_handle(state, handle);
+    }
 
-      // Strong references will already have been updated.
-      if(!current->weak_p()) {
-        if(check_forwards) assert(!obj->forwarded_p());
-        assert(obj->inflated_header()->object() == obj);
-      } else if(check_forwards) {
-        if(obj->young_object_p()) {
+  }
 
-          // A weakref pointing to a valid young object
-          //
-          // TODO this only works because we run prune_handles right after
-          // a collection. In this state, valid objects are only in current.
-          if(young_->in_current_p(obj)) {
-            continue;
+  void ObjectMemory::prune_handles(capi::Handles* handles, std::list<capi::Handle*>* cached, BakerGC* young) {
+    handles->deallocate_handles(cached, mark(), young);
+  }
 
-          // A weakref pointing to a forwarded young object
-          } else if(obj->forwarded_p()) {
-            current->set_object(obj->forward());
-            assert(current->object()->inflated_header_p());
-            assert(current->object()->inflated_header()->object() == current->object());
-
-          // A weakref pointing to a dead young object
-          } else {
-            count++;
-            handles->remove(current);
-            delete current;
-          }
+  void ObjectMemory::clear_fiber_marks(std::list<ManagedThread*>* threads) {
+    if(threads) {
+      for(std::list<ManagedThread*>::iterator i = threads->begin();
+          i != threads->end();
+          ++i) {
+        if(VM* vm = (*i)->as_vm()) {
+          vm->gc_fiber_clear_mark();
         }
-
-      // A weakref pointing to a dead mature object
-      } else if(!obj->marked_p(mark())) {
-        count++;
-        handles->remove(current);
-        delete current;
-      } else {
-        assert(obj->inflated_header()->object() == obj);
       }
     }
-
-    // std::cout << "Pruned " << count << " handles, " << total << "/" << handles->size() << " total.\n";
   }
 
-  size_t ObjectMemory::mature_bytes_allocated() {
+  size_t ObjectMemory::young_bytes_allocated() const {
+    return young_->bytes_size();
+  }
+
+  size_t ObjectMemory::mature_bytes_allocated() const {
     return immix_->bytes_allocated() + mark_sweep_->allocated_bytes;
+  }
+
+  size_t ObjectMemory::code_bytes_allocated() const {
+    return code_manager_.size();
+  }
+
+  size_t ObjectMemory::symbol_bytes_allocated() const {
+    return shared_.symbols.bytes_used();
+  }
+
+  size_t ObjectMemory::jit_bytes_allocated() const {
+#if ENABLE_LLVM
+    return shared_.llvm_state->code_bytes();
+#else
+    return 0;
+#endif
   }
 
   void ObjectMemory::add_type_info(TypeInfo* ti) {
@@ -873,15 +850,13 @@ step1:
 
       gc_stats.mature_object_allocated(bytes);
 
-      if(collect_mature_now) {
-        root_state_->interrupts.set_perform_gc();
-      }
+      if(collect_mature_now) shared_.gc_soon();
 
     } else {
       obj = young_->allocate(bytes, &collect_young_now);
       if(unlikely(obj == NULL)) {
         collect_young_now = true;
-        root_state_->interrupts.set_perform_gc();
+        shared_.gc_soon();
 
         obj = immix_->allocate(bytes);
 
@@ -891,9 +866,7 @@ step1:
 
         gc_stats.mature_object_allocated(bytes);
 
-        if(collect_mature_now) {
-          root_state_->interrupts.set_perform_gc();
-        }
+        if(collect_mature_now) shared_.gc_soon();
       } else {
         gc_stats.young_object_allocated(bytes);
       }
@@ -905,7 +878,6 @@ step1:
     }
 #endif
 
-    obj->clear_fields(bytes);
     return obj;
   }
 
@@ -926,9 +898,7 @@ step1:
       gc_stats.mature_object_allocated(bytes);
     }
 
-    if(collect_mature_now) {
-      root_state_->interrupts.set_perform_gc();
-    }
+    if(collect_mature_now) shared_.gc_soon();
 
 #ifdef ENABLE_OBJECT_WATCH
     if(watched_p(obj)) {
@@ -936,37 +906,52 @@ step1:
     }
 #endif
 
-    obj->clear_fields(bytes);
     return obj;
   }
 
-  Object* ObjectMemory::new_object_typed(STATE, Class* cls, size_t bytes, object_type type) {
-    SYNC(state);
+  Object* ObjectMemory::new_object_typed_dirty(STATE, Class* cls, size_t bytes, object_type type) {
+    utilities::thread::SpinLock::LockGuard guard(allocation_lock_);
 
     Object* obj;
 
     obj = allocate_object(bytes);
     if(unlikely(!obj)) return NULL;
 
-    obj->klass(this, cls);
-
     obj->set_obj_type(type);
+    obj->klass(this, cls);
+    obj->ivars(this, cNil);
 
     return obj;
   }
 
-  Object* ObjectMemory::new_object_typed_mature(STATE, Class* cls, size_t bytes, object_type type) {
-    SYNC(state);
+  Object* ObjectMemory::new_object_typed(STATE, Class* cls, size_t bytes, object_type type) {
+    Object* obj = new_object_typed_dirty(state, cls, bytes, type);
+    if(unlikely(!obj)) return NULL;
+
+    obj->clear_fields(bytes);
+    return obj;
+  }
+
+  Object* ObjectMemory::new_object_typed_mature_dirty(STATE, Class* cls, size_t bytes, object_type type) {
+    utilities::thread::SpinLock::LockGuard guard(allocation_lock_);
 
     Object* obj;
 
     obj = allocate_object_mature(bytes);
     if(unlikely(!obj)) return NULL;
 
-    obj->klass(this, cls);
-
     obj->set_obj_type(type);
+    obj->klass(this, cls);
+    obj->ivars(this, cNil);
 
+    return obj;
+  }
+
+  Object* ObjectMemory::new_object_typed_mature(STATE, Class* cls, size_t bytes, object_type type) {
+    Object* obj = new_object_typed_mature_dirty(state, cls, bytes, type);
+    if(unlikely(!obj)) return NULL;
+
+    obj->clear_fields(bytes);
     return obj;
   }
 
@@ -974,20 +959,22 @@ step1:
   Object* ObjectMemory::allocate_object_raw(size_t bytes) {
 
     Object* obj = mark_sweep_->allocate(bytes, &collect_mature_now);
+    if(unlikely(!obj)) return NULL;
+
     gc_stats.mature_object_allocated(bytes);
     obj->clear_fields(bytes);
     return obj;
   }
 
-  Object* ObjectMemory::new_object_typed_enduring(STATE, Class* cls, size_t bytes, object_type type) {
-    SYNC(state);
+  Object* ObjectMemory::new_object_typed_enduring_dirty(STATE, Class* cls, size_t bytes, object_type type) {
+    utilities::thread::SpinLock::LockGuard guard(allocation_lock_);
 
     Object* obj = mark_sweep_->allocate(bytes, &collect_mature_now);
+    if(unlikely(!obj)) return NULL;
+
     gc_stats.mature_object_allocated(bytes);
 
-    if(collect_mature_now) {
-      root_state_->interrupts.set_perform_gc();
-    }
+    if(collect_mature_now) shared_.gc_soon();
 
 #ifdef ENABLE_OBJECT_WATCH
     if(watched_p(obj)) {
@@ -995,12 +982,18 @@ step1:
     }
 #endif
 
-    obj->clear_fields(bytes);
-
-    obj->klass(this, cls);
-
     obj->set_obj_type(type);
+    obj->klass(this, cls);
+    obj->ivars(this, cNil);
 
+    return obj;
+  }
+
+  Object* ObjectMemory::new_object_typed_enduring(STATE, Class* cls, size_t bytes, object_type type) {
+    Object* obj = new_object_typed_enduring_dirty(state, cls, bytes, type);
+    if(unlikely(!obj)) return NULL;
+
+    obj->clear_fields(bytes);
     return obj;
   }
 
@@ -1027,7 +1020,7 @@ step1:
   void ObjectMemory::add_code_resource(CodeResource* cr) {
     SYNC_TL;
 
-    code_manager_.add_resource(cr);
+    code_manager_.add_resource(cr, &collect_mature_now);
   }
 
   void* ObjectMemory::young_start() {
@@ -1039,287 +1032,104 @@ step1:
   }
 
   void ObjectMemory::needs_finalization(Object* obj, FinalizerFunction func) {
-    SYNC_TL;
-
-    FinalizeObject fi;
-    fi.object = obj;
-    fi.status = FinalizeObject::eLive;
-    fi.finalizer = func;
-
-    // Makes a copy of fi.
-    finalize_.push_back(fi);
+    if(FinalizerHandler* fh = shared_.finalizer_handler()) {
+      fh->record(obj, func);
+    }
   }
 
-  void ObjectMemory::set_ruby_finalizer(Object* obj, Object* fin) {
-    SYNC_TL;
+  void ObjectMemory::set_ruby_finalizer(Object* obj, Object* finalizer) {
+    shared_.finalizer_handler()->set_ruby_finalizer(obj, finalizer);
+  }
 
-    // See if there already one.
-    for(std::list<FinalizeObject>::iterator i = finalize_.begin();
-        i != finalize_.end(); ++i)
-    {
-      if(i->object == obj) {
-        if(fin->nil_p()) {
-          finalize_.erase(i);
-        } else {
-          i->ruby_finalizer = fin;
-        }
+  capi::Handle* ObjectMemory::add_capi_handle(STATE, Object* obj) {
+    if(!obj->reference_p()) {
+      rubinius::bug("Trying to add a handle for a non reference");
+    }
+    uintptr_t handle_index = capi_handles_->allocate_index(state, obj);
+    obj->set_handle_index(state, handle_index);
+    return obj->handle(state);
+  }
+
+  void ObjectMemory::add_global_capi_handle_location(STATE, capi::Handle** loc,
+                                               const char* file, int line) {
+    SYNC(state);
+    if(*loc && REFERENCE_P(*loc)) {
+      if(!capi_handles_->validate(*loc)) {
+        std::cerr << std::endl << "==================================== ERROR ====================================" << std::endl;
+        std::cerr << "| An extension is trying to add an invalid handle at the following location:  |" << std::endl;
+        std::ostringstream out;
+        out << file << ":" << line;
+        std::cerr << "| " << std::left << std::setw(75) << out.str() << " |" << std::endl;
+        std::cerr << "|                                                                             |" << std::endl;
+        std::cerr << "| An invalid handle means that it points to an invalid VALUE. This can happen |" << std::endl;
+        std::cerr << "| when you haven't initialized the VALUE pointer yet, in which case we        |" << std::endl;
+        std::cerr << "| suggest either initializing it properly or otherwise first initialize it to |" << std::endl;
+        std::cerr << "| NULL if you can only set it to a proper VALUE pointer afterwards. Consider  |" << std::endl;
+        std::cerr << "| the following example that could cause this problem:                        |" << std::endl;
+        std::cerr << "|                                                                             |" << std::endl;
+        std::cerr << "| VALUE ptr;                                                                  |" << std::endl;
+        std::cerr << "| rb_gc_register_address(&ptr);                                               |" << std::endl;
+        std::cerr << "| ptr = rb_str_new(\"test\");                                                   |" << std::endl;
+        std::cerr << "|                                                                             |" << std::endl;
+        std::cerr << "| Either change this register after initializing                              |" << std::endl;
+        std::cerr << "|                                                                             |" << std::endl;
+        std::cerr << "| VALUE ptr;                                                                  |" << std::endl;
+        std::cerr << "| ptr = rb_str_new(\"test\");                                                   |" << std::endl;
+        std::cerr << "| rb_gc_register_address(&ptr);                                               |" << std::endl;
+        std::cerr << "|                                                                             |" << std::endl;
+        std::cerr << "| Or initialize it with NULL:                                                 |" << std::endl;
+        std::cerr << "|                                                                             |" << std::endl;
+        std::cerr << "| VALUE ptr = NULL;                                                           |" << std::endl;
+        std::cerr << "| rb_gc_register_address(&ptr);                                               |" << std::endl;
+        std::cerr << "| ptr = rb_str_new(\"test\");                                                   |" << std::endl;
+        std::cerr << "|                                                                             |" << std::endl;
+        std::cerr << "| Please note that this is NOT a problem in Rubinius, but in the extension    |" << std::endl;
+        std::cerr << "| that contains the given file above. A very common source of this problem is |" << std::endl;
+        std::cerr << "| using older versions of therubyracer before 0.11.x. Please upgrade to at    |" << std::endl;
+        std::cerr << "| least version 0.11.x if you're using therubyracer and encounter this        |" << std::endl;
+        std::cerr << "| problem. For some more background information on why this is a problem      |" << std::endl;
+        std::cerr << "| with therubyracer, you can read the following blog post:                    |" << std::endl;
+        std::cerr << "|                                                                             |" << std::endl;
+        std::cerr << "| http://blog.thefrontside.net/2012/12/04/therubyracer-rides-again/           |" << std::endl;
+        std::cerr << "|                                                                             |" << std::endl;
+        std::cerr << "================================== ERROR ======================================" << std::endl;
+        rubinius::bug("Halting due to invalid handle");
+      }
+    }
+
+    capi::GlobalHandle* global_handle = new capi::GlobalHandle(loc, file, line);
+    global_capi_handle_locations_.push_back(global_handle);
+  }
+
+  void ObjectMemory::del_global_capi_handle_location(STATE, capi::Handle** loc) {
+    SYNC(state);
+
+    for(std::list<capi::GlobalHandle*>::iterator i = global_capi_handle_locations_.begin();
+        i != global_capi_handle_locations_.end(); ++i) {
+      if((*i)->handle() == loc) {
+        delete *i;
+        global_capi_handle_locations_.erase(i);
         return;
       }
     }
-
-    // Adding a nil finalizer is only used to delete an
-    // existing finalizer, which we apparently don't have
-    // if we get here.
-    if(fin->nil_p()) {
-      return;
-    }
-
-    // Ok, create it.
-
-    FinalizeObject fi;
-    fi.object = obj;
-    fi.status = FinalizeObject::eLive;
-
-    // Rubinius specific API. If the finalizer is the object, we're going to send
-    // the object __finalize__. We mark that the user wants this by putting Qtrue
-    // as the ruby_finalizer.
-    if(obj == fin) {
-      fi.ruby_finalizer = Qtrue;
-    } else {
-      fi.ruby_finalizer = fin;
-    }
-
-    // Makes a copy of fi.
-    finalize_.push_back(fi);
+    rubinius::bug("Removing handle not in the list");
   }
 
-  void ObjectMemory::add_to_finalize(FinalizeObject* fi) {
-    SCOPE_LOCK(ManagedThread::current(), finalizer_lock_);
-    to_finalize_.push_back(fi);
-    added_finalizers_ = true;
+  void ObjectMemory::make_capi_handle_cached(STATE, capi::Handle* handle) {
+    SYNC(state);
+    cached_capi_handles_.push_back(handle);
   }
 
-  void ObjectMemory::in_finalizer_thread(STATE) {
-    CallFrame* call_frame = 0;
-
-    // Forever
-    for(;;) {
-      FinalizeObject* fi;
-
-      // Take the lock, remove the first one from the list,
-      // then process it.
-      {
-        SCOPE_LOCK(state, finalizer_lock_);
-
-        state->set_call_frame(0);
-
-        while(to_finalize_.empty()) {
-          GCIndependent indy(state);
-          finalizer_var_.wait(finalizer_lock_);
-        }
-
-        fi = to_finalize_.front();
-        to_finalize_.pop_front();
-      }
-
-      if(fi->finalizer) {
-        (*fi->finalizer)(state, fi->object);
-        // Unhook any handle used by fi->object so that we don't accidentally
-        // try and mark it later (after we've finalized it)
-        if(fi->object->inflated_header_p()) {
-          InflatedHeader* ih = fi->object->inflated_header();
-
-          if(capi::Handle* handle = ih->handle()) {
-            handle->forget_object();
-            ih->set_handle(0);
-          }
-        }
-
-        // If the object was remembered, unremember it.
-        if(fi->object->remembered_p()) {
-          unremember_object(fi->object);
-        }
-      } else if(fi->ruby_finalizer) {
-        // Rubinius specific code. If the finalizer is Qtrue, then
-        // send the object the finalize message
-        if(fi->ruby_finalizer == Qtrue) {
-          fi->object->send(state, call_frame, state->symbol("__finalize__"), true);
-        } else {
-          Array* ary = Array::create(state, 1);
-          ary->set(state, 0, fi->object->id(state));
-
-          OnStack<1> os(state, ary);
-
-          fi->ruby_finalizer->send(state, call_frame, state->symbol("call"), ary, Qnil, true);
-        }
-      } else {
-        std::cerr << "Unsupported object to be finalized: "
-                  << fi->object->to_s(state)->c_str(state) << std::endl;
-      }
-
-      fi->status = FinalizeObject::eFinalized;
-    }
-
-    state->set_call_frame(0);
-    state->shared.checkpoint(state);
-  }
-
-  void ObjectMemory::run_finalizers(STATE, CallFrame* call_frame) {
-    {
-      SCOPE_LOCK(state, finalizer_lock_);
-      if(running_finalizers_) return;
-      running_finalizers_ = true;
-    }
-
-    for(std::list<FinalizeObject*>::iterator i = to_finalize_.begin();
-        i != to_finalize_.end(); ) {
-      FinalizeObject* fi = *i;
-
-      if(fi->finalizer) {
-        (*fi->finalizer)(state, fi->object);
-        // Unhook any handle used by fi->object so that we don't accidentally
-        // try and mark it later (after we've finalized it)
-        if(fi->object->inflated_header_p()) {
-          InflatedHeader* ih = fi->object->inflated_header();
-
-          if(capi::Handle* handle = ih->handle()) {
-            handle->forget_object();
-            ih->set_handle(0);
-          }
-        }
-
-        // If the object was remembered, unremember it.
-        if(fi->object->remembered_p()) {
-          unremember_object(fi->object);
-        }
-      } else if(fi->ruby_finalizer) {
-        // Rubinius specific code. If the finalizer is Qtrue, then
-        // send the object the finalize message
-        if(fi->ruby_finalizer == Qtrue) {
-          fi->object->send(state, call_frame, state->symbol("__finalize__"), true);
-        } else {
-          Array* ary = Array::create(state, 1);
-          ary->set(state, 0, fi->object->id(state));
-
-          OnStack<1> os(state, ary);
-
-          fi->ruby_finalizer->send(state, call_frame, state->symbol("call"), ary, Qnil, true);
-        }
-      } else {
-        std::cerr << "Unsupported object to be finalized: "
-                  << fi->object->to_s(state)->c_str(state) << std::endl;
-      }
-
-      fi->status = FinalizeObject::eFinalized;
-
-      i = to_finalize_.erase(i);
-    }
-
-    running_finalizers_ = false;
-  }
-
-  void ObjectMemory::run_all_finalizers(STATE) {
-    {
-      SCOPE_LOCK(state, finalizer_lock_);
-      if(running_finalizers_) return;
-      running_finalizers_ = true;
-    }
-
-    for(std::list<FinalizeObject>::iterator i = finalize_.begin();
-        i != finalize_.end(); )
-    {
-      FinalizeObject& fi = *i;
-
-      // Only finalize things that haven't been finalized.
-      if(fi.status != FinalizeObject::eFinalized) {
-        if(fi.finalizer) {
-          (*fi.finalizer)(state, fi.object);
-        } else if(fi.ruby_finalizer) {
-          // Rubinius specific code. If the finalizer is Qtrue, then
-          // send the object the finalize message
-          if(fi.ruby_finalizer == Qtrue) {
-            fi.object->send(state, 0, state->symbol("__finalize__"), true);
-          } else {
-            Array* ary = Array::create(state, 1);
-            ary->set(state, 0, fi.object->id(state));
-
-            OnStack<1> os(state, ary);
-
-            fi.ruby_finalizer->send(state, 0, state->symbol("call"), ary, Qnil, true);
-          }
-        } else {
-          std::cerr << "During shutdown, unsupported object to be finalized: "
-                    << fi.object->to_s(state)->c_str(state) << std::endl;
-        }
-      }
-
-      fi.status = FinalizeObject::eFinalized;
-
-      i = finalize_.erase(i);
-    }
-
-    running_finalizers_ = false;
-  }
-
-  void ObjectMemory::run_all_io_finalizers(STATE) {
-    {
-      SCOPE_LOCK(state, finalizer_lock_);
-      if(running_finalizers_) return;
-      running_finalizers_ = true;
-    }
-
-    for(std::list<FinalizeObject>::iterator i = finalize_.begin();
-        i != finalize_.end(); )
-    {
-      FinalizeObject& fi = *i;
-
-      if(!kind_of<IO>(fi.object)) { ++i; continue; }
-
-      // Only finalize things that haven't been finalized.
-      if(fi.status != FinalizeObject::eFinalized) {
-        if(fi.finalizer) {
-          (*fi.finalizer)(state, fi.object);
-        } else if(fi.ruby_finalizer) {
-          // Rubinius specific code. If the finalizer is Qtrue, then
-          // send the object the finalize message
-          if(fi.ruby_finalizer == Qtrue) {
-            fi.object->send(state, 0, state->symbol("__finalize__"), true);
-          } else {
-            Array* ary = Array::create(state, 1);
-            ary->set(state, 0, fi.object->id(state));
-
-            OnStack<1> os(state, ary);
-
-            fi.ruby_finalizer->send(state, 0, state->symbol("call"), ary, Qnil, true);
-          }
-        } else {
-          std::cerr << "During shutdown, unsupported object to be finalized: "
-                    << fi.object->to_s(state)->c_str(state) << std::endl;
-        }
-      }
-
-      fi.status = FinalizeObject::eFinalized;
-
-      i = finalize_.erase(i);
-    }
-
-    running_finalizers_ = false;
-  }
-
-  Object* in_finalizer(STATE) {
-    state->shared.om->in_finalizer_thread(state);
-    return Qnil;
-  }
-
-  void ObjectMemory::start_finalizer_thread(STATE) {
-    VM* vm = state->shared.new_vm();
-    Thread* thr = Thread::create(state, vm, G(thread), in_finalizer);
-    finalizer_thread_.set(thr);
-    thr->fork(state);
+  ObjectArray* ObjectMemory::weak_refs_set() {
+    return immix_->weak_refs_set();
   }
 
   size_t& ObjectMemory::loe_usage() {
     return mark_sweep_->allocated_bytes;
+  }
+
+  size_t& ObjectMemory::young_usage() {
+    return young_->bytes_size();
   }
 
   size_t& ObjectMemory::immix_usage() {
@@ -1327,25 +1137,21 @@ step1:
   }
 
   size_t& ObjectMemory::code_usage() {
-    return (size_t&)code_manager_.size();
+    return code_manager_.size();
   }
 
   void ObjectMemory::memstats() {
-    int total = 0;
+    size_t total = 0;
 
-    int baker = root_state_->shared.config.gc_bytes * 2;
+    size_t baker = young_usage();
     total += baker;
-
-    int immix = immix_->bytes_allocated();
+    size_t immix = immix_usage();
     total += immix;
-
-    int large = mark_sweep_->allocated_bytes;
+    size_t large = loe_usage();
     total += large;
-
-    int code = code_manager_.size();
+    size_t code = code_usage();
     total += code;
-
-    int shared = root_state_->shared.size();
+    size_t shared = root_state_->shared.size();
     total += shared;
 
     std::cout << "baker: " << baker << "\n";
@@ -1365,167 +1171,7 @@ step1:
     std::cout << "  total allocated: " << code_manager_.total_allocated() << "\n";
     std::cout << "      total freed: " << code_manager_.total_freed() << "\n";
   }
-
-  class RefererFinder : public GarbageCollector {
-    Object* target_;
-    bool found_;
-
-  public:
-    RefererFinder(ObjectMemory* om, Object* obj)
-      : GarbageCollector(om)
-      , target_(obj)
-      , found_(false)
-    {}
-
-    virtual Object* saw_object(Object* obj) {
-      if(obj == target_) {
-        found_ = true;
-      }
-
-      return obj;
-    }
-
-    void reset() {
-      found_ = false;
-    }
-
-    bool found_p() {
-      return found_;
-    }
-  };
-
-  void ObjectMemory::find_referers(Object* target, ObjectArray& result) {
-    ObjectMemory::GCInhibit inhibitor(root_state_->om);
-
-    ObjectWalker walker(root_state_->om);
-    GCData gc_data(root_state_);
-
-    // Seed it with the root objects.
-    walker.seed(gc_data);
-
-    Object* obj = walker.next();
-
-    RefererFinder rf(this, target);
-
-    while(obj) {
-      rf.reset();
-
-      rf.scan_object(obj);
-
-      if(rf.found_p()) {
-        result.push_back(obj);
-      }
-
-      obj = walker.next();
-    }
-  }
-
-  void ObjectMemory::snapshot() {
-    // Assign all objects an object id...
-    ObjectMemory::GCInhibit inhibitor(root_state_->om);
-
-    // Walk the heap over and over until we don't create
-    // any more objects...
-
-    size_t last_seen = 0;
-
-    while(last_object_id != last_seen) {
-      last_seen = last_object_id;
-
-      ObjectWalker walker(root_state_->om);
-      GCData gc_data(root_state_);
-
-      // Seed it with the root objects.
-      walker.seed(gc_data);
-
-      Object* obj = walker.next();
-
-      while(obj) {
-        obj->id(root_state_);
-        obj = walker.next();
-      }
-    }
-
-    // Now, save the current value of last_object_id, since thats
-    // so we can compare later to find all new objects.
-    last_snapshot_id = last_object_id;
-
-    std::cout << "Snapshot taken: " << last_snapshot_id << "\n";
-  }
-
-  void ObjectMemory::print_new_since_snapshot() {
-    // Assign all objects an object id...
-    ObjectMemory::GCInhibit inhibitor(root_state_->om);
-
-    ObjectWalker walker(root_state_->om);
-    GCData gc_data(root_state_);
-
-    // Seed it with the root objects.
-    walker.seed(gc_data);
-
-    Object* obj = walker.next();
-
-    // All reference ids are shifted up
-    native_int check_id = (native_int)last_snapshot_id << 1;
-
-    int count = 0;
-    int bytes = 0;
-
-    while(obj) {
-      if(!obj->has_id(root_state_) || obj->id(root_state_)->to_native() > check_id) {
-        count++;
-        bytes += obj->size_in_bytes(root_state_);
-
-        if(kind_of<String>(obj)) {
-          std::cout << "#<String:" << obj << ">\n";
-        } else {
-          std::cout << obj->to_s(root_state_, true)->c_str(root_state_) << "\n";
-        }
-      }
-
-      obj = walker.next();
-    }
-
-    std::cout << count << " objects since snapshot.\n";
-    std::cout << bytes << " bytes since snapshot.\n";
-  }
-
-  void ObjectMemory::print_references(Object* obj) {
-    ObjectArray ary;
-
-    find_referers(obj, ary);
-
-    int count = 0;
-
-    std::cout << ary.size() << " total references:\n";
-    for(ObjectArray::iterator i = ary.begin();
-        i != ary.end();
-        ++i) {
-      std::cout << "  " << (*i)->to_s(root_state_, true)->c_str(root_state_) << "\n";
-
-      if(++count == 100) break;
-    }
-  }
 };
-
-
-// Memory utility functions for use in gdb
-
-void x_memstat() {
-  rubinius::VM::current()->om->memstats();
-}
-
-void print_references(void* obj) {
-  rubinius::VM::current()->om->print_references((rubinius::Object*)obj);
-}
-
-void x_snapshot() {
-  rubinius::VM::current()->om->snapshot();
-}
-
-void x_print_snapshot() {
-  rubinius::VM::current()->om->print_new_since_snapshot();
-}
 
 // The following memory functions are defined in ruby.h for use by C-API
 // extensions, and also used by library code lifted from MRI (e.g. Oniguruma).

@@ -27,12 +27,12 @@ public:
     tbl->put(state, 3, Fixnum::from(2));
 
     TS_ASSERT_EQUALS(tbl->fetch(state, Fixnum::from(1)), Fixnum::from(2));
-    TS_ASSERT_EQUALS(tbl->fetch(state, Fixnum::from(2)), Qnil);
+    TS_ASSERT_EQUALS(tbl->fetch(state, Fixnum::from(2)), cNil);
   }
 
   void test_add() {
-    TS_ASSERT_EQUALS(tbl->at(state, 0), Qnil);
-    TS_ASSERT_EQUALS(tbl->at(state, 1), Qnil);
+    TS_ASSERT_EQUALS(tbl->at(state, 0), cNil);
+    TS_ASSERT_EQUALS(tbl->at(state, 1), cNil);
 
     tbl->store(state, Fixnum::from(1), Fixnum::from(2));
 
@@ -43,15 +43,15 @@ public:
   void test_add_when_full() {
     int size = COMPACTLOOKUPTABLE_SIZE / 2;
     for (int i = 0; i < size; i++) {
-      tbl->store(state, Fixnum::from(i), Qnil);
+      tbl->store(state, Fixnum::from(i), cNil);
     }
-    TS_ASSERT_EQUALS(tbl->store(state, Fixnum::from(6), Qnil), Qfalse);
+    TS_ASSERT_EQUALS(tbl->store(state, Fixnum::from(6), cNil), cFalse);
   }
 
   void test_has_key() {
-    tbl->store(state, Fixnum::from(0), Qnil);
-    TS_ASSERT_EQUALS(tbl->has_key(state, Fixnum::from(0)), Qtrue);
-    TS_ASSERT_EQUALS(tbl->has_key(state, Fixnum::from(1)), Qfalse);
+    tbl->store(state, Fixnum::from(0), cNil);
+    TS_ASSERT_EQUALS(tbl->has_key(state, Fixnum::from(0)), cTrue);
+    TS_ASSERT_EQUALS(tbl->has_key(state, Fixnum::from(1)), cFalse);
   }
 
   void test_keys() {
@@ -59,7 +59,7 @@ public:
     tbl->store(state, Fixnum::from(2), Fixnum::from(3));
     Array* ary = tbl->keys(state);
 
-    TS_ASSERT_EQUALS(ary->size(), (unsigned)2);
+    TS_ASSERT_EQUALS(ary->size(), 2);
     TS_ASSERT_EQUALS(ary->get(state, 0), Fixnum::from(0));
     TS_ASSERT_EQUALS(ary->get(state, 1), Fixnum::from(2));
   }
@@ -69,7 +69,7 @@ public:
     tbl->store(state, Fixnum::from(2), Fixnum::from(3));
     Array* ary = tbl->values(state);
 
-    TS_ASSERT_EQUALS(ary->size(), (unsigned)2);
+    TS_ASSERT_EQUALS(ary->size(), 2);
     TS_ASSERT_EQUALS(ary->get(state, 0), Fixnum::from(1));
     TS_ASSERT_EQUALS(ary->get(state, 1), Fixnum::from(3));
   }

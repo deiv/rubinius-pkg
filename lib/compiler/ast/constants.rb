@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   module AST
 
@@ -7,7 +9,19 @@ module Rubinius
       end
 
       def bytecode(g)
+        pos(g)
         g.push_type
+      end
+    end
+
+    class MirrorConstant < Node
+      def initialize(line)
+        @line = line
+      end
+
+      def bytecode(g)
+        pos(g)
+        g.push_mirror
       end
     end
 
@@ -180,15 +194,28 @@ module Rubinius
     class ConstantAccess < Node
       attr_accessor :name
 
-      def initialize(line, name)
+      def initialize(line, name, top_level = false)
         @line = line
         @name = name
+        @top_level = top_level
       end
 
       def bytecode(g)
         pos(g)
 
-        g.push_const @name
+        if g.state.op_asgn?
+          g.push_literal Rubinius::Compiler::Runtime
+          g.push_literal @name
+          g.push_scope
+          g.send :find_constant_for_op_asign_or, 2
+        else
+          if @top_level
+            g.push_cpath_top
+            g.find_const @name
+          else
+            g.push_const @name
+          end
+        end
       end
 
       def assign_bytecode(g, value)

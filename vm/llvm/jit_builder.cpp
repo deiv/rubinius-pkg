@@ -2,34 +2,89 @@
 
 #include "llvm/jit_builder.hpp"
 #include "call_frame.hpp"
-#include "vmmethod.hpp"
+#include "machine_code.hpp"
 
+#include "llvm/jit_context.hpp"
 #include "llvm/jit_visit.hpp"
 #include "llvm/control_flow.hpp"
 #include "llvm/cfg.hpp"
 
 #include "instruments/tooling.hpp"
 #include <llvm/Analysis/CaptureTracking.h>
+#if RBX_LLVM_API_VER > 301
+#include <llvm/DebugInfo.h>
+#else
+#include <llvm/Analysis/DebugInfo.h>
+#endif
+
+// There is no official language identifier for Ruby.
+// Define it as an user-defined one.
+// Check that this constant isn't conflicted any other recognized user-defined
+// language identifier:
+//   http://llvm.org/docs/doxygen/html/namespacellvm_1_1dwarf.html#a85bda042c02722848a3411b67924eb47a8f16e9a8f3582985075ffd88f363d616
+#define DW_LANG_Ruby (llvm::dwarf::DW_LANG_lo_user + 2)
 
 namespace rubinius {
 namespace jit {
 
-  Builder::Builder(LLVMState* ls, JITMethodInfo& i)
-    : ls_(ls)
-    , vmm_(i.vmm)
-    , builder_(ls->ctx())
+  Builder::Builder(Context* ctx, JITMethodInfo& i)
+    : ctx_(ctx)
+    , machine_code_(i.machine_code)
+    , builder_(ctx->llvm_context(), llvm::ConstantFolder(), IRBuilderInserterWithDebug(this))
     , use_full_scope_(false)
     , import_args_(0)
     , body_(0)
     , info_(i)
     , runtime_data_(0)
+    , debug_builder_(*ctx->module())
   {
-    llvm::Module* mod = ls->module();
+    llvm::Module* mod = ctx->module();
     cf_type = mod->getTypeByName("struct.rubinius::CallFrame");
     vars_type = mod->getTypeByName("struct.rubinius::VariableScope");
     stack_vars_type = mod->getTypeByName("struct.rubinius::StackVariables");
-    obj_type = ls->ptr_type("Object");
+    obj_type = ctx->ptr_type("Object");
     obj_ary_type = llvm::PointerType::getUnqual(obj_type);
+    check_global_interrupts_pos = b().CreateIntToPtr(
+          llvm::ConstantInt::get(ctx_->IntPtrTy, (intptr_t)ctx_->llvm_state()->shared().check_global_interrupts_address()),
+          llvm::PointerType::getUnqual(ctx_->Int8Ty), "cast_to_intptr");
+    set_definition_location();
+  }
+
+  void Builder::set_definition_location() {
+    std::string file_str = ctx_->llvm_state()->symbol_debug_str(info_.method()->file());
+    debug_builder_.createCompileUnit(DW_LANG_Ruby, file_str,
+        "", "rubinius", true, "", 0);
+    DIFile file = debug_builder().createFile(file_str, "");
+
+    DIType dummy_return_type = debug_builder().createNullPtrType("dummy type");
+    Value* dummy_signature[] = {
+      &*dummy_return_type,
+    };
+    DIType dummy_subroutine_type = debug_builder().createSubroutineType(file,
+        debug_builder().getOrCreateArray(dummy_signature));
+
+#if RBX_LLVM_API_VER > 300
+    DISubprogram subprogram = debug_builder().createFunction(file, "", "",
+        file, info_.method()->start_line(), dummy_subroutine_type, false, true, 0, 0,
+        false, info_.function());
+#else
+    DISubprogram subprogram = debug_builder().createFunction(file, "", "",
+        file, info_.method()->start_line(), dummy_subroutine_type, false, true, 0,
+        false, info_.function());
+#endif
+    // FnSpecificMDNode is used in finalize(), so to avoid memory leak,
+    // initialize it with empty one by inserting here.
+    llvm::getOrInsertFnSpecificMDNode(*ctx_->module(), subprogram);
+
+    b().SetCurrentDebugLocation(llvm::DebugLoc::get(info_.method()->start_line(), 0,
+                                subprogram));
+    debug_builder_.finalize();
+  }
+
+  void Builder::set_current_location(opcode ip) {
+    int line = info_.method()->line(ip);
+    DISubprogram subprogram(b().getCurrentDebugLocation().getScope(ctx_->llvm_context()));
+    b().SetCurrentDebugLocation(llvm::DebugLoc::get(line, 0, subprogram));
   }
 
   Value* Builder::get_field(Value* val, int which) {
@@ -72,8 +127,8 @@ namespace jit {
   }
 
   void Builder::nil_locals() {
-    Value* nil = constant(Qnil, obj_type);
-    int size = vmm_->number_of_locals;
+    Value* nil = constant(cNil, obj_type);
+    int size = machine_code_->number_of_locals;
 
     if(size == 0) return;
     // Stack size 5 or less, do 5 stores in a row rather than
@@ -82,11 +137,11 @@ namespace jit {
       for(int i = 0; i < size; i++) {
         Value* idx[] = {
           cint(0),
-          cint(offset::vars_tuple),
+          cint(offset::StackVariables::locals),
           cint(i)
         };
 
-        Value* gep = b().CreateGEP(vars, idx, idx+3, "local_pos");
+        Value* gep = b().CreateGEP(vars, idx, "local_pos");
         b().CreateStore(nil, gep);
       }
       return;
@@ -95,7 +150,7 @@ namespace jit {
     Value* max = cint(size);
     Value* one = cint(1);
 
-    BasicBlock* top = info_.new_block("locals_nil");
+    BasicBlock* top = info_.new_block("locactx_nil");
     BasicBlock* cont = info_.new_block("bottom");
 
     b().CreateStore(cint(0), info_.counter());
@@ -107,11 +162,11 @@ namespace jit {
     Value* cur = b().CreateLoad(info_.counter(), "counter");
     Value* idx[] = {
       cint(0),
-      cint(offset::vars_tuple),
+      cint(offset::StackVariables::locals),
       cur
     };
 
-    Value* gep = b().CreateGEP(vars, idx, idx+3, "local_pos");
+    Value* gep = b().CreateGEP(vars, idx, "local_pos");
     b().CreateStore(nil, gep);
 
     Value* added = b().CreateAdd(cur, one, "added");
@@ -123,76 +178,8 @@ namespace jit {
     b().SetInsertPoint(cont);
   }
 
-
-  void Builder::check_self_type() {
-    int klass_id = 0;
-
-    StaticScope* ss = info_.method()->scope();
-    if(!kind_of<StaticScope>(ss)) return;
-    if(Class* cls = try_as<Class>(ss->module())) {
-      klass_id = cls->class_id();
-    } else {
-      return;
-    }
-
-    // Now, validate class_id
-
-    Value* self = b().CreateLoad(
-        b().CreateConstGEP2_32(info_.args(), 0, offset::args_recv), "self");
-
-    BasicBlock* restart_interp = info_.new_block("restart_interp");
-    BasicBlock* check_class = info_.new_block("check_class");
-    BasicBlock* cont = info_.new_block("prologue_continue");
-
-    Value* mask = cint(TAG_REF_MASK);
-    Value* zero = cint(TAG_REF);
-
-    Value* lint = b().CreateAnd(
-        b().CreatePtrToInt(self, ls_->Int32Ty),
-        mask, "masked");
-
-    Value* is_ref = b().CreateICmpEQ(lint, zero, "is_reference");
-
-    b().CreateCondBr(is_ref, check_class, restart_interp);
-
-    b().SetInsertPoint(check_class);
-
-    Value* class_idx[] = {
-      cint(0),
-      cint(0),
-      cint(1)
-    };
-
-    Value* self_class = b().CreateLoad(
-        b().CreateGEP(self, class_idx, class_idx+3),
-        "class");
-
-    Value* runtime_id = b().CreateLoad(
-        b().CreateConstGEP2_32(self_class, 0, 3),
-        "class_id");
-
-    Value* equal = b().CreateICmpEQ(runtime_id, cint(klass_id));
-
-    b().CreateCondBr(equal, cont, restart_interp);
-
-    b().SetInsertPoint(restart_interp);
-
-    Value* call_args[] = { info_.vm(), info_.previous(), exec, module, info_.args() };
-
-    Signature sig(ls_, "Object");
-    sig << "VM";
-    sig << "CallFrame";
-    sig << "Executable";
-    sig << "Module";
-    sig << "Arguments";
-
-    b().CreateRet(sig.call("rbx_restart_interp", call_args, 5, "ir", b()));
-
-    b().SetInsertPoint(cont);
-  }
-
   class PassOne : public VisitInstructions<PassOne> {
-    LLVMState* ls_;
+    Context* ctx_;
     BlockMap& map_;
     Function* function_;
     opcode current_ip_;
@@ -202,7 +189,7 @@ namespace jit {
     bool loops_;
     int sp_;
     JITBasicBlock* current_block_;
-    bool calls_evalish_;
+    bool calctx_evalish_;
 
     Symbol* s_eval_;
     Symbol* s_binding_;
@@ -214,9 +201,9 @@ namespace jit {
 
   public:
 
-    PassOne(LLVMState* ls, BlockMap& map, Function* func, BasicBlock* start,
+    PassOne(Context* ctx, BlockMap& map, Function* func, BasicBlock* start,
             CFGCalculator& cfg, JITMethodInfo& info)
-      : ls_(ls)
+      : ctx_(ctx)
       , map_(map)
       , function_(func)
       , current_ip_(0)
@@ -225,7 +212,7 @@ namespace jit {
       , number_of_sends_(0)
       , loops_(false)
       , sp_(-1)
-      , calls_evalish_(false)
+      , calctx_evalish_(false)
       , cfg_(cfg)
       , info_(info)
     {
@@ -235,14 +222,14 @@ namespace jit {
 
       current_block_ = &jbb;
 
-      s_eval_ = ls->symbol("eval");
-      s_binding_ = ls->symbol("binding");
-      s_class_eval_ = ls->symbol("class_eval");
-      s_module_eval_ = ls->symbol("module_eval");
+      s_eval_ = ctx->llvm_state()->symbol("eval");
+      s_binding_ = ctx->llvm_state()->symbol("binding");
+      s_class_eval_ = ctx->llvm_state()->symbol("class_eval");
+      s_module_eval_ = ctx->llvm_state()->symbol("module_eval");
     }
 
-    bool calls_evalish() {
-      return calls_evalish_;
+    bool calctx_evalish() {
+      return calctx_evalish_;
     }
 
     bool creates_blocks() {
@@ -314,7 +301,7 @@ namespace jit {
         std::ostringstream ss;
         ss << "ip" << ip;
         JITBasicBlock& jbb = map_[ip];
-        jbb.block = BasicBlock::Create(ls_->ctx(), ss.str().c_str(), function_);
+        jbb.block = BasicBlock::Create(ctx_->llvm_context(), ss.str(), function_);
         jbb.start_ip = ip;
         jbb.sp = sp_;
 
@@ -417,12 +404,12 @@ namespace jit {
     }
 
     void check_for_eval(opcode which) {
-      InlineCache* ic = reinterpret_cast<InlineCache*>(which);
-      if(ic->name == s_eval_ ||
-          ic->name == s_binding_ ||
-          ic->name == s_class_eval_ ||
-          ic->name == s_module_eval_) {
-        calls_evalish_ = true;
+      CallSite* call_site = reinterpret_cast<CallSite*>(which);
+      if(call_site->name() == s_eval_ ||
+         call_site->name() == s_binding_ ||
+         call_site->name() == s_class_eval_ ||
+         call_site->name() == s_module_eval_) {
+        calctx_evalish_ = true;
       }
     }
 
@@ -454,7 +441,7 @@ namespace jit {
 
     void visit_zsuper(opcode which) {
       // HACK. zsuper accesses scope.
-      calls_evalish_ = true;
+      calctx_evalish_ = true;
       number_of_sends_++;
     }
 
@@ -470,14 +457,14 @@ namespace jit {
   };
 
   void Builder::pass_one(BasicBlock* body) {
-    CFGCalculator cfg(vmm_);
+    CFGCalculator cfg(machine_code_);
     cfg.build();
 
     // Pass 1, detect BasicBlock boundaries
-    PassOne finder(ls_, block_map_, info_.function(), body, cfg, info_);
-    finder.drive(vmm_);
+    PassOne finder(ctx_, block_map_, info_.function(), body, cfg, info_);
+    finder.drive(machine_code_);
 
-    if(finder.creates_blocks() || finder.calls_evalish()) {
+    if(finder.creates_blocks() || finder.calctx_evalish()) {
       info_.set_use_full_scope();
       use_full_scope_ = true;
     }
@@ -489,14 +476,17 @@ namespace jit {
   class Walker {
     JITVisit& v_;
     BlockMap& map_;
+    Builder& builder_;
 
   public:
-    Walker(JITVisit& v, BlockMap& map)
+    Walker(JITVisit& v, BlockMap& map, Builder& builder)
       : v_(v)
       , map_(map)
+      , builder_(builder)
     {}
 
     void call(OpcodeIterator& iter) {
+      builder_.set_current_location(iter.ip());
       v_.dispatch(iter.ip());
 
       if(v_.b().GetInsertBlock()->getTerminator() == NULL) {
@@ -509,12 +499,12 @@ namespace jit {
   };
 
   bool Builder::generate_body() {
-    JITVisit visitor(ls_, info_, block_map_, b().GetInsertBlock());
+    JITVisit visitor(this, info_, block_map_, b().GetInsertBlock());
 
     if(info_.inline_policy) {
       visitor.set_policy(info_.inline_policy);
     } else {
-      visitor.init_policy();
+      visitor.init_policy(ctx_);
     }
 
     assert(visitor.inline_policy());
@@ -526,12 +516,12 @@ namespace jit {
     if(use_full_scope_) visitor.use_full_scope();
 
     visitor.initialize();
-    visitor.set_stream(info_.vmm);
+    visitor.set_stream(info_.machine_code);
 
     // Pass 2, compile!
     // Drive by following the control flow.
-    jit::ControlFlowWalker walker(info_.vmm);
-    Walker cb(visitor, block_map_);
+    jit::ControlFlowWalker walker(info_.machine_code);
+    Walker cb(visitor, block_map_, *this);
 
     try {
       walker.run<Walker>(cb);
@@ -547,17 +537,57 @@ namespace jit {
       import_args_->back().eraseFromParent();
 
       b().SetInsertPoint(import_args_);
-      Signature sig(ls_, obj_type);
-      sig << "VM";
-      sig << "CallFrame";
-
-      Function* func_ci = sig.function("rbx_check_interrupts");
-      func_ci->setDoesNotCapture(1, true);
-      func_ci->setDoesNotCapture(2, true);
-
-      Value* call_args[] = { info_.vm(), call_frame };
 
       BasicBlock* ret_null = info_.new_block("ret_null");
+
+      Value* idx_jit[] = {
+        cint(0),
+        cint(offset::State::vm_jit)
+      };
+      Value* vm_jit = b().CreateLoad(b().CreateGEP(info_.state(), idx_jit), "vm_jit");
+
+      // Check stack overflow
+      Value* idx_stk_limit[] = {
+        cint(0),
+        cint(offset::VMJIT::stack_limit)
+      };
+
+      Value* stack_limit = b().CreateLoad(b().CreateGEP(vm_jit, idx_stk_limit),
+                                               "stack_limit");
+      Value* stack_end = b().CreatePtrToInt(
+        call_frame, ctx_->IntPtrTy, "stack_end");
+
+      Value* stack_overflow = b().CreateICmpULT(stack_end, stack_limit);
+
+      // Check local interrupts (signals, thread step etc.)
+      Value* idx_interrupts[] = {
+        cint(0),
+        cint(offset::VMJIT::check_local_interrupts)
+      };
+
+      Value* check_interrupts = b().CreateLoad(b().CreateGEP(vm_jit, idx_interrupts),
+                                               "check_interrupts");
+
+      // Check global interrupts (GC, stop the world etc.)
+      Value* check_global_interrupts = b().CreateLoad(check_global_interrupts_pos, "check_global_interrupts");
+
+      Value* interrupts = b().CreateOr(check_interrupts, check_global_interrupts, "has_interrupts");
+
+      Value* zero = ConstantInt::get(ctx_->Int8Ty, 0);
+      Value* is_zero = b().CreateICmpNE(interrupts, zero, "needs_interrupts");
+
+      Value* check = b().CreateOr(is_zero, stack_overflow, "needs_check");
+
+      BasicBlock* prologue_check = info_.new_block("prologue_check");
+
+      b().CreateCondBr(check, prologue_check, body_);
+      b().SetInsertPoint(prologue_check);
+
+      Signature sig(ctx_, obj_type);
+      sig << "State";
+      sig << "CallFrame";
+
+      Value* call_args[] = { info_.state(), call_frame };
 
       Value* ret = sig.call("rbx_prologue_check", call_args, 2, "ci", b());
       b().CreateCondBr(
@@ -597,26 +627,26 @@ namespace jit {
 
     pass_one(body_);
 
-    info_.context().init_variables(b());
+    info_.context()->init_variables(b());
 
-    counter2_ = b().CreateAlloca(ls_->Int32Ty, 0, "counter2");
+    counter2_ = b().CreateAlloca(ctx_->Int32Ty, 0, "counter2");
 
-    valid_flag = b().CreateAlloca(ls_->Int1Ty, 0, "valid_flag");
+    valid_flag = b().CreateAlloca(ctx_->Int1Ty, 0, "valid_flag");
 
     Value* cfstk = b().CreateAlloca(obj_type,
-        cint((sizeof(CallFrame) / sizeof(Object*)) + vmm_->stack_size),
+        cint((sizeof(CallFrame) / sizeof(Object*)) + machine_code_->stack_size),
         "cfstk");
 
     Value* var_mem = b().CreateAlloca(obj_type,
-        cint((sizeof(StackVariables) / sizeof(Object*)) + vmm_->number_of_locals),
+        cint((sizeof(StackVariables) / sizeof(Object*)) + machine_code_->number_of_locals),
         "var_mem");
 
     call_frame = b().CreateBitCast(
         cfstk,
         llvm::PointerType::getUnqual(cf_type), "call_frame");
 
-    if(ls_->include_profiling()) {
-      method_entry_ = b().CreateAlloca(ls_->Int8Ty,
+    if(ctx_->llvm_state()->include_profiling()) {
+      method_entry_ = b().CreateAlloca(ctx_->Int8Ty,
           cint(sizeof(tooling::MethodEntry)),
           "method_entry");
 

@@ -1,10 +1,12 @@
+# -*- encoding: us-ascii -*-
+
 ##
 # Contains all logic for gathering and displaying backtraces.
 
 class Rubinius::Backtrace
   include Enumerable
 
-  MAX_WIDTH = 36
+  MAX_WIDTH_PERCENTAGE = 45
   MIN_WIDTH = 20
 
   attr_accessor :first_color
@@ -75,7 +77,8 @@ class Rubinius::Backtrace
       end
     end
 
-    max = MAX_WIDTH if max > MAX_WIDTH
+    max_width = (@width * (MAX_WIDTH_PERCENTAGE / 100.0)).to_i
+    max = max_width if max > max_width
 
     str = ""
     lines.each do |recv, location, rec_times|
@@ -92,11 +95,14 @@ class Rubinius::Backtrace
         start = " #{' ' * spaces}#{recv} at "
       end
 
-      line_break = @width - start.size - 1
+      # start.size without the escapes
+      start_size = 1 + spaces + recv.size + 4
+
+      line_break = @width - start_size - 1
       line_break = nil if line_break < @min_width
 
       if line_break and pos.size >= line_break
-        indent = start.size
+        indent = start_size
 
         new_pos = ""
         bit = ""
@@ -125,7 +131,7 @@ class Rubinius::Backtrace
         str << new_pos
         str << clear
       else
-        if start.size > @width - @min_width
+        if start_size > @width - @min_width
           str << "#{color} #{start}\\\n          #{pos}#{clear}"
         else
           str << "#{color} #{start}#{pos}#{clear}"

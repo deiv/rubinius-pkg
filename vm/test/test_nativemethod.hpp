@@ -18,7 +18,8 @@ class TestNativeMethod : public CxxTest::TestSuite, public VMTest {
   }
 
   void test_native_method_frame_get_object() {
-    NativeMethodFrame nmf(NULL);
+    NativeMethodEnvironment* nme = create_native_method_environment();
+    NativeMethodFrame nmf(nme, NULL, NULL);
     String* str = String::create(state, "test");
     Integer* id = str->id(state);
     VALUE handle = nmf.get_handle(state, str);
@@ -27,13 +28,12 @@ class TestNativeMethod : public CxxTest::TestSuite, public VMTest {
   }
 
   NativeMethodEnvironment* create_native_method_environment() {
-    NativeMethodFrame* nmf = new NativeMethodFrame(NULL);
-    CallFrame* cf = new CallFrame;
     NativeMethodEnvironment* nme = new NativeMethodEnvironment(state);
+    NativeMethodFrame* nmf = new NativeMethodFrame(nme, NULL, NULL);
+    CallFrame* cf = new CallFrame;
 
     nme->set_current_call_frame(cf);
     nme->set_current_native_frame(nmf);
-    nme->set_state(state);
 
     return nme;
   }
@@ -44,34 +44,34 @@ class TestNativeMethod : public CxxTest::TestSuite, public VMTest {
     delete nme;
   }
 
-  void test_native_method_environment_get_Qfalse_handle() {
+  void test_native_method_environment_get_cFalse_handle() {
     NativeMethodEnvironment* nme = create_native_method_environment();
 
-    TS_ASSERT_EQUALS(cCApiHandleQfalse, nme->get_handle(Qfalse));
+    TS_ASSERT_EQUALS(Qfalse, nme->get_handle(cFalse));
 
     destroy_native_method_environment(nme);
   }
 
-  void test_native_method_environment_get_Qtrue_handle() {
+  void test_native_method_environment_get_cTrue_handle() {
     NativeMethodEnvironment* nme = create_native_method_environment();
 
-    TS_ASSERT_EQUALS(cCApiHandleQtrue, nme->get_handle(Qtrue));
+    TS_ASSERT_EQUALS(Qtrue, nme->get_handle(cTrue));
 
     destroy_native_method_environment(nme);
   }
 
-  void test_native_method_environment_get_Qnil_handle() {
+  void test_native_method_environment_get_cNil_handle() {
     NativeMethodEnvironment* nme = create_native_method_environment();
 
-    TS_ASSERT_EQUALS(cCApiHandleQnil, nme->get_handle(Qnil));
+    TS_ASSERT_EQUALS(Qnil, nme->get_handle(cNil));
 
     destroy_native_method_environment(nme);
   }
 
-  void test_native_method_environment_get_Qundef_handle() {
+  void test_native_method_environment_get_cUndef_handle() {
     NativeMethodEnvironment* nme = create_native_method_environment();
 
-    TS_ASSERT_EQUALS(cCApiHandleQundef, nme->get_handle(Qundef));
+    TS_ASSERT_EQUALS(Qundef, nme->get_handle(cUndef));
 
     destroy_native_method_environment(nme);
   }

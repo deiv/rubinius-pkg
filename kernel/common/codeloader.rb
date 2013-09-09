@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 # CodeLoader implements the logic for Kernel#load and Kernel#require. Only the
 # implementation-agnostic behavior is provided in this file. That includes
 # resolving files according to $LOAD_PATH and updating $LOADED_FEATURES.
@@ -20,6 +22,7 @@ module Rubinius
     #   @type : the kind of file to load, :ruby or :library
     def initialize(path)
       @path = Rubinius::Type.coerce_to_path path
+      @short_path = nil
       @load_path = nil
       @file_path = nil
       @feature = nil
@@ -27,17 +30,100 @@ module Rubinius
       @type = nil
     end
 
+    Lock = Object.new
+
+    class RequireRequest
+      def initialize(type, map, key)
+        @type = type
+        @map = map
+        @key = key
+        @for = nil
+        @loaded = false
+        @remove = true
+      end
+
+      attr_reader :type
+
+      def take!
+        lock
+        @for = Thread.current
+      end
+
+      def current_thread?
+        @for == Thread.current
+      end
+
+      def lock
+        Rubinius.lock(self)
+      end
+
+      def unlock
+        Rubinius.unlock(self)
+      end
+
+      def wait
+        Rubinius.synchronize(Lock) do
+          @remove = false
+        end
+
+        take!
+
+        Rubinius.synchronize(Lock) do
+          if @loaded
+            @map.delete @key
+          end
+        end
+
+        return @loaded
+      end
+
+      def passed!
+        @loaded = true
+      end
+
+      def remove!
+        Rubinius.synchronize(Lock) do
+          if @loaded or @remove
+            @map.delete @key
+          end
+        end
+
+        unlock
+      end
+    end
+
     # Searches for and loads Ruby source files and shared library extension
     # files. See CodeLoader.require for the rest of Kernel#require
     # functionality.
     def require
-      Rubinius.synchronize(self) do
-        return false unless resolve_require_path
-        return false if CodeLoader.loading? @load_path
+      wait = false
+      req = nil
 
-        if @type == :ruby
-          CodeLoader.loading @load_path
+      reqs = CodeLoader.load_map
+
+      Rubinius.synchronize(Lock) do
+        return unless resolve_require_path
+
+        if req = reqs[@load_path]
+          return if req.current_thread?
+          wait = true
+        else
+          req = RequireRequest.new(@type, reqs, @load_path)
+          reqs[@load_path] = req
+          req.take!
         end
+      end
+
+      if wait
+        if req.wait
+          # While waiting the code was loaded by another thread.
+          # We need to release the lock so other threads can continue too.
+          req.unlock
+          return false
+        end
+
+        # The other thread doing the lock raised an exception
+        # through the require, so we try and load it again here.
       end
 
       if @type == :ruby
@@ -46,7 +132,7 @@ module Rubinius
         load_library
       end
 
-      return @type
+      return req
     end
 
     # Searches for and loads Ruby source files only. The files may have any
@@ -61,22 +147,25 @@ module Rubinius
     # autoloads use this, Kernel#load does not.
     def add_feature
       $LOADED_FEATURES << @feature
+      add_feature_to_index
     end
 
-    # Finalize the loading process by removing the lock to prevent concurrent
-    # loading of the same file.
-    def finished
-      CodeLoader.loaded @load_path
+    def add_feature_to_index(feature = @feature)
+      self.class.loaded_features_dup = $LOADED_FEATURES.dup
+      self.class.loaded_features_index[@short_path] = feature
     end
 
     # Hook support. This allows code to be told when a file was just compiled,
     # or when it has finished loading.
     @compiled_hook = Rubinius::Hook.new
     @loaded_hook = Rubinius::Hook.new
+    @loaded_features_index = Hash.new(false)
 
     class << self
       attr_reader :compiled_hook
       attr_reader :loaded_hook
+      attr_reader :loaded_features_index
+      attr_accessor :loaded_features_dup
 
       attr_writer :source_extension
 
@@ -91,27 +180,6 @@ module Rubinius
         @load_map ||= {}
       end
 
-      # Add +path+ to the map of files that are being loaded.
-      def loading(path)
-        load_map[path] = Thread.current unless load_map.key? path
-      end
-
-      # Removes +path+ from the map of files that are in the process of being
-      # loaded.
-      def loaded(path)
-        load_map.delete path
-      end
-
-      # Returns true if +path+ is in process of being loaded by any thread.
-      def loading?(path)
-        while thread = load_map[path]
-          return true if thread == Thread.current
-          thread.join
-        end
-
-        return false
-      end
-
       # Returns true if +name+ includes a recognized extension (e.g. .rb or
       # the platform's shared library extension) and $LOADED_FEATURES includes
       # +name+. Otherwise returns true if $LOADED_FEATURES includes +name+
@@ -119,7 +187,7 @@ module Rubinius
       # Otherwise, returns false. Called by both Kernel#require and when an
       # autoload constant is being registered by Module#autoload.
       def feature_provided?(name)
-        if name.suffix?(".rb") or name.suffix?(LIBSUFFIX)
+        if name.suffix?(CodeLoader.source_extension) or name.suffix?(LIBSUFFIX)
           return loaded? name
         elsif name.suffix? ".so"
           # This handles cases like 'require "openssl.so"' on
@@ -127,8 +195,7 @@ module Rubinius
           # is not ".so".
           return loaded?(name[0..-4] + LIBSUFFIX)
         else
-          return true if loaded?(name + ".rb")
-          return loaded?(name + LIBSUFFIX)
+          return true if loaded?(name + CodeLoader.source_extension)
         end
 
         return false
@@ -137,7 +204,18 @@ module Rubinius
       # Returns true if $LOADED_FEATURES includes +feature+. Otherwise,
       # returns false.
       def loaded?(feature)
-        $LOADED_FEATURES.include? feature
+        return true if $LOADED_FEATURES.include? feature
+
+        if !features_index_up_to_date?
+          loaded_features_index.clear
+          return false
+        end
+
+        loaded_features_index.include?(feature)
+      end
+
+      def features_index_up_to_date?
+        loaded_features_dup == $LOADED_FEATURES
       end
 
       # Loads a Ruby source file or shared library extension. Called by
@@ -145,16 +223,22 @@ module Rubinius
       def require(name)
         loader = new name
 
-        case loader.require
+        req = loader.require
+        return false unless req
+
+        case req.type
         when :ruby
           begin
-
-            Rubinius.run_script loader.cm
+            Rubinius.run_script loader.compiled_code
+          else
+            req.passed!
           ensure
-            loader.finished
+            req.remove!
           end
         when :library
+          req.remove!
         when false
+          req.remove!
           return false
         else
           raise "received unknown type from #{loader.class}#require"
@@ -168,9 +252,8 @@ module Rubinius
 
     # Returns true if the path exists, is a regular file, and is readable.
     def loadable?(path)
-      return false unless File.exists? path
-
-      @stat = File.stat path
+      @stat = File::Stat.stat path
+      return false unless @stat
       @stat.file? and @stat.readable?
     end
 
@@ -196,20 +279,16 @@ module Rubinius
     # name in $LOAD_PATH.
     #
     # Returns true if a loadable file is found, otherwise returns false.
-    def verify_load_path(path, loading=false)
-      path = File.expand_path path if home_path? path
+    def verify_load_path(file, loading=false)
+      file = File.expand_path file if home_path? file
 
-      @feature = path
-
-      if qualified_path? path
-        return false unless loadable? path
+      if qualified_path? file
+        return false unless loadable? file
       else
-        return false unless path = search_load_path(path, loading)
-        path = "./#{path}" unless qualified_path? path
+        return false unless path = search_load_path(file, loading)
       end
 
-      @file_path = path
-      @load_path = File.expand_path path
+      update_paths(file, path || file)
 
       return true
     end
@@ -230,13 +309,7 @@ module Rubinius
       return false unless loadable? path
 
       @type = type
-      @feature = file
-      @load_path = path
-      if qualified_path? path
-        @file_path = path
-      else
-        @file_path = "./#{path}"
-      end
+      update_paths(file, path)
 
       return true
     end
@@ -262,9 +335,7 @@ module Rubinius
       return false unless loadable? file
 
       @type = type
-      @feature = file
-      @file_path = file
-      @load_path = file
+      update_paths(file, file)
 
       return true
     end
@@ -290,8 +361,6 @@ module Rubinius
         return false unless search_require_path(name)
       end
 
-      @load_path = File.expand_path @load_path
-
       return true
     end
 
@@ -311,12 +380,16 @@ module Rubinius
         @type = :library
       end
 
+      return false if CodeLoader.feature_provided?(@path)
+
       if @type
-        return false if CodeLoader.feature_provided? @path
-        return true if verify_load_path @path
+        if verify_load_path(@path)
+          return false if CodeLoader.feature_provided?(@feature)
+          return true
+        end
       else
         if verify_require_path(@path)
-          return false if CodeLoader.feature_provided? @feature
+          return false if CodeLoader.feature_provided?(@feature)
           return true
         end
       end

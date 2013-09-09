@@ -1,6 +1,8 @@
 module Gem
+  DEFAULT_HOST = "https://rubygems.org"
 
   @post_install_hooks   ||= []
+  @done_installing_hooks  ||= []
   @post_uninstall_hooks ||= []
   @pre_uninstall_hooks  ||= []
   @pre_install_hooks    ||= []
@@ -9,7 +11,7 @@ module Gem
   # An Array of the default sources that come with RubyGems
 
   def self.default_sources
-    %w[http://rubygems.org/]
+    %w[https://rubygems.org/]
   end
 
   ##
@@ -17,30 +19,58 @@ module Gem
   # specified in the environment
 
   def self.default_dir
-    if defined? RUBY_FRAMEWORK_VERSION then
-      File.join File.dirname(ConfigMap[:sitedir]), 'Gems',
-                ConfigMap[:ruby_version]
-    elsif ConfigMap[:rubylibprefix] then
-      File.join(ConfigMap[:rubylibprefix], 'gems',
-                ConfigMap[:ruby_version])
-    else
-      File.join(ConfigMap[:libdir], ruby_engine, 'gems',
-                ConfigMap[:ruby_version])
-    end
+    path = if defined? RUBY_FRAMEWORK_VERSION then
+             [
+               File.dirname(ConfigMap[:sitedir]),
+               'Gems',
+               ConfigMap[:ruby_version]
+             ]
+           elsif ConfigMap[:rubylibprefix] then
+             [
+              ConfigMap[:rubylibprefix],
+              'gems',
+              ConfigMap[:ruby_version]
+             ]
+           else
+             [
+               ConfigMap[:libdir],
+               ruby_engine,
+               'gems',
+               ConfigMap[:ruby_version]
+             ]
+           end
+
+    @default_dir ||= File.join(*path)
+  end
+
+  ##
+  # Paths where RubyGems' .rb files and bin files are installed
+
+  def self.default_rubygems_dirs
+    nil # default to standard layout
   end
 
   ##
   # Path for gems in the user's home directory
 
   def self.user_dir
-    File.join Gem.user_home, '.gem', ruby_engine, ConfigMap[:ruby_version]
+    parts = [Gem.user_home, '.gem', ruby_engine]
+    parts << ConfigMap[:ruby_version] unless ConfigMap[:ruby_version].empty?
+    File.join parts
+  end
+
+  ##
+  # How String Gem paths should be split.  Overridable for esoteric platforms.
+
+  def self.path_separator
+    File::PATH_SEPARATOR
   end
 
   ##
   # Default gem load path
 
   def self.default_path
-    if File.exist? Gem.user_home then
+    if Gem.user_home && File.exist?(Gem.user_home) then
       [user_dir, default_dir]
     else
       [default_dir]
@@ -73,20 +103,6 @@ module Gem
   end
 
   ##
-  # The default system-wide source info cache directory
-
-  def self.default_system_source_cache_dir
-    File.join Gem.dir, 'source_cache'
-  end
-
-  ##
-  # The default user-specific source info cache directory
-
-  def self.default_user_source_cache_dir
-    File.join Gem.user_home, '.gem', 'source_cache'
-  end
-
-  ##
   # A wrapper around RUBY_ENGINE const that may not be defined
 
   def self.ruby_engine
@@ -97,5 +113,17 @@ module Gem
     end
   end
 
-end
+  ##
+  # The default signing key path
 
+  def self.default_key_path
+    File.join Gem.user_home, ".gem", "gem-private_key.pem"
+  end
+
+  ##
+  # The default signing certificate chain path
+
+  def self.default_cert_path
+    File.join Gem.user_home, ".gem", "gem-public_cert.pem"
+  end
+end

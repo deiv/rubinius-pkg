@@ -1,40 +1,12 @@
-##
-# Objects of class Binding encapsulate the execution context at some
-# particular place in the code and retain this context for future use. The
-# variables, methods, value of self, and possibly an iterator block that can
-# be accessed in this context are all retained. Binding objects can be created
-# using Kernel#binding, and are made available to the callback of
-# Kernel#set_trace_func.
-#
-# These binding objects can be passed as the second argument of the
-# Kernel#eval method, establishing an environment for the evaluation.
-#
-#   class Demo
-#     def initialize(n)
-#       @secret = n
-#     end
-#     def getBinding
-#       return binding()
-#     end
-#   end
-#
-#   k1 = Demo.new(99)
-#   b1 = k1.getBinding
-#   k2 = Demo.new(-3)
-#   b2 = k2.getBinding
-#
-#   eval("@secret", b1)   #=> 99
-#   eval("@secret", b2)   #=> -3
-#   eval("@secret")       #=> nil
-#
-# Binding objects have no class-specific methods.
+# -*- encoding: us-ascii -*-
 
 class Binding
   attr_accessor :variables
-  attr_accessor :code
-  attr_accessor :static_scope
+  attr_accessor :compiled_code
+  attr_accessor :constant_scope
   attr_accessor :proc_environment
   attr_accessor :self
+  attr_accessor :location
 
   def from_proc?
     @proc_environment
@@ -45,26 +17,38 @@ class Binding
   # all the right arguments.
   #
   # +variables+ is a Rubinius::VariableScope object
-  # +code+ is a Rubinius::CompiledMethod object
-  # +static_scope+ is a Rubinius::StaticScope object
+  # +code+ is a Rubinius::CompiledCode object
+  # +constant_scope+ is a Rubinius::ConstantScope object
   #
   # See Kernel#binding in kernel/common/eval.rb for a simple example of
   # creating a Binding object.
   #
-  def self.setup(variables, code, static_scope, recv=nil)
+  def self.setup(variables, code, constant_scope, recv=nil, location=nil)
     bind = allocate()
 
-    bind.self = recv || variables.self
+    bind.self = self_context(recv, variables)
     bind.variables = variables
-    bind.code = code
-    bind.static_scope = static_scope
+    bind.compiled_code = code
+    bind.constant_scope = constant_scope
+    bind.location = location
+
     return bind
+  end
+
+  def line_number
+    if proc_environment
+      proc_environment.line
+    else
+      location ? location.line : 1
+    end
   end
 
   # Evaluates the Ruby expression(s) in string, in the binding‘s context.
   # If the optional filename and lineno parameters are present,
   # they will be used when reporting syntax errors.
-  def eval(expr, *arg)
-    Kernel.eval(expr, self, *arg)
+  def eval(expr, filename=nil, lineno=nil)
+    lineno ||= filename ? 1 : line_number
+
+    Kernel.eval(expr, self, filename, lineno)
   end
 end

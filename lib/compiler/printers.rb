@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   class Compiler
     class Printer < Stage
@@ -38,21 +40,31 @@ module Rubinius
         @method_names.include? name
       end
 
-      def print_header(cm)
-        name = cm.name.inspect
+      def print_header(code)
+        name = code.name.inspect
         size = (SEPARATOR_SIZE - name.size - 2) / 2
         size = 1 if size <= 0
         puts "\n#{"=" * size} #{name} #{"=" * (size + name.size % 2)}"
         print "Arguments:   "
-        print "#{cm.required_args} required, "
-        print "#{cm.post_args} post, "
-        print "#{cm.total_args} total"
-        print cm.splat ? ", (splat #{cm.splat})\n" : "\n"
-        puts "Arity:       #{cm.arity}"
-        print "Locals:      #{cm.local_count}"
-        print cm.local_count > 0 ? ": #{cm.local_names.join ", "}\n" : "\n"
-        puts "Stack size:  #{cm.stack_size}"
-        print_lines cm
+        print "#{code.required_args} required, "
+        print "#{code.post_args} post, "
+        print "#{code.total_args} total"
+        print code.splat ? ", (splat #{code.splat})\n" : "\n"
+        puts "Arity:       #{code.arity}"
+        print "Locals:      #{code.local_count}"
+        print code.local_count > 0 ? ": #{code.local_names.join ", "}\n" : "\n"
+        puts "Stack size:  #{code.stack_size}"
+        literals = code.literals.collect do |literal|
+          case literal
+          when CompiledCode
+            "<compiled code>"
+          else
+            literal.inspect
+          end
+        end
+        print "Literals:    #{literals.size}"
+        print code.literals.size > 0 ? ": #{literals.join ", "}\n" : "\n"
+        print_lines code
         puts
       end
 
@@ -60,27 +72,34 @@ module Rubinius
         puts "-" * SEPARATOR_SIZE
       end
 
-      def print_lines(cm)
-        print "Lines to IP: "
-        size = cm.lines.size - 1
+      def print_lines(code)
+        lines = code.lines
+        size = lines.size - 1
         i = 1
+
+        if lines[0] == -1
+          puts  "Line:        #{lines[1]}"
+          i += 2
+        end
+
+        print "Lines to IP: "
         while i < size
-          print "#{cm.lines[i]}: #{cm.lines[i - 1]}..#{cm.lines[i + 1] - 1}"
+          print "#{lines[i]}: #{lines[i - 1]}..#{lines[i + 1] - 1}"
           i += 2
           print ", " if i < size
         end
         puts
       end
 
-      def print_method(cm)
-        if match? cm.name
-          print_header cm
-          puts cm.decode if @bytecode
+      def print_method(code)
+        if match? code.name
+          print_header code
+          puts code.decode if @bytecode
           print_footer
         end
 
-        cm.literals.each do |m|
-          next unless m.kind_of? Rubinius::CompiledMethod
+        code.literals.each do |m|
+          next unless m.kind_of? Rubinius::CompiledCode
           print_method m
         end
       end

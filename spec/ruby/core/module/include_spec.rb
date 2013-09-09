@@ -2,6 +2,18 @@ require File.expand_path('../../../spec_helper', __FILE__)
 require File.expand_path('../fixtures/classes', __FILE__)
 
 describe "Module#include" do
+  ruby_version_is "" ... "2.1" do
+    it "is a private method" do
+      Module.should have_private_instance_method(:include, true)
+    end
+  end
+
+  ruby_version_is "2.1" do
+    it "is a public method" do
+      Module.should have_public_instance_method(:include, true)
+    end
+  end
+
   it "calls #append_features(self) in reversed order on each module" do
     $appended_modules = []
 
@@ -59,6 +71,12 @@ describe "Module#include" do
     end
   end
 
+  it "shadows constants from outer scopes" do
+    ModuleSpecs::ShadowingOuter::Foo.get.should == 123
+    ModuleSpecs::ShadowingOuter::Foo.send(:include, ModuleSpecs::ShadowingOuter::N)
+    ModuleSpecs::ShadowingOuter::Foo.get.should == 456
+  end
+
   it "does not override existing constants in modules and classes" do
     ModuleSpecs::A::OVERRIDE.should == :a
     ModuleSpecs::B::OVERRIDE.should == :b
@@ -79,11 +97,6 @@ describe "Module#include" do
       ModuleSpecs::B.instance_methods.should include(:ma,:mb)
       ModuleSpecs::C.instance_methods.should include(:ma,:mb)
     end
-  end
-
-  it "imports constants to the toplevel" do
-    eval "include ModuleSpecs::Z", TOPLEVEL_BINDING
-    MODULE_SPEC_TOPLEVEL_CONSTANT.should == 1
   end
 
   ruby_version_is ""..."1.9" do

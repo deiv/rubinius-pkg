@@ -2,39 +2,30 @@
 // because it uses a whole bunch of local classes and it's cleaner to have
 // all that be in it's own file.
 
-#include "vm/config.h"
-
-#include "vm/vm.hpp"
-
+#include "builtin/array.hpp"
+#include "builtin/bytearray.hpp"
+#include "builtin/class.hpp"
+#include "builtin/object.hpp"
+#include "builtin/string.hpp"
+#include "builtin/symbol.hpp"
+#include "builtin/system.hpp"
+#include "builtin/tuple.hpp"
+#include "builtin/variable_scope.hpp"
 #include "gc/gc.hpp"
 #include "gc/walker.hpp"
 #include "objectmemory.hpp"
-
-#include "builtin/object.hpp"
-#include "builtin/array.hpp"
-#include "builtin/bytearray.hpp"
-#include "builtin/chararray.hpp"
-#include "builtin/symbol.hpp"
-#include "builtin/module.hpp"
-#include "builtin/string.hpp"
-#include "builtin/class.hpp"
-#include "builtin/tuple.hpp"
-#include "builtin/variable_scope.hpp"
-#include "builtin/system.hpp"
-
 #include "object_utils.hpp"
 
 #include <fcntl.h>
+#include <map>
+#include <vector>
+#include <algorithm>
+
 #ifdef RBX_WINDOWS
 #include <winsock2.h>
 #else
 #include <arpa/inet.h>
 #endif
-
-#include <map>
-#include <vector>
-#include <algorithm>
-#include <iostream>
 
 namespace rubinius {
   typedef std::map<Object*, int> Identities;
@@ -102,13 +93,13 @@ namespace rubinius {
 
       symbols_[sym] = id;
 
-      const char* str = sym->c_str(state);
-      int sz = strlen(str);
+      std::string str = sym->cpp_str(state);
+      int sz = str.size();
 
       write1(cSymbolCode);
       write4(id);
       write4(sz);
-      write_raw(str, sz);
+      write_raw(str.data(), sz);
 
       return id;
     }
@@ -181,11 +172,11 @@ namespace rubinius {
       }
     }
 
-    int id() {
+    int id() const {
       return id_;
     }
 
-    Symbol* name() {
+    Symbol* name() const {
       return name_;
     }
 
@@ -230,7 +221,7 @@ namespace rubinius {
 
   static Layout* find_layout(STATE, Object* obj, Layout* root, Array* ary, SymbolList& syms) {
     // Collect all the ivar names that we want to pull out
-    TypeInfo* ti = state->om->type_info[obj->type_id()];
+    TypeInfo* ti = state->memory()->type_info[obj->type_id()];
     for(TypeInfo::Slots::iterator i = ti->slots.begin();
         i != ti->slots.end();
         ++i) {
@@ -241,7 +232,7 @@ namespace rubinius {
     ary->total(state, Fixnum::from(0));
 
     obj->ivar_names(state, ary);
-    for(size_t i = 0; i < ary->size(); i++) {
+    for(native_int i = 0; i < ary->size(); i++) {
       if(Symbol* sym = try_as<Symbol>(ary->get(state, i))) {
         syms.push_back(sym);
       }
@@ -290,8 +281,8 @@ namespace rubinius {
       return id;
     }
 
-    bool seen_object_p(Object* obj) {
-      Identities::iterator i = ids.find(obj);
+    bool seen_object_p(Object* obj) const {
+      Identities::const_iterator i = ids.find(obj);
       return i != ids.end();
     }
 
@@ -319,7 +310,7 @@ namespace rubinius {
 
       enc.start_object(id);
 
-      enc.write4(obj->size_in_bytes(state));
+      enc.write4(obj->size_in_bytes(state->vm()));
 
       enc.write4(layout->id());
 
@@ -344,7 +335,7 @@ namespace rubinius {
         enc.write4(vs->number_of_locals());
 
         for(int i = 0; i < vs->number_of_locals(); i++) {
-          dump_reference(state, vs->get_local(i));
+          dump_reference(state, vs->get_local(state, i));
         }
       } else if(ByteArray* ba = try_as<ByteArray>(obj)) {
         enc.write2(syms.size() + 1);
@@ -353,13 +344,6 @@ namespace rubinius {
         enc.write1(cBytesCode);
         enc.write4(ba->size());
         enc.write_raw((const char*)ba->raw_bytes(), ba->size());
-      } else if(CharArray* ca = try_as<CharArray>(obj)) {
-        enc.write2(syms.size() + 1);
-        dump_ivars(state, obj, syms);
-
-        enc.write1(cCharsCode);
-        enc.write4(ca->size());
-        enc.write_raw((const char*)ca->raw_bytes(), ca->size());
       } else {
         enc.write2(syms.size());
         dump_ivars(state, obj, syms);
@@ -388,14 +372,14 @@ namespace rubinius {
   };
 
   Object* System::vm_dump_heap(STATE, String* path) {
-    ObjectWalker walker(state->om);
-    GCData gc_data(state);
+    ObjectWalker walker(state->memory());
+    GCData gc_data(state->vm());
 
     // Seed it with the root objects.
     walker.seed(gc_data);
 
-    int fd = open(path->c_str(state), O_CREAT | O_TRUNC | O_WRONLY, 0666);
-    if(fd < 0) return Qnil;
+    int fd = open(path->c_str_null_safe(state), O_CREAT | O_TRUNC | O_WRONLY, 0666);
+    if(fd < 0) return cNil;
 
     HeapDump dump(fd);
 
@@ -410,9 +394,9 @@ namespace rubinius {
 
     dump.footer(state);
 
-    std::cout << "Heap dumped to " << path->c_str(state) << "\n";
+    std::cout << "Heap dumped to " << path->c_str_null_safe(state) << "\n";
     close(fd);
 
-    return Qnil;
+    return cNil;
   }
 }

@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 ##
 # Some terminology notes:
 #
@@ -18,7 +20,7 @@ class Module
   private :included
 
   def self.nesting
-    scope = Rubinius::CompiledMethod.of_sender.scope
+    scope = Rubinius::ConstantScope.of_sender
     nesting = []
     while scope and scope.module != Object
       nesting << scope.module
@@ -70,34 +72,28 @@ class Module
 
     remove_class_variable verify_class_variable_name(name)
   end
-  private :remove_class_variable
 
   def __class_variables__
     Rubinius.primitive :module_class_variables
 
-    raise PrimitiveFailure, "module_class_variables failed"
+    raise PrimitiveFailure, "Module#__class_variables__ primitive failed"
   end
 
   def class_variables
-    Rubinius.convert_to_names(__class_variables__)
+    Rubinius::Type.convert_to_names(__class_variables__)
   end
 
   def name
-    @module_name ? @module_name.to_s : ""
-  end
-
-  alias_method :__name__, :name
-
-  def __path__
-    return @module_name if @module_name
-    inspect
+    Rubinius::Type.module_name self
   end
 
   def to_s
-    @module_name ? @module_name.to_s : super
+    Rubinius::Type.module_inspect self
   end
 
-  alias_method :inspect, :to_s
+  def inspect
+    to_s
+  end
 
   def lookup_method(sym, check_object_too=true, trim_im=true)
     mod = self
@@ -125,23 +121,31 @@ class Module
   end
 
   def undef_method(*names)
-    names.each do |name|
+    return self if names.empty?
+    names.map!{ |name| Rubinius::Type.coerce_to_symbol name }
+    Rubinius.check_frozen
+
+    names.each do |name|  
       # Will raise a NameError if the method doesn't exist.
-      instance_method(name)
+      instance_method name
       undef_method! name
     end
 
-    nil
+    self
   end
 
   # Like undef_method, but doesn't even check that the method exists. Used
   # mainly to implement rb_undef_method.
   def undef_method!(name)
+    Rubinius.check_frozen
     name = Rubinius::Type.coerce_to_symbol(name)
     @method_table.store name, nil, :undef
-    Rubinius::VM.reset_method_cache(name)
-
-    if Rubinius::Type.object_respond_to? self, :method_undefined
+    Rubinius::VM.reset_method_cache self, name
+    if obj = Rubinius::Type.singleton_class_object(self)
+      Rubinius.privately do
+        obj.singleton_method_undefined(name)
+      end
+    else
       method_undefined(name)
     end
 
@@ -151,20 +155,25 @@ class Module
   def remove_method(*names)
     names.each do |name|
       name = Rubinius::Type.coerce_to_symbol(name)
+      Rubinius.check_frozen
 
       unless @method_table.lookup(name)
-        raise NameError, "method `#{name}' not defined in #{self.name}"
+        raise NameError.new("method `#{name}' not defined in #{self.name}", name)
       end
       @method_table.delete name
 
-      Rubinius::VM.reset_method_cache(name)
+      Rubinius::VM.reset_method_cache self, name
 
-      if Rubinius::Type.object_respond_to? self, :method_removed
+      if obj = Rubinius::Type.singleton_class_object(self)
+        Rubinius.privately do
+          obj.singleton_method_removed(name)
+        end
+      else
         method_removed(name)
       end
     end
 
-    nil
+    self
   end
 
   def public_method_defined?(sym)
@@ -191,44 +200,9 @@ class Module
     meth ? meth.public? || meth.protected? : false
   end
 
-  ##
-  # Returns an UnboundMethod corresponding to the given name. The name will be
-  # searched for in this Module as well as any included Modules or
-  # superclasses. The UnboundMethod is populated with the method name and the
-  # Module that the method was located in.
-  #
-  # Raises a TypeError if the given name.to_sym fails and a NameError if the
-  # name cannot be located.
-
-  def instance_method(name)
-    name = Rubinius::Type.coerce_to_symbol name
-
-    mod = self
-    while mod
-      if entry = mod.method_table.lookup(name)
-        break if entry.visibility == :undef
-
-        if meth = entry.method
-          if meth.kind_of? Rubinius::Alias
-            mod =  meth.original_module
-            meth = meth.original_exec
-          end
-
-          mod = mod.module if mod.class == Rubinius::IncludedModule
-
-          return UnboundMethod.new(mod, meth, self, name)
-        end
-      end
-
-      mod = mod.direct_superclass
-    end
-
-    raise NameError, "undefined method `#{name}' for #{self}"
-  end
-
   def instance_methods(all=true)
     ary = []
-    if all and self.direct_superclass
+    if all
       table = Rubinius::LookupTable.new
 
       mod = self
@@ -249,7 +223,7 @@ class Module
       end
     end
 
-    Rubinius.convert_to_names ary
+    Rubinius::Type.convert_to_names ary
   end
 
   def public_instance_methods(all=true)
@@ -286,28 +260,31 @@ class Module
       end
     end
 
-    Rubinius.convert_to_names ary
+    Rubinius::Type.convert_to_names ary
   end
 
   private :filter_methods
 
   def define_method(name, meth = undefined, &prc)
-    if meth.equal?(undefined) and !block_given?
+    if undefined.equal?(meth) and !block_given?
       raise ArgumentError, "tried to create Proc object without a block"
     end
 
-    meth = prc if meth.equal?(undefined)
+    meth = prc if undefined.equal?(meth)
 
     name = Rubinius::Type.coerce_to_symbol name
 
     case meth
-    when Proc::Method
-      cm = Rubinius::DelegatedMethod.new(name, :call, meth, false)
     when Proc
-      be = meth.block.dup
-      be.change_name name
-      cm = Rubinius::BlockEnvironment::AsMethod.new(be)
-      meth = lambda(&meth)
+      if meth.ruby_method
+        code = Rubinius::DelegatedMethod.new(name, :call, meth, false)
+      else
+        be = meth.block.dup
+        be.change_name name
+        code = Rubinius::BlockEnvironment::AsMethod.new(be)
+        meth = meth.dup
+        meth.lambda_style!
+      end
     when Method
       exec = meth.executable
       # We see through delegated methods because code creates these crazy calls
@@ -315,27 +292,23 @@ class Module
       # a huge delegated method chain. So instead, just see through them at one
       # level always.
       if exec.kind_of? Rubinius::DelegatedMethod
-        cm = exec
+        code = exec
       else
-        cm = Rubinius::DelegatedMethod.new(name, :call_on_instance, meth.unbind, true)
+        code = Rubinius::DelegatedMethod.new(name, :call_on_instance, meth.unbind, true)
       end
     when UnboundMethod
       exec = meth.executable
       # Same reasoning as above.
       if exec.kind_of? Rubinius::DelegatedMethod
-        cm = exec
+        code = exec
       else
-        cm = Rubinius::DelegatedMethod.new(name, :call_on_instance, meth, true)
+        code = Rubinius::DelegatedMethod.new(name, :call_on_instance, meth, true)
       end
     else
       raise TypeError, "wrong argument type #{meth.class} (expected Proc/Method)"
     end
 
-    @method_table.store name, cm, :public
-    Rubinius::VM.reset_method_cache name
-
-    method_added name
-
+    Rubinius.add_method name, code, self, :public
     meth
   end
 
@@ -344,11 +317,7 @@ class Module
   def thunk_method(name, value)
     thunk = Rubinius::Thunk.new(value)
     name = Rubinius::Type.coerce_to_symbol name
-
-    @method_table.store name, thunk, :public
-    Rubinius::VM.reset_method_cache name
-
-    method_added(name)
+    Rubinius.add_method name, thunk, self, :public
 
     name
   end
@@ -396,7 +365,7 @@ class Module
       raise NoMethodError, "Unknown #{where}method '#{name}' to make #{vis.to_s} (#{self})"
     end
 
-    Rubinius::VM.reset_method_cache name
+    Rubinius::VM.reset_method_cache self, name
 
     return name
   end
@@ -404,23 +373,36 @@ class Module
   def set_class_visibility(meth, vis)
     Rubinius::Type.object_singleton_class(self).set_visibility meth, vis, "class "
   end
+  private :set_class_visibility
 
   def protected(*args)
     if args.empty?
-      Rubinius::VariableScope.of_sender.method_visibility = :protected
-      return
+      vs = Rubinius::VariableScope.of_sender
+      until vs.top_level_visibility?
+        break unless vs.parent
+        vs = vs.parent
+      end
+      vs.method_visibility = :protected
+    else
+      args.each { |meth| set_visibility(meth, :protected) }
     end
 
-    args.each { |meth| set_visibility(meth, :protected) }
+    self
   end
 
   def public(*args)
     if args.empty?
-      Rubinius::VariableScope.of_sender.method_visibility = nil
-      return
+      vs = Rubinius::VariableScope.of_sender
+      until vs.top_level_visibility?
+        break unless vs.parent
+        vs = vs.parent
+      end
+      vs.method_visibility = nil
+    else
+      args.each { |meth| set_visibility(meth, :public) }
     end
 
-    args.each { |meth| set_visibility(meth, :public) }
+    self
   end
 
   def private_class_method(*args)
@@ -441,72 +423,20 @@ class Module
     raise LocalJumpError, "Missing block" unless block_given?
 
     env = prc.block
-    static_scope = env.repoint_scope self
-    return env.call_under(self, static_scope, *args)
+    constant_scope = env.repoint_scope self
+    return env.call_under(self, constant_scope, true, *args)
   end
-
   alias_method :class_exec, :module_exec
 
-  def constants
-    tbl = Rubinius::LookupTable.new
-
-    @constant_table.each do |name, val|
-      tbl[name] = true
-    end
-
-    current = self.direct_superclass
-
-    while current and current != Object
-      current.constant_table.each do |name, val|
-        tbl[name] = true unless tbl.has_key? name
-      end
-
-      current = current.direct_superclass
-    end
-
-    # special case: Module.constants returns Object's constants
-    if self.equal? Module
-      Object.constant_table.each do |name, val|
-        tbl[name] = true unless tbl.has_key? name
-      end
-    end
-
-    Rubinius.convert_to_names tbl.keys
-  end
-
-  def const_get(name)
-    name = normalize_const_name(name)
-
-    current, constant = self, undefined
-
-    while current
-      constant = current.constant_table.fetch name, undefined
-      unless constant.equal?(undefined)
-        constant = constant.call if constant.kind_of?(Autoload)
-        return constant
-      end
-
-      current = current.direct_superclass
-    end
-
-    if instance_of?(Module)
-      constant = Object.constant_table.fetch name, undefined
-      unless constant.equal?(undefined)
-        constant = constant.call if constant.kind_of?(Autoload)
-        return constant
-      end
-    end
-
-    const_missing(name)
-  end
-
   def const_set(name, value)
-    if Rubinius::Type.object_kind_of?(value, Module)
-      value.set_name_if_necessary(name, self)
+    name = Rubinius::Type.coerce_to_constant_name name
+    Rubinius.check_frozen
+
+    if Rubinius::Type.object_kind_of? value, Module
+      Rubinius::Type.set_module_name value, name, self
     end
 
-    name = normalize_const_name(name)
-    @constant_table[name] = value
+    @constant_table.store(name, value, :public)
     Rubinius.inc_global_serial
 
     return value
@@ -521,7 +451,17 @@ class Module
   # with the name.
 
   def const_missing(name)
-    raise NameError, "Missing or uninitialized constant: #{self.__name__}::#{name}"
+    unless self == Object
+      mod_name = "#{Rubinius::Type.module_name self}::"
+    end
+    case Rubinius.constant_missing_reason
+    when :private
+      msg = "Private constant: #{mod_name}#{name}"
+    else
+      msg = "Missing or uninitialized constant: #{mod_name}#{name}"
+    end
+
+    raise NameError.new(msg, name)
   end
 
   def <(other)
@@ -533,15 +473,13 @@ class Module
     return false if self.equal? other
 
     Rubinius::Type.each_ancestor(self) { |mod| return true if mod.equal?(other) }
+    Rubinius::Type.each_ancestor(other) { |mod| return false if mod.equal?(self) }
 
     nil
   end
 
   def <=(other)
-    return true if self.equal? other
-    lt = self < other
-    return false if lt.nil? && other < self
-    lt
+    equal?(other) || (self < other)
   end
 
   def >(other)
@@ -552,14 +490,7 @@ class Module
   end
 
   def >=(other)
-    unless other.kind_of? Module
-      raise TypeError, "compared with non class/module"
-    end
-
-    return true if self.equal? other
-    gt = self > other
-    return false if gt.nil? && other > self
-    gt
+    equal?(other) || (self > other)
   end
 
   def <=>(other)
@@ -567,65 +498,21 @@ class Module
     return nil unless other.kind_of? Module
 
     lt = self < other
-    if lt.nil?
-      other < self ? 1 : nil
-    else
-      lt ? -1 : 1
-    end
+    return nil if lt.nil?
+    lt ? -1 : 1
   end
 
   def ===(inst)
-    Rubinius.primitive :module_case_compare
-    raise PrimitiveFailure, "Module#=== primitive failed"
-  end
-
-  def set_name_if_necessary(name, mod)
-    return if @module_name
-
-    if mod == Object
-      @module_name = name.to_sym
-    else
-      @module_name = "#{mod.__path__}::#{name}".to_sym
-    end
-  end
-
-  # Install a new Autoload object into the constants table
-  # See kernel/common/autoload.rb
-  def autoload(name, path)
-    unless path.kind_of? String
-      raise TypeError, "autoload filename must be a String"
-    end
-
-    raise ArgumentError, "empty file name" if path.empty?
-
-    return if Rubinius::CodeLoader.feature_provided?(path)
-
-    name = normalize_const_name(name)
-
-    if existing = @constant_table[name]
-      if existing.kind_of? Autoload
-        # If there is already an Autoload here, just change the path to
-        # autoload!
-        existing.set_path(path)
-      else
-        # Trying to register an autoload for a constant that already exists,
-        # ignore the request entirely.
-      end
-
-      return
-    end
-
-    constant_table[name] = Autoload.new(name, self, path)
-    Rubinius.inc_global_serial
-    return nil
+    Rubinius::Type.object_kind_of?(inst, self)
   end
 
   # Is an autoload trigger defined for the given path?
   def autoload?(name)
     name = name.to_sym
-    return unless constant_table.key?(name)
-    trigger = constant_table[name]
-    return unless trigger.kind_of?(Autoload)
+    entry = constant_table.lookup(name)
+    return unless entry
+    trigger = entry.constant
+    return unless trigger && trigger.kind_of?(Autoload)
     trigger.path
   end
 
@@ -639,15 +526,16 @@ class Module
     end
 
     sym = name.to_sym
-    unless constant_table.has_key?(sym)
-      raise NameError, "Missing or uninitialized constant: #{self.__name__}::#{name}"
+    unless constant_table.has_name?(sym)
+      mod_name = Rubinius::Type.module_name self
+      raise NameError, "Missing or uninitialized constant: #{mod_name}::#{name}"
     end
 
     val = constant_table.delete(sym)
     Rubinius.inc_global_serial
 
     # Silly API compact. Shield Autoload instances
-    return nil if val.kind_of? Autoload
+    return nil if Rubinius::Type.object_kind_of?(val, Autoload)
     val
   end
 
@@ -663,19 +551,23 @@ class Module
 
   private :method_added
 
-  def normalize_const_name(name)
-    name = Rubinius::Type.coerce_to_symbol(name)
-
-    unless name.is_constant?
-      raise NameError, "wrong constant name #{name}"
-    end
-
-    name
+  def method_removed(name)
   end
 
-  private :normalize_const_name
+  private :method_removed
+
+  def method_undefined(name)
+  end
+
+  private :method_undefined
 
   def initialize_copy(other)
+    # If the method table is already different, we already
+    # initialized this module.
+    unless @method_table == other.method_table
+      raise TypeError, "already initialized module"
+    end
+
     @method_table = other.method_table.dup
 
     sc_s = Rubinius::Type.object_singleton_class self
@@ -684,14 +576,20 @@ class Module
     sc_s.method_table = sc_o.method_table.dup
     sc_s.superclass = sc_o.direct_superclass
 
-    @constant_table = Rubinius::LookupTable.new
+    @constant_table = Rubinius::ConstantTable.new
 
     other.constant_table.each do |name, val|
       if val.kind_of? Autoload
         val = Autoload.new(val.name, self, val.path)
       end
 
-      @constant_table[name] = val
+      @constant_table.store(name, val, :public)
+    end
+
+    if other == other.origin
+      @origin = self
+    else
+      @origin = other.origin.dup
     end
 
     self
@@ -699,10 +597,10 @@ class Module
 
   private :initialize_copy
 
-  def add_ivars(cm)
-    case cm
-    when Rubinius::CompiledMethod
-      new_ivars = cm.literals.select { |l| l.kind_of?(Symbol) and l.is_ivar? }
+  def add_ivars(code)
+    case code
+    when Rubinius::CompiledCode
+      new_ivars = code.literals.select { |l| l.kind_of?(Symbol) and l.is_ivar? }
       return if new_ivars.empty?
 
       if @seen_ivars
@@ -716,16 +614,18 @@ class Module
       end
     when Rubinius::AccessVariable
       if @seen_ivars
-        @seen_ivars << cm.name
+        unless @seen_ivars.include?(code.name)
+          @seen_ivars << code.name
+        end
       else
-        @seen_ivars = [cm.name]
+        @seen_ivars = [code.name]
       end
     else
-      raise "Unknown type of method to learn ivars - #{cm.class}"
+      raise "Unknown type of method to learn ivars - #{code.class}"
     end
   end
 
-  def dynamic_method(name, file=:dynamic, line=1)
+  def dynamic_method(name, file="(dynamic)", line=1)
     g = Rubinius::Generator.new
     g.name = name.to_sym
     g.file = file.to_sym
@@ -738,13 +638,52 @@ class Module
     g.use_detected
     g.encode
 
-    cm = g.package Rubinius::CompiledMethod
+    code = g.package Rubinius::CompiledCode
 
-    cm.scope =
-      Rubinius::StaticScope.new(self, Rubinius::StaticScope.new(Object))
+    code.scope =
+      Rubinius::ConstantScope.new(self, Rubinius::ConstantScope.new(Object))
 
-    Rubinius.add_method name, cm, self, :public
+    Rubinius.add_method name, code, self, :public
 
-    return cm
+    return code
+  end
+
+  def freeze
+    @method_table.freeze
+    @constant_table.freeze
+    super
+  end
+
+  def attr_reader(name)
+    meth = Rubinius::AccessVariable.get_ivar name
+    @method_table.store name, meth, :public
+    Rubinius::VM.reset_method_cache self, name
+    ivar_name = "@#{name}".to_sym
+    if @seen_ivars
+      @seen_ivars.each do |ivar|
+        return nil if ivar == ivar_name
+      end
+      @seen_ivars[@seen_ivars.size] = ivar_name
+    else
+      @seen_ivars = [ivar_name]
+    end
+    nil
+  end
+
+  def attr_writer(name)
+    meth = Rubinius::AccessVariable.set_ivar name
+    writer_name = "#{name}=".to_sym
+    @method_table.store writer_name, meth, :public
+    Rubinius::VM.reset_method_cache self, writer_name
+    ivar_name = "@#{name}".to_sym
+    if @seen_ivars
+      @seen_ivars.each do |ivar|
+        return nil if ivar == ivar_name
+      end
+      @seen_ivars[@seen_ivars.size] = ivar_name
+    else
+      @seen_ivars = [ivar_name]
+    end
+    nil
   end
 end

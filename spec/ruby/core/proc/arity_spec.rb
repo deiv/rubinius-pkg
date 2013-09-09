@@ -1,6 +1,10 @@
 require File.expand_path('../../../spec_helper', __FILE__)
 require File.expand_path('../fixtures/common', __FILE__)
 
+ruby_version_is "1.9" do
+  require File.expand_path("../versions/arity_1.9", __FILE__)
+end
+
 describe "Proc#arity" do
   before :each do
     @p = ProcSpecs::Arity.new

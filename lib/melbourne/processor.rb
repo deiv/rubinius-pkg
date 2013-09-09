@@ -1,7 +1,8 @@
 module Rubinius
   class Melbourne
     def process_parse_error(message, column, line, source)
-      @syntax_errors << SyntaxError.from(message, column, line, source, @name)
+      msg = "#{message}: #{@name}:#{line}:#{column}"
+      @syntax_errors << SyntaxError.from(msg, column, line, source, @name)
     end
 
     def process_dangling_node
@@ -127,10 +128,16 @@ module Rubinius
 
     def process_colon2(line, outer, name)
       if outer
-        if name == :Type and
-            outer.kind_of? AST::ConstantAccess and
-            outer.name == :Rubinius
-          AST::TypeConstant.new line
+        if outer.kind_of? AST::ConstantAccess and
+           outer.name == :Rubinius
+          case name
+          when :Type
+            AST::TypeConstant.new line
+          when :Mirror
+            AST::MirrorConstant.new line
+          else
+            AST::ScopedConstant.new line, outer, name
+          end
         else
           AST::ScopedConstant.new line, outer, name
         end
@@ -383,6 +390,12 @@ module Rubinius
       AST::Send.new line, AST::Self.new(line), :at_exit, true
     end
 
+    def process_preexe(line)
+      node = AST::PreExe.new line
+      add_pre_exe node
+      node
+    end
+
     def process_redo(line)
       AST::Redo.new line
     end
@@ -508,6 +521,10 @@ module Rubinius
       AST::BlockPass19.new line, arguments, body
     end
 
+    def process_encoding(line, name)
+      AST::Encoding.new line, name
+    end
+
     def process_postarg(line, into, rest)
       AST::PostArg.new line, into, rest
     end
@@ -541,6 +558,12 @@ module Rubinius
       method_send
     end
 
+    def process_for(line, iter, arguments, body)
+      send = AST::Send.new line, iter, :each
+      send.block = AST::For19.new line, arguments, body
+      send
+    end
+
     def process_lambda(line, scope)
       arguments = scope.array.shift
       if scope.array.size == 1
@@ -565,6 +588,10 @@ module Rubinius
       end
     end
 
+    def process_op_asgn_or(line, var, value)
+      AST::OpAssignOr19.new line, var, value
+    end
+
     def process_opt_arg(line, arguments)
       AST::Block.new line, arguments
     end
@@ -572,6 +599,13 @@ module Rubinius
     def process_postexe(line, body)
       node = AST::Send.new line, AST::Self.new(line), :at_exit, true
       node.block = AST::Iter.new line, nil, body
+      node
+    end
+
+    def process_preexe(line, body)
+      node = AST::PreExe19.new line
+      node.block = AST::Iter19.new line, nil, body
+      add_pre_exe node
       node
     end
 

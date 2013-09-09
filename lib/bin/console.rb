@@ -13,7 +13,9 @@ class Console
   end
 
   def connect(notice=true)
-    @agent = Rubinius::Agent.connect "localhost", @port
+    @agent = Rubinius::Agent.connect "localhost", @port do
+      Readline.readline("password> ")
+    end
 
     if notice
       puts "Connected to localhost:#{@port}, host type: #{@agent.handshake[1]}"
@@ -63,7 +65,7 @@ class Console
   def help
     puts <<-STR
 set <var> <value> - Set a variable
-get <var>         - Get a variable
+get <var>         - Get a variable, use "get ." to see the root
 backtrace         - Show backtraces of all Threads
 gdb               - Connect to process via gdb
 pid               - Show process ID
@@ -237,7 +239,9 @@ help              - You're lookin' at it
 
       agents.map do |path|
         pid, port, cmd, exec = File.readlines(path)
-        Agent.new(pid.to_i, port.to_i, cmd.strip, exec.strip)
+        cmd = cmd.strip if cmd
+        exec = exec.strip if exec
+        Agent.new(pid.to_i, port.to_i, cmd, exec)
       end
     end
 

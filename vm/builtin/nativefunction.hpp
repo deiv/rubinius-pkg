@@ -8,6 +8,7 @@
 
 namespace rubinius {
   class FFIData;
+  struct FFIArgInfo;
 
   class NativeFunction : public Executable {
   public:
@@ -17,7 +18,7 @@ namespace rubinius {
     Symbol* name_;         // slot
     Symbol* file_;         // slot
     Fixnum* required_;     // slot
-    NativeFunction* callback_info_; // slot
+    Object* varargs_;      // slot
 
   public:
     FFIData* ffi_data;
@@ -27,7 +28,7 @@ namespace rubinius {
     attr_accessor(name, Symbol);
     attr_accessor(file, Symbol);
     attr_accessor(required, Fixnum);
-    attr_accessor(callback_info, NativeFunction);
+    attr_accessor(varargs, Object);
 
     /* interface */
 
@@ -49,7 +50,10 @@ namespace rubinius {
 
     static Pointer* adjust_tramp(STATE, Object* obj, NativeFunction* orig);
 
-    void prep(STATE, int arg_count, int *arg_types, int ret_type);
+    static bool ffi_arg_info(STATE, Object* type, FFIArgInfo* info);
+    static ffi_type* ffi_type_info(FFIArgInfo* info);
+
+    void prep(STATE, int arg_count, FFIArgInfo* args, FFIArgInfo* ret);
     Object* call(STATE, Arguments& args, CallFrame* call_frame);
 
     class Info : public Executable::Info {
@@ -60,23 +64,31 @@ namespace rubinius {
 
   };
 
+  struct FFIArgInfo {
+    int type;
+    Object* enum_obj;
+    NativeFunction* callback;
+  };
+
   class FFIData: public CodeResource {
   public:
     ffi_cif cif;
     ffi_closure* closure;
+    SharedState* shared;
     Object* callable;
     NativeFunction* function;
+    FFIArgInfo* args_info;
+    FFIArgInfo ret_info;
 
     size_t arg_count;
-    int *arg_types;
-    int ret_type;
     void *ep;
 
-    FFIData(NativeFunction* func,  int count, int* types, int ret);
+    FFIData(STATE, NativeFunction* func,  int count, FFIArgInfo* args, FFIArgInfo* ret);
 
     virtual ~FFIData();
+    void cleanup(State* state, CodeManager* cm) { }
 
-    static FFIData* create(NativeFunction* func, int count, int* types, int ret);
+    static FFIData* create(STATE, NativeFunction* func, int count, FFIArgInfo* args, FFIArgInfo* ret);
   };
 
 }

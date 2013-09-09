@@ -1,14 +1,15 @@
+# -*- encoding: us-ascii -*-
+
 ##
 # Namespace for various POSIX functions.
 
+module Rubinius
 module FFI::Platform::POSIX
   extend FFI::Library
 
   # errors
   attach_function :errno,    'ffi_errno',     [],     :int
   attach_function :errno=,   'ffi_set_errno', [:int], :void
-  attach_function :strerror, [:int], :string
-  attach_function :perror,   [:string], :void
 
   # memory
   attach_function :malloc,   [:size_t], :pointer
@@ -21,6 +22,7 @@ module FFI::Platform::POSIX
   attach_function :access,   [:string, :int], :int
   attach_function :chmod,    [:string, :mode_t], :int
   attach_function :fchmod,   [:int, :mode_t], :int
+  attach_function :lchmod,   [:string, :mode_t], :int
   attach_function :chown,    [:string, :uid_t, :gid_t], :int
   attach_function :fchown,   [:int, :uid_t, :gid_t], :int
   attach_function :lchown,   [:string, :uid_t, :gid_t], :int
@@ -41,16 +43,12 @@ module FFI::Platform::POSIX
 
   # File/IO
   attach_function :fcntl,    [:int, :int, :long], :int
-  attach_function :ioctl,    [:int, :int, :long], :int
+  attach_function :ioctl,    [:int, :ulong, :long], :int
   attach_function :fsync,    [:int], :int
   attach_function :dup,      [:int], :int
 
   #   inspecting
   attach_function :isatty,   [:int], :int
-
-  #   truncating
-  attach_function :truncate,  [:string, :off_t], :int
-  attach_function :ftruncate, [:int, :off_t], :int
 
   #   locking
   attach_function :flock, [:int, :int], :int
@@ -68,6 +66,9 @@ module FFI::Platform::POSIX
 
   attach_function :setregid, [:gid_t, :gid_t], :int
   attach_function :setreuid, [:uid_t, :uid_t], :int
+
+  attach_function :setresgid, [:gid_t, :gid_t, :gid_t], :int
+  attach_function :setresuid, [:uid_t, :uid_t, :uid_t], :int
 
   attach_function :getpriority, [:int, :id_t], :int
   attach_function :setpriority, [:int, :id_t, :int], :int
@@ -104,10 +105,5 @@ module FFI::Platform::POSIX
   # related to stat()
   attach_function :major, 'ffi_major', [:dev_t], :dev_t
   attach_function :minor, 'ffi_minor', [:dev_t], :dev_t
-
-  # stat
-  attach_function :stat,  'ffi_stat',  [:string, :pointer], :int
-  attach_function :fstat, 'ffi_fstat', [:int,    :pointer], :int
-  attach_function :lstat, 'ffi_lstat', [:string, :pointer], :int
 end
-
+end

@@ -2,20 +2,13 @@
 #define RBX_CHANNEL_HPP
 
 #include "builtin/object.hpp"
-#include "type_info.hpp"
-
-#include "virtual.hpp" // ObjectCallback
-#include "gc/root.hpp" // TypedRoot
-
-#include "builtin/thread.hpp"
 
 namespace rubinius {
-  class Float;
   class List;
   class IO;
   class IOBuffer;
-  class Message;
   class Executable;
+  class Thread;
 
   class Channel : public Object {
   public:
@@ -28,8 +21,8 @@ namespace rubinius {
   private:
     List* value_;  // slot
 
-    thread::Condition condition_;
-    thread::Mutex mutex_;
+    utilities::thread::Condition condition_;
+    utilities::thread::Mutex mutex_;
     int waiters_;
     int semaphore_count_;
 
@@ -43,20 +36,17 @@ namespace rubinius {
     // Rubinius.primitive :channel_new
     static Channel* create(STATE);
 
-    /** Remove Thread from waiting list, if it is there. */
-    void    cancel_waiter(STATE, const Thread* waiter);
-
     // Rubinius.primitive :channel_send
-    Object* send(STATE, Object*);
+    Object* send(STATE, GCToken gct, Object* val, CallFrame* calling_environment);
 
     // Rubinius.primitive :channel_receive
-    Object* receive(STATE, CallFrame* calling_environment);
+    Object* receive(STATE, GCToken gct, CallFrame* calling_environment);
 
     // Rubinius.primitive :channel_try_receive
-    Object* try_receive(STATE);
+    Object* try_receive(STATE, GCToken gct, CallFrame* calling_environment);
 
     // Rubinius.primitive :channel_receive_timeout
-    Object* receive_timeout(STATE, Object* duration, CallFrame* calling_environment);
+    Object* receive_timeout(STATE, GCToken gct, Object* duration, CallFrame* calling_environment);
 
     bool has_readers_p();
 
@@ -66,14 +56,6 @@ namespace rubinius {
       BASIC_TYPEINFO(TypeInfo)
     };
 
-  };
-
-  class ChannelCallback : public ObjectCallback {
-  public:
-    TypedRoot<Channel*> channel;
-
-    ChannelCallback(STATE, Channel* chan);
-    virtual void call(Object* obj);
   };
 
 }

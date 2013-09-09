@@ -1,7 +1,9 @@
 #include "stack_variables.hpp"
 #include "builtin/variable_scope.hpp"
-#include "vmmethod.hpp"
+#include "builtin/lookuptable.hpp"
+#include "machine_code.hpp"
 #include "call_frame.hpp"
+#include "on_stack.hpp"
 
 namespace rubinius {
 
@@ -10,8 +12,8 @@ namespace rubinius {
   {
     if(on_heap_) return on_heap_;
 
-    VMMethod* vmm = call_frame->cm->backend_method();
-    VariableScope* scope = state->new_object<VariableScope>(G(variable_scope));
+    MachineCode* mcode = call_frame->compiled_code->machine_code();
+    VariableScope* scope = state->new_object_dirty<VariableScope>(G(variable_scope));
 
     if(parent_) {
       scope->parent(state, parent_);
@@ -22,21 +24,26 @@ namespace rubinius {
     scope->self(state, self_);
     scope->block(state, block_);
     scope->module(state, module_);
-    scope->method(state, call_frame->cm);
-    scope->heap_locals(state, Tuple::create(state, vmm->number_of_locals));
+    scope->method(state, call_frame->compiled_code);
+    scope->heap_locals(state, nil<Tuple>());
     scope->last_match(state, last_match_);
+    scope->fiber(state, state->vm()->current_fiber.get());
 
-    scope->number_of_locals_ = vmm->number_of_locals;
+    scope->number_of_locals_ = mcode->number_of_locals;
+    scope->isolated_ = 0;
+    scope->flags_ = call_frame->flags;
+    scope->lock_.init();
 
-    if(full) {
-      scope->isolated_ = false;
-    } else {
-      scope->isolated_ = true;
+    if(!full) {
+      scope->isolated_ = 1;
+      scope->heap_locals(state, Tuple::create(state, mcode->number_of_locals));
+      for(int i = 0; i < scope->number_of_locals_; i++) {
+        scope->set_local(state, i, locals_[i]);
+      }
     }
 
     scope->locals_ = locals_;
-
-    scope->set_block_as_method(call_frame->block_as_method_p());
+    scope->dynamic_locals(state, nil<LookupTable>());
 
     on_heap_ = scope;
 
@@ -50,7 +57,7 @@ namespace rubinius {
     // in ruby.
     if(parent_) {
       VariableScope* scope = parent_;
-      while(RTEST(scope->parent())) {
+      while(CBOOL(scope->parent())) {
         scope = scope->parent();
       }
 
@@ -73,7 +80,7 @@ namespace rubinius {
     // last_match.
     if(parent_) {
       VariableScope* scope = parent_;
-      while(RTEST(scope->parent())) {
+      while(CBOOL(scope->parent())) {
         scope = scope->parent();
       }
 
@@ -91,12 +98,8 @@ namespace rubinius {
   }
 
   void StackVariables::flush_to_heap(STATE) {
-    if(!on_heap_) return;
-
-    on_heap_->isolated_ = true;
-
-    for(int i = 0; i < on_heap_->number_of_locals_; i++) {
-      on_heap_->set_local(state, i, locals_[i]);
+    if(on_heap_) {
+      on_heap_->flush_to_heap(state);
     }
   }
 }

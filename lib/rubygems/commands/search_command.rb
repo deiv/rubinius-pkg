@@ -7,6 +7,8 @@ class Gem::Commands::SearchCommand < Gem::Commands::QueryCommand
     super 'search', 'Display all gems whose name contains STRING'
 
     remove_option '--name-matches'
+
+    defaults[:domain] = :remote
   end
 
   def arguments # :nodoc:
@@ -14,7 +16,7 @@ class Gem::Commands::SearchCommand < Gem::Commands::QueryCommand
   end
 
   def defaults_str # :nodoc:
-    "--local --no-details"
+    "--remote --no-details"
   end
 
   def usage # :nodoc:

@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 TOPLEVEL_BINDING = binding()
 
 # Default kcode
@@ -7,6 +9,7 @@ module Rubinius
   class Loader
     def initialize
       @exit_code    = 0
+      @process_id   = Process.pid
       @load_paths   = []
       @requires     = []
       @evals        = []
@@ -19,8 +22,15 @@ module Rubinius
       @input_loop_split = false
       @simple_options = false
       @early_option_stop = false
+      @check_syntax = false
 
-      @gem_bin = File.join Rubinius::GEMS_PATH, "bin"
+      @enable_gems = !Rubinius.ruby18?
+      @load_gemfile = false
+
+      version = RUBY_VERSION.split(".").first(2).join(".")
+      @gem_bins = ["#{version}/bin", "bin"].map do |dir|
+        File.join Rubinius::GEMS_PATH, dir
+      end
     end
 
     def self.debugger
@@ -33,22 +43,13 @@ module Rubinius
 
     # Finish setting up after loading kernel.
     def preamble
+      set_program_name "rbx"
       @stage = "running Loader preamble"
 
       Object.const_set :ENV, EnvironmentVariables.new
 
-      # set terminal width
-      width = 80
-      if Terminal and ENV['TERM'] and !ENV['RBX_NO_COLS']
-        begin
-          `which tput &> /dev/null`
-          if $?.exitstatus == 0
-            res = `tput cols 2>&1`.to_i
-            width = res if res > 0
-          end
-        end
-      end
-      Rubinius.const_set 'TERMINAL_WIDTH', width
+      # Set the default visibility for the top level binding
+      TOPLEVEL_BINDING.variables.method_visibility = :private
 
       $VERBOSE = false
     end
@@ -57,42 +58,18 @@ module Rubinius
     def system_load_path
       @stage = "setting up system load path"
 
-      @main_lib = nil
-
-      if env_lib = ENV['RBX_LIB']
-        @main_lib = File.expand_path(env_lib) if File.exists?(env_lib)
-      end
-
-      # Use the env version if it's set.
-      @main_lib = Rubinius::LIB_PATH unless @main_lib
-
-      unless @main_lib
-        STDERR.puts <<-EOM
-Rubinius was configured to find standard library files at:
-
-  #{@main_lib}
-
-but that directory does not exist.
-
-Set the environment variable RBX_LIB to the directory
-containing the Rubinius standard library files.
-        EOM
-      end
+      @main_lib = Rubinius::LIB_PATH
 
       @main_lib_bin = File.join @main_lib, "bin"
       Rubinius.const_set :PARSER_EXT_PATH, "#{@main_lib}/ext/melbourne/rbx/melbourne20"
 
       # This conforms more closely to MRI. It is necessary to support
       # paths that mkmf adds when compiling and installing native exts.
-      additions = []
-      additions << "#{Rubinius::SITE_PATH}/#{Rubinius::LIB_VERSION}-rbx/#{Rubinius::CPU}-#{Rubinius::OS}"
-      additions << "#{Rubinius::SITE_PATH}/#{Rubinius::LIB_VERSION}-rbx"
-      additions << Rubinius::SITE_PATH
-      additions << "#{Rubinius::VENDOR_PATH}/#{Rubinius::LIB_VERSION}-rbx/#{Rubinius::CPU}-#{Rubinius::OS}"
-      additions << "#{Rubinius::VENDOR_PATH}/#{Rubinius::LIB_VERSION}-rbx"
-      additions << Rubinius::VENDOR_PATH
-      additions << "#{@main_lib}/#{Rubinius::RUBY_LIB_VERSION}"
-      additions << @main_lib
+      additions = [
+        Rubinius::VENDOR_PATH,
+        "#{@main_lib}/#{Rubinius::RUBY_LIB_VERSION}",
+        @main_lib,
+      ]
       additions.uniq!
 
       $LOAD_PATH.unshift(*additions)
@@ -127,12 +104,17 @@ containing the Rubinius standard library files.
       Signal.trap("INT") do |sig|
         raise Interrupt, "Thread has been interrupted"
       end
+
+      ["HUP", "QUIT", "TERM", "ALRM", "USR1", "USR2"].each do |signal|
+        Signal.trap(signal) do |sig|
+          raise SignalException, sig
+        end
+      end
     end
 
     def show_syntax_error(e)
       STDERR.puts "A syntax error has occurred:"
-      STDERR.puts "    #{e.reason}"
-      STDERR.puts "    near line #{e.file}:#{e.line}, column #{e.column}"
+      STDERR.puts "    #{e.message}"
       STDERR.puts "\nCode:\n#{e.code}"
       if e.column
         STDERR.puts((" " * (e.column - 1)) + "^")
@@ -145,7 +127,7 @@ containing the Rubinius standard library files.
       end
     end
 
-    # Checks if a subcammand with basename +base+ exists. Returns the full
+    # Checks if a subcommand with basename +base+ exists. Returns the full
     # path to the subcommand if it does; otherwise, returns nil.
     def find_subcommand(base)
       command = File.join @main_lib_bin, "#{base}.rb"
@@ -156,8 +138,10 @@ containing the Rubinius standard library files.
     # Checks if a gem wrapper named +base+ exists. Returns the full path to
     # the gem wrapper if it does; otherwise, returns nil.
     def find_gem_wrapper(base)
-      wrapper = File.join @gem_bin, base
-      return wrapper if File.exists? wrapper
+      @gem_bins.each do |dir|
+        wrapper = File.join dir, base
+        return wrapper if File.exists? wrapper
+      end
       return nil
     end
 
@@ -206,6 +190,36 @@ containing the Rubinius standard library files.
       end
     end
 
+    def define_global_methods
+      Kernel.module_eval do
+        def gsub(pattern, rep=nil, &block)
+          target = $_
+          raise TypeError, "$_ must be a String, but is #{target.inspect}" unless target.kind_of? String
+          $_ = target.gsub(pattern, rep, &block)
+        end
+        module_function :gsub
+
+        def sub(pattern, rep=nil, &block)
+          target = $_
+          raise TypeError, "$_ must be a String, but is #{target.inspect}" unless target.kind_of? String
+          $_ = target.sub(pattern, rep, &block)
+        end
+        module_function :sub
+
+        def chomp(string=$/)
+          raise TypeError, "$_ must be a String" unless $_.kind_of? String
+          $_ = $_.chomp(string)
+        end
+        module_function :chomp
+
+        def chop
+          raise TypeError, "$_ must be a String" unless $_.kind_of? String
+          $_ = $_.chop
+        end
+        module_function :chop
+      end
+    end
+
     # Process all command line arguments.
     def options(argv=ARGV)
       @stage = "processing command line arguments"
@@ -228,8 +242,11 @@ containing the Rubinius standard library files.
       options.doc "\nRuby options"
       options.on "-", "Read and evaluate code from STDIN" do
         @run_irb = false
-        $0 = "-"
-        CodeLoader.execute_script STDIN.read
+        set_program_name "-"
+        stdin = STDIN.dup
+        script = STDIN.read
+        STDIN.reopen(stdin)
+        CodeLoader.execute_script script
       end
 
       options.on "--", "Stop processing command line arguments" do
@@ -239,36 +256,12 @@ containing the Rubinius standard library files.
 
       options.on "-a", "Used with -n and -p, splits $_ into $F" do
         @input_loop_split = true
+        Rubinius::Globals.set!(:$-a, true)
       end
 
-      options.on "-c", "FILE", "Check the syntax of FILE" do |file|
-        if File.exists?(file)
-          case
-          when Rubinius.ruby18?
-            parser = Rubinius::Melbourne
-          when Rubinius.ruby19?
-            parser = Rubinius::Melbourne19
-          when Rubinius.ruby20?
-            parser = Rubinius::Melbourne20
-          else
-            raise "no parser available for this ruby version"
-          end
-
-          mel = parser.new file, 1, []
-
-          begin
-            mel.parse_file
-          rescue SyntaxError => e
-            show_syntax_errors(mel.syntax_errors)
-            exit 1
-          end
-
-          puts "Syntax OK"
-          exit 0
-        else
-          puts "rbx: Unable to find file -- #{file} (LoadError)"
-          exit 1
-        end
+      options.on "-c", "Only check the syntax" do
+        @run_irb = false
+        @check_syntax = true
       end
 
       options.on "-C", "DIR", "Change directory to DIR before running scripts" do |dir|
@@ -276,13 +269,28 @@ containing the Rubinius standard library files.
       end
 
       options.on "-d", "Enable debugging output and set $DEBUG to true" do
+        $VERBOSE = true
         $DEBUG = true
+      end
+
+      unless Rubinius.ruby18?
+        options.on "--disable-gems", "Do not automatically load rubygems on startup" do
+          @enable_gems = false
+        end
       end
 
       options.on "-e", "CODE", "Compile and execute CODE" do |code|
         @run_irb = false
-        $0 = "(eval)"
+        set_program_name "(eval)"
         @evals << code
+      end
+
+      options.on '-F', "PATTERN", "Set $; to PATTERN" do |pattern|
+        Rubinius::Globals.set!(:$;, Regexp.new(pattern))
+      end
+
+      options.on '-G', '--gemfile', 'Respect a Gemfile in the current path' do
+        @load_gemfile = true
       end
 
       options.on "-h", "--help", "Display this help" do
@@ -301,28 +309,44 @@ containing the Rubinius standard library files.
         @load_paths << dir
       end
 
-      options.on "-K", "[code]", "Set $KCODE" do |k|
-        case k
-        when 'a', 'A', 'n', 'N', nil
-          $KCODE = "NONE"
-        when 'e', 'E'
-          $KCODE = "EUC"
-        when 's', 'S'
-          $KCODE = "SJIS"
-        when 'u', 'U'
-          $KCODE = "UTF8"
-        else
-          $KCODE = "NONE"
+      if Rubinius.ruby18?
+        options.on "-K", "[code]", "Set $KCODE" do |k|
+          case k
+          when 'a', 'A', 'n', 'N', nil
+            $KCODE = "NONE"
+          when 'e', 'E'
+            $KCODE = "EUC"
+          when 's', 'S'
+            $KCODE = "SJIS"
+          when 'u', 'U'
+            $KCODE = "UTF8"
+          else
+            $KCODE = "NONE"
+          end
+        end
+      else
+        options.on "-K", "Ignored $KCODE option for compatibility"
+        options.on "-U", "Set Encoding.default_internal to UTF-8" do
+          set_default_internal_encoding('UTF-8')
+        end
+
+        options.on "-E", "ENC", "Set external:internal character encoding to ENC" do |enc|
+          ext, int = enc.split(":")
+          Encoding.default_external = ext if ext and !ext.empty?
+          set_default_internal_encoding(int) if int and !int.empty?
         end
       end
 
       options.on "-n", "Wrap running code in 'while(gets()) ...'" do
         @input_loop = true
+        define_global_methods
       end
 
       options.on "-p", "Same as -n, but also print $_" do
         @input_loop = true
         @input_loop_print = true
+        Rubinius::Globals.set!(:$-p, true)
+        define_global_methods
       end
 
       options.on "-r", "LIBRARY", "Require library before execution" do |file|
@@ -337,6 +361,10 @@ containing the Rubinius standard library files.
                  "Run SCRIPT using PATH environment variable to find it") do |script|
         options.stop_parsing
         @run_irb = false
+
+        # Load a gemfile now if we need to so that -S can see binstubs
+        # internal to the Gemfile
+        gemfile
 
         # First, check if any existing gem wrappers match.
         unless file = find_gem_wrapper(script)
@@ -354,13 +382,10 @@ containing the Rubinius standard library files.
           end
         end
 
-        $0 = script if file
+        set_program_name script if file
 
         # if missing, let it die a natural death
         @script = file ? file : script
-      end
-
-      options.on "-T", "[level]", "Set $SAFE level (NOT IMPLEMENTED)" do |l|
       end
 
       options.on "-v", "Display the version and set $VERBOSE to true" do
@@ -398,27 +423,6 @@ containing the Rubinius standard library files.
         puts Rubinius.version
       end
 
-
-      # TODO: convert all these to -X options
-      options.doc "\nRubinius options"
-
-      @profile = Rubinius::Config['profile'] || Rubinius::Config['jit.profile']
-
-      options.on "--vv", "Display version and extra info" do
-        @run_irb = false
-
-        $VERBOSE = true
-        puts Rubinius.version
-        puts "Options:"
-        puts "  Interpreter type: #{INTERPRETER}"
-        if jit = JIT
-          puts "  JIT enabled: #{jit.join(', ')}"
-        else
-          puts "  JIT disabled"
-        end
-        puts
-      end
-
       options.doc <<-DOC
 \nRubinius subcommands
 
@@ -442,7 +446,7 @@ VM Options
      This option is recognized by the VM before any ruby code is loaded.
      It is used to set VM configuration options.
 
-     Use -Xconfig.print to see the list of options the VM recognizes.
+     Use -Xhelp to see the list of options the VM recognizes.
      All variables, even ones that the VM doesn't understand, are available
      in Rubinius::Config.
 
@@ -467,6 +471,8 @@ VM Options
         exit 0
       end
 
+      exit 0 if Rubinius::Config["config.print"]
+
       if str = Rubinius::Config['tool.require']
         begin
           require str
@@ -475,10 +481,30 @@ VM Options
         end
       end
 
-      if @profile
+      if Rubinius::Config['profile'] || Rubinius::Config['jit.profile']
         require 'profile'
       end
+
+      if @check_syntax
+        check_syntax
+      end
     end
+
+    # Sets $0 ($PROGRAM_NAME) without changing the process title
+    def set_program_name(name)
+      Rubinius::Globals.set! :$0, name
+    end
+    private :set_program_name
+
+    def set_default_internal_encoding(encoding)
+      if @default_internal_encoding_set && Encoding.default_internal.name != encoding
+        raise RuntimeError, "Default internal encoding already set to '#{Encoding.default_internal.name}'."
+      else
+        @default_internal_encoding_set = true
+        Encoding.default_internal = encoding
+      end
+    end
+    private :set_default_internal_encoding
 
     RUBYOPT_VALID_OPTIONS = "IdvwWrKT"
 
@@ -549,21 +575,20 @@ to rebuild the compiler.
       end
     end
 
-    def agent
-      @stage = "starting agent ruby thread"
-
-      # Fixing a bug on OSX 10.5
-      return
-
-      if Rubinius::Config['agent.start']
-        Rubinius::AgentRegistry.spawn_thread
-      end
-    end
-
     def rubygems
       @stage = "loading Rubygems"
 
-      require "rubygems" if Rubinius.ruby19?
+      require "rubygems" if @enable_gems
+    end
+
+    def gemfile
+      @stage = "loading Gemfile"
+
+      if @load_gemfile
+        require 'rubygems'
+        require 'bundler/setup'
+        @load_gemfile = false
+      end
     end
 
     # Require any -r arguments
@@ -577,13 +602,14 @@ to rebuild the compiler.
     def evals
       return if @evals.empty?
 
+      @run_irb = false
       @stage = "evaluating command line code"
 
       if @input_loop
         while gets
           $F = $_.split if @input_loop_split
           eval @evals.join("\n"), TOPLEVEL_BINDING, "-e", 1
-          puts $_ if @input_loop_print
+          print $_ if @input_loop_print
         end
       else
         eval @evals.join("\n"), TOPLEVEL_BINDING, "-e", 1
@@ -593,6 +619,8 @@ to rebuild the compiler.
     # Run the script passed on the command line
     def script
       return unless @script and @evals.empty?
+
+      @run_irb = false
 
       handle_simple_options(ARGV) if @simple_options
 
@@ -616,19 +644,66 @@ to rebuild the compiler.
         end
       end
 
-      $0 = @script
+      set_program_name @script
       CodeLoader.load_script @script, @debugging
+    end
+
+    #Check Ruby syntax of source
+    def check_syntax
+      case
+      when Rubinius.ruby18?
+        parser = Rubinius::Melbourne
+      when Rubinius.ruby19?
+        parser = Rubinius::Melbourne19
+      when Rubinius.ruby20?
+        parser = Rubinius::Melbourne20
+      else
+        raise "no parser available for this ruby version"
+      end
+
+      if @script
+        if File.exists?(@script)
+          mel = parser.new @script, 1, []
+
+          begin
+            mel.parse_file
+          rescue SyntaxError => e
+            show_syntax_errors(mel.syntax_errors)
+            exit 1
+          end
+        else
+          puts "rbx: Unable to find file -- #{@script} (LoadError)"
+          exit 1
+        end
+      elsif not @evals.empty?
+        begin
+          mel = parser.parse_string @evals.join("\n")
+        rescue SyntaxError => e
+          show_syntax_errors(mel.syntax_errors)
+          exit 1
+        end
+      else
+        begin
+          mel = parser.parse_string STDIN.read
+        rescue SyntaxError => e
+          show_syntax_errors(mel.syntax_errors)
+          exit 1
+        end
+      end
+
+      puts "Syntax OK"
+      exit 0
     end
 
     # Run IRB unless we were passed -e, -S arguments or a script to run.
     def irb
-      return if $0 or not @run_irb
+      return unless @run_irb
 
       @stage = "running IRB"
 
       if Terminal
         repr = ENV['RBX_REPR'] || "bin/irb"
-        $0 = repr
+        set_program_name repr
         prog = File.join @main_lib, repr
         begin
           # HACK: this was load but load raises LoadError
@@ -642,7 +717,7 @@ to rebuild the compiler.
           exit 1
         end
       else
-        $0 = "(eval)"
+        set_program_name "(eval)"
         CodeLoader.execute_script "p #{STDIN.read}"
       end
     end
@@ -673,7 +748,7 @@ to rebuild the compiler.
       run_at_exits
 
       @stage = "running object finalizers"
-      GC.start
+      ::GC.start
       ObjectSpace.run_finalizers
 
       # TODO: Fix these with better -X processing
@@ -737,7 +812,7 @@ to rebuild the compiler.
 
     def write_last_error(e)
       unless path = Config['vm.crash_report_path']
-        path = "#{ENV['HOME']}/.rubinius_last_error"
+        path = "#{ENV['HOME']}/.rbx/rubinius_last_error_#{@process_id}"
       end
 
       File.open(path, "wb") do |f|
@@ -756,54 +831,56 @@ to rebuild the compiler.
 
     # Orchestrate everything.
     def main
-      begin
-        begin
-          preamble
-          system_load_path
-          signals
-          load_compiler
-          preload
-          detect_alias
-          options
-          load_paths
-          debugger
-          agent
-          rubygems
-          requires
-          evals
-          script
-          irb
+      preamble
+      system_load_path
+      signals
+      load_compiler
+      preload
+      detect_alias
+      options
+      load_paths
+      debugger
+      rubygems
+      gemfile
+      requires
+      evals
+      script
+      irb
 
-        rescue SystemExit => e
-          # Let the outer rescue grab it
-          raise e
+    rescue SystemExit => e
+      @exit_code = e.status
 
-        rescue SyntaxError => e
-          @exit_code = 1
+      epilogue
+    rescue SyntaxError => e
+      @exit_code = 1
 
-          show_syntax_error(e)
+      show_syntax_error(e)
 
-          STDERR.puts "\nBacktrace:"
-          STDERR.puts e.awesome_backtrace.show
-        rescue Object => e
-          @exit_code = 1
+      STDERR.puts "\nBacktrace:"
+      STDERR.puts e.awesome_backtrace.show
+      epilogue
+    rescue Interrupt => e
+      @exit_code = 1
 
-          write_last_error(e)
-          e.render "An exception occurred #{@stage}"
-        end
+      write_last_error(e)
+      e.render "An exception occurred #{@stage}"
+      epilogue
+    rescue SignalException => e
+      Signal.trap(e.signo, "SIG_DFL")
+      Process.kill e.signo, Process.pid
+      epilogue
+    rescue Object => e
+      @exit_code = 1
 
-      # We do this, run epilogue both on catching SystemExit and
-      # if there was no exception so that the at_exit handlers
-      # can see $! as the SystemExit object the system is going to
-      # exit with.
-      rescue SystemExit => e
-        @exit_code = e.status
-        epilogue
-      else
-        epilogue
-      ensure
-        done
-      end
+      write_last_error(e)
+      e.render "An exception occurred #{@stage}"
+      epilogue
+    else
+      # We do this, run epilogue both in the rescue blocks and also here,
+      # so that at_exit{} hooks can read $!.
+      epilogue
+    ensure
+      done
     end
 
     # Creates an instance of the Loader and runs it. We catch any uncaught

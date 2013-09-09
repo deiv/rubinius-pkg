@@ -7,6 +7,7 @@ describe :thread_wakeup, :shared => true do
     t = Thread.new do
       while true
         break if exit_loop == true
+        Thread.pass
       end
 
       sleep
@@ -21,12 +22,12 @@ describe :thread_wakeup, :shared => true do
 
     exit_loop = true
 
-    Thread.pass while t.status and t.status != "sleep"
+    10.times { sleep 0.1 if t.status and t.status != "sleep" }
     after_sleep1.should == false # t should be blocked on the first sleep
     t.send(@method)
 
-    Thread.pass while after_sleep1 != true
-    Thread.pass while t.status and t.status != "sleep"
+    10.times { sleep 0.1 if after_sleep1 != true }
+    10.times { sleep 0.1 if t.status and t.status != "sleep" }
     after_sleep2.should == false # t should be blocked on the second sleep
     t.send(@method)
 
@@ -54,6 +55,6 @@ describe :thread_wakeup, :shared => true do
   it "raises a ThreadError when trying to wake up a dead thread" do
     t = Thread.new { 1 }
     t.join
-    lambda { t.wakeup }.should raise_error(ThreadError)
+    lambda { t.send @method }.should raise_error(ThreadError)
   end
 end

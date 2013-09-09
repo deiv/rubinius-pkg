@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
 
   class CompileError < RuntimeError
@@ -21,7 +23,7 @@ module Rubinius
         hash = Rubinius.invoke_primitive :sha1_hash, full
         dir = hash[0,2]
 
-        path = "#{RBC_DB}/#{dir}/#{hash}"
+        "#{RBC_DB}/#{dir}/#{hash}"
       end
     else
       def self.compiled_cache_writable?(db, dir)
@@ -45,18 +47,25 @@ module Rubinius
         #       OR
         #   2. ~/ is owned by the process user
 
-        dir = Rubinius::OS_STARTUP_DIR
-        db = "#{dir}/.rbx"
-        unless name.prefix?(dir) and compiled_cache_writable?(db, dir)
-          dir = File.expand_path "~/"
+        unless @db
+          dir = Rubinius::OS_STARTUP_DIR
           db = "#{dir}/.rbx"
-          return unless compiled_cache_writable?(db, dir)
+          unless name.prefix?(dir) and compiled_cache_writable?(db, dir)
+            # Yes, this retarded shit is necessary because people actually
+            # run under fucked environments with no HOME set.
+            return unless ENV["HOME"]
+
+            dir = File.expand_path "~/"
+            db = "#{dir}/.rbx"
+            return unless compiled_cache_writable?(db, dir)
+          end
+          @db = db
         end
 
         full = "#{name}#{Rubinius::RUBY_LIB_VERSION}"
         hash = Rubinius.invoke_primitive :sha1_hash, full
 
-        path = "#{db}/#{hash[0, 2]}/#{hash}"
+        "#{@db}/#{hash[0, 2]}/#{hash}"
       end
     end
 
@@ -94,7 +103,7 @@ module Rubinius
     end
 
     def self.compile_file(file, line=1)
-      compiler = new :file, :compiled_method
+      compiler = new :file, :compiled_code
 
       parser = compiler.parser
       parser.root AST::Script
@@ -109,7 +118,7 @@ module Rubinius
     end
 
     def self.compile_string(string, file="(eval)", line=1)
-      compiler = new :string, :compiled_method
+      compiler = new :string, :compiled_code
 
       parser = compiler.parser
       parser.root AST::Script
@@ -180,14 +189,12 @@ module Rubinius
         @tail.insert_after(@head)
 
         @misses = 0
-        @lock = Rubinius::Channel.new
-        @lock << nil # prime
       end
 
       attr_reader :current, :misses
 
       def clear!
-        @lock.as_lock do
+        Rubinius.synchronize(self) do
           @cache = {}
           @current = 0
 
@@ -213,7 +220,7 @@ module Rubinius
       end
 
       def retrieve(key)
-        @lock.as_lock do
+        Rubinius.synchronize(self) do
           if entry = @cache[key]
             entry.inc!
 
@@ -230,7 +237,7 @@ module Rubinius
       end
 
       def set(key, value)
-        @lock.as_lock do
+        Rubinius.synchronize(self) do
           if entry = @cache[key]
             entry.value = value
 
@@ -281,12 +288,12 @@ module Rubinius
     def self.compile_eval(string, variable_scope, file="(eval)", line=1)
       if ec = @eval_cache
         layout = variable_scope.local_layout
-        if cm = ec.retrieve([string, layout])
-          return cm
+        if code = ec.retrieve([string, layout, line])
+          return code
         end
       end
 
-      compiler = new :eval, :compiled_method
+      compiler = new :eval, :compiled_code
 
       parser = compiler.parser
       parser.root AST::EvalExpression
@@ -295,31 +302,31 @@ module Rubinius
 
       compiler.generator.variable_scope = variable_scope
 
-      cm = compiler.run
+      code = compiler.run
 
-      cm.add_metadata :for_eval, true
+      code.add_metadata :for_eval, true
 
       if ec and parser.should_cache?
-        ec.set([string.dup, layout], cm)
+        ec.set([string.dup, layout, line], code)
       end
 
-      return cm
+      return code
     end
 
     def self.construct_block(string, binding, file="(eval)", line=1)
-      cm = compile_eval string, binding.variables, file, line
+      code = compile_eval string, binding.variables, file, line
 
-      cm.scope = binding.static_scope
-      cm.name = binding.variables.method.name
+      code.scope = binding.constant_scope
+      code.name = binding.variables.method.name
 
       # This has to be setup so __FILE__ works in eval.
-      script = Rubinius::CompiledMethod::Script.new(cm, file, true)
+      script = Rubinius::CompiledCode::Script.new(code, file, true)
       script.eval_source = string
 
-      cm.scope.script = script
+      code.scope.script = script
 
       be = Rubinius::BlockEnvironment.new
-      be.under_context binding.variables, cm
+      be.under_context binding.variables, code
 
       # Pass the BlockEnvironment this binding was created from
       # down into the new BlockEnvironment we just created.
@@ -330,8 +337,6 @@ module Rubinius
         be.proc_environment = binding.proc_environment
       end
 
-      be.from_eval!
-     
       return be
     end
 

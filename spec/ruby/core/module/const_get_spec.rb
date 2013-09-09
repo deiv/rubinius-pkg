@@ -11,6 +11,11 @@ describe "Module#const_get" do
     lambda { ConstantSpecs.const_get :CS_CONSTX }.should raise_error(NameError)
   end
 
+  it "raises a NameError with the not found constant symbol" do
+    error_inspection = lambda { |e| e.name.should == :CS_CONSTX }
+    lambda { ConstantSpecs.const_get :CS_CONSTX }.should raise_error(NameError, &error_inspection)
+  end
+
   it "raises a NameError if the name does not start with a capital letter" do
     lambda { ConstantSpecs.const_get "name" }.should raise_error(NameError)
   end
@@ -70,6 +75,18 @@ describe "Module#const_get" do
 
     it "searches into the receiver superclasses if the inherit flag is true" do
       ConstantSpecs::ContainerA::ChildA.const_get(:CS_CONST4, true).should == :const4
+    end
+    
+    it "raises a NameError when the receiver is a Module, the constant is defined at toplevel and the inherit flag is false" do
+      lambda do
+        ConstantSpecs::ModuleA.const_get(:CS_CONST1, false)
+      end.should raise_error(NameError)
+    end
+
+    it "raises a NameError when the receiver is a Class, the constant is defined at toplevel and the inherit flag is false" do
+      lambda do
+        ConstantSpecs::ContainerA::ChildA.const_get(:CS_CONST1, false)
+      end.should raise_error(NameError)
     end
   end
 

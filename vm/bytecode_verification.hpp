@@ -5,12 +5,13 @@
 #include <list>
 
 namespace rubinius {
-  class CompiledMethod;
+  class CompiledCode;
+  class State;
   class VM;
   class Tuple;
 
   class BytecodeVerification {
-    CompiledMethod* method_;
+    CompiledCode* method_;
 
     Tuple* ops_;
     native_int total_;
@@ -40,14 +41,18 @@ namespace rubinius {
     };
 
   public:
-    BytecodeVerification(CompiledMethod* cm);
+    BytecodeVerification(CompiledCode* code);
     ~BytecodeVerification();
 
-    bool verify(VM* state);
-    bool verify_from(VM* state, int sp, int ip, std::list<Section>& ips);
+    bool verify(STATE);
+    bool verify_from(STATE, int sp, int ip, std::list<Section>& ips);
 
-    const char* failure_reason() { return fail_reason_; }
-    int failure_ip() { return fail_ip_; }
+    const char* failure_reason() const {
+      return fail_reason_;
+    }
+    int failure_ip() const {
+      return fail_ip_;
+    }
   };
 }
 #endif

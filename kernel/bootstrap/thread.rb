@@ -1,8 +1,10 @@
+# -*- encoding: us-ascii -*-
+
 class Thread
 
   def self.current
     Rubinius.primitive :thread_current
-    Kernel.raise PrimitiveFailure, "Threadcurrent primitive failed"
+    Kernel.raise PrimitiveFailure, "Thread.current primitive failed"
   end
 
   def self.allocate
@@ -11,17 +13,27 @@ class Thread
 
   def self.pass
     Rubinius.primitive :thread_pass
-    Kernel.raise PrimitiveFailure, "Thread#pass primitive failed"
+    Kernel.raise PrimitiveFailure, "Thread.pass primitive failed"
+  end
+
+  def self.list
+    Rubinius.primitive :thread_list
+    Kernel.raise PrimitiveFailure, "Thread.list primitive failed"
   end
 
   def fork
     Rubinius.primitive :thread_fork
-    Kernel.raise PrimitiveFailure, "Thread#fork primitive failed"
+    Kernel.raise ThreadError, "Thread#fork failed, thread already started or dead"
   end
 
   def raise_prim(exc)
     Rubinius.primitive :thread_raise
     Kernel.raise PrimitiveFailure, "Thread#raise primitive failed"
+  end
+
+  def kill_prim
+    Rubinius.primitive :thread_kill
+    Kernel.raise PrimitiveFailure, "Thread#kill primitive failed"
   end
 
   def wakeup
@@ -31,35 +43,38 @@ class Thread
 
   def priority
     Rubinius.primitive :thread_priority
-    Kernel.raise ThreadError, "Unable to get Thread priority"
+    Kernel.raise ThreadError, "Thread#priority primitive failed"
   end
 
   def priority=(val)
     Rubinius.primitive :thread_set_priority
-    Kernel.raise ThreadError, "Unable to set Thread priority"
+    Kernel.raise ThreadError, "Thread#priority= primitive failed"
   end
 
   def __context__
     Rubinius.primitive :thread_context
-    Kernel.raise PrimitiveFailure, "Thread#__context__ failed"
+    Kernel.raise PrimitiveFailure, "Thread#__context__ primitive failed"
   end
 
   def native_join
     Rubinius.primitive :thread_join
-    Kernel.raise PrimitiveFailure, "Thread#native_join failed"
+    Kernel.raise PrimitiveFailure, "Thread#native_join primitive failed"
   end
 
-  def self.set_critical(obj)
-    Rubinius.primitive :thread_set_critical
-    Kernel.raise PrimitiveFailure, "Thread.set_critical failed"
+  def mri_backtrace
+    Rubinius.primitive :thread_mri_backtrace
+    Kernel.raise PrimitiveFailure, "Thread#mri_backtrace primitive failed"
   end
 
   def unlock_locks
     Rubinius.primitive :thread_unlock_locks
-    Kernel.raise PrimitiveFailure, "Thread#unlock_locks failed"
+    Kernel.raise PrimitiveFailure, "Thread#unlock_locks primitive failed"
   end
 
-  class Die < Exception; end # HACK
+  def current_exception
+    Rubinius.primitive :thread_current_exception
+    Kernel.raise PrimitiveFailure, "Thread#current_exception primitive failed"
+  end
 
   @abort_on_exception = false
 
@@ -77,7 +92,7 @@ class Thread
   end
 
   def abort_on_exception
-    @abort_on_exception ||= false
+    @abort_on_exception || false
   end
 
   def inspect
@@ -92,13 +107,11 @@ class Thread
   def self.new(*args)
     thr = Rubinius.invoke_primitive :thread_allocate, self
 
+    Rubinius::VariableScope.of_sender.locked!
+
     Rubinius.asm(args, thr) do |args, obj|
       run obj
       dup
-
-      push_false
-      send :setup, 1, true
-      pop
 
       run args
       push_block
@@ -114,31 +127,6 @@ class Thread
     return thr
   end
 
-  def self.start(*args)
-    thr = Rubinius.invoke_primitive :thread_allocate, self
-
-    Rubinius.asm(args, thr) do |args, obj|
-      run obj
-      dup
-
-      push_false
-      send :setup, 1, true
-      pop
-
-      run args
-      push_block
-      send_with_splat :__thread_initialize__, 0, true
-      # no pop here, as .asm blocks imply a pop as they're not
-      # allowed to leak a stack value
-    end
-
-    return thr
-  end
-
-  class << self
-    alias_method :fork, :start
-  end
-
   def initialize(*args, &block)
     unless block
       Kernel.raise ThreadError, "no block passed to Thread#initialize"
@@ -151,12 +139,7 @@ class Thread
 
     th_group.add self
 
-    begin
-      fork
-    rescue Exception => e
-      th_group.remove self
-      raise e
-    end
+    fork
   end
 
   alias_method :__thread_initialize__, :initialize
@@ -165,76 +148,20 @@ class Thread
     @block != nil
   end
 
-  # Called by Thread#fork in the new thread
-  #
-  def __run__()
-    begin
-      begin
-        @lock.send nil
-        @result = @block.call(*@args)
-      ensure
-        @lock.receive
-        unlock_locks
-        @joins.each { |join| join.send self }
-      end
-    rescue Die
-      @exception = nil
-    rescue Exception => e
-      # I don't really get this, but this is MRI's behavior. If we're dying
-      # by request, ignore any raised exception.
-      @exception = e # unless @dying
-    ensure
-      @alive = false
-      @lock.send nil
-    end
-
-    if @exception
-      if abort_on_exception or Thread.abort_on_exception
-        Thread.main.raise @exception
-      elsif $DEBUG
-        STDERR.puts "Exception in thread: #{@exception.message} (#{@exception.class})"
-      end
-    end
-  end
-
-  def setup(prime_lock)
-    @group = nil
-    @alive = true
-    @result = false
-    @exception = nil
-    @critical = false
-    @dying = false
-    @locals = Rubinius::LookupTable.new
-    @lock = Rubinius::Channel.new
-    @lock.send nil if prime_lock
-    @joins = []
-  end
-
   def alive?
-    @lock.receive
-    @alive
-  ensure
-    @lock.send nil
+    Rubinius.synchronize(self) do
+      @alive
+    end
   end
 
   def stop?
     !alive? || @sleep
   end
 
-  def kill
-    @dying = true
-    @sleep = false
-    self.raise Die
-  end
-
-  alias_method :exit, :kill
-  alias_method :terminate, :kill
-
   def sleeping?
-    @lock.receive
-    @sleep
-  ensure
-    @lock.send nil
+    Rubinius.synchronize(self) do
+      @sleep
+    end
   end
 
   def status
@@ -253,23 +180,6 @@ class Thread
     end
   end
 
-  def self.stop
-    # Make sure that if we're stopping the current Thread,
-    # others can run, so reset critical.
-    Thread.critical = false
-    sleep
-    nil
-  end
-
-  def self.critical
-    @critical
-  end
-
-  def self.critical=(value)
-    set_critical value
-    @critical = !!value
-  end
-
   def join(timeout = undefined)
     join_inner(timeout) { @alive ? nil : self }
   end
@@ -282,20 +192,16 @@ class Thread
     @group = group
   end
 
-  def value
-    join_inner { @result }
-  end
-
   def join_inner(timeout = undefined)
     result = nil
-    @lock.receive
+    Rubinius.lock(self)
     begin
       if @alive
         jc = Rubinius::Channel.new
         @joins << jc
-        @lock.send nil
+        Rubinius.unlock(self)
         begin
-          if timeout.equal? undefined
+          if undefined.equal? timeout
             while true
               res = jc.receive
               # receive returns false if it was a spurious wakeup
@@ -314,32 +220,39 @@ class Thread
             end
           end
         ensure
-          @lock.receive
+          Rubinius.lock(self)
         end
       end
       Kernel.raise @exception if @exception
       result = yield
     ensure
-      @lock.send nil
+      Rubinius.unlock(self)
     end
     result
   end
   private :join_inner
 
-  def raise(exc=$!, msg=nil, trace=nil)
-    @lock.receive
+  def raise(exc=undefined, msg=nil, trace=nil)
+    Rubinius.lock(self)
 
     unless @alive
-      @lock.send nil
+      Rubinius.unlock(self)
       return self
     end
 
     begin
+      if undefined.equal? exc
+        no_argument = true
+        exc = active_exception
+      end
+
       if exc.respond_to? :exception
         exc = exc.exception msg
         Kernel.raise TypeError, 'exception class/object expected' unless Exception === exc
         exc.set_backtrace trace if trace
-      elsif exc.kind_of? String or !exc
+      elsif no_argument
+        exc = RuntimeError.exception nil
+      elsif exc.kind_of? String
         exc = RuntimeError.exception exc
       else
         Kernel.raise TypeError, 'exception class/object expected'
@@ -349,30 +262,51 @@ class Thread
         STDERR.puts "Exception: #{exc.message} (#{exc.class})"
       end
 
-      Kernel.raise exc if self == Thread.current
+      if self == Thread.current
+        Kernel.raise exc
+      else
+        raise_prim exc
+      end
     ensure
-      @lock.send nil
+      Rubinius.unlock(self)
     end
-
-    raise_prim exc
   end
   private :raise_prim
 
   def [](key)
-    @locals[Rubinius::Type.coerce_to_symbol(key)]
+    locals_aref(Rubinius::Type.coerce_to_symbol(key))
   end
+
+  def locals_aref(key)
+    Rubinius.primitive :thread_locals_aref
+    raise PrimitiveFailure, "Thread#locals_aref primitive failed"
+  end
+  private :locals_aref
 
   def []=(key, value)
-    @locals[Rubinius::Type.coerce_to_symbol(key)] = value
+    locals_store(Rubinius::Type.coerce_to_symbol(key), value)
   end
 
+  def locals_store(key, value)
+    Rubinius.primitive :thread_locals_store
+    raise PrimitiveFailure, "Thread#locals_store primitive failed"
+  end
+  private :locals_store
+
   def keys
-    @locals.keys
+    Rubinius.primitive :thread_locals_keys
+    raise PrimitiveFailure, "Thread#keys primitive failed"
   end
 
   def key?(key)
-    @locals.key?(Rubinius::Type.coerce_to_symbol(key))
+    locals_key?(Rubinius::Type.coerce_to_symbol(key))
   end
+
+  def locals_key?(key)
+    Rubinius.primitive :thread_locals_has_key
+    raise PrimitiveFailure, "Thread#locals_key? primitive failed"
+  end
+  private :locals_key?
 
   # Register another Thread object +thr+ as the Thread where the debugger
   # is running. When the current thread hits a breakpoint, it uses this
@@ -411,8 +345,12 @@ class Thread
     @main_thread = thread
   end
 
-  def self.list
-    Thread.current.group.list
+  def self.exit
+    Thread.current.kill
+  end
+
+  def self.kill(thread)
+    thread.kill
   end
 
   alias_method :run, :wakeup

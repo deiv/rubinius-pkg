@@ -6,33 +6,54 @@
 #include "builtin/fixnum.hpp"
 #include "builtin/symbol.hpp"
 #include "builtin/tuple.hpp"
-#include "inline_cache.hpp"
+#include "builtin/bytearray.hpp"
+#include "builtin/regexp.hpp"
+#include "builtin/constant_cache.hpp"
+#include "object_utils.hpp"
 
 #include "llvm/offset.hpp"
 
 #include "llvm/inline_policy.hpp"
 
 #include "llvm/jit_context.hpp"
+#include "llvm/jit_builder.hpp"
 #include "llvm/types.hpp"
 
+#include "llvm/jit_context.hpp"
 #include "llvm/method_info.hpp"
 #include "llvm/jit_runtime.hpp"
 
+#if RBX_LLVM_API_VER >= 303
+#include <llvm/IR/Value.h>
+#elif RBX_LLVM_API_VER >= 302
 #include <llvm/Value.h>
+#endif
+#if RBX_LLVM_API_VER >= 303
+#include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/Function.h>
+#else
 #include <llvm/BasicBlock.h>
 #include <llvm/Function.h>
+#endif
+#if RBX_LLVM_API_VER >= 303
+#include <llvm/IR/IRBuilder.h>
+#elif RBX_LLVM_API_VER >= 302
+#include <llvm/IRBuilder.h>
+#else
 #include <llvm/Support/IRBuilder.h>
+#endif
+#if RBX_LLVM_API_VER >= 303
+#include <llvm/IR/CallingConv.h>
+#else
 #include <llvm/CallingConv.h>
+#endif
 
 using namespace llvm;
 
 namespace rubinius {
 
   class JITStackArgs;
-
-  namespace jit {
-    class Context;
-  }
+  class Context;
 
   struct ValueHint {
     int hint;
@@ -52,7 +73,7 @@ namespace rubinius {
     int sp_;
     int last_sp_;
 
-    llvm::IRBuilder<> builder_;
+    IRBuilder builder_;
     std::vector<ValueHint> hints_;
 
   protected:
@@ -69,12 +90,12 @@ namespace rubinius {
 
   protected:
     JITMethodInfo& method_info_;
-    LLVMState* ls_;
+    Context* ctx_;
 
     llvm::Module* module_;
     llvm::Function* function_;
 
-    llvm::Value* vm_;
+    llvm::Value* state_;
     llvm::Value* call_frame_;
 
     llvm::Value* zero_;
@@ -86,55 +107,63 @@ namespace rubinius {
     llvm::Value* valid_flag_;
 
   public:
-    const llvm::Type* NativeIntTy;
-    const llvm::Type* FixnumTy;
-    const llvm::Type* ObjType;
-    const llvm::Type* ObjArrayTy;
+    llvm::Type* NativeIntTy;
+    llvm::Type* FixnumTy;
+    llvm::Type* ObjType;
+    llvm::Type* ObjArrayTy;
 
     // Frequently used types
-    const llvm::Type* VMTy;
-    const llvm::Type* CallFrameTy;
+    llvm::Type* StateTy;
+    llvm::Type* CallFrameTy;
 
     // Commonly used constants
+    llvm::Value* NegOne;
     llvm::Value* Zero;
     llvm::Value* One;
 
+    llvm::Value* object_memory_mark_pos_;
+
   public:
-    JITOperations(LLVMState* ls, JITMethodInfo& info, llvm::BasicBlock* start)
+    JITOperations(jit::Builder* builder, JITMethodInfo& info, llvm::BasicBlock* start)
       : stack_(info.stack())
       , sp_(-1)
       , last_sp_(-1)
-      , builder_(ls->ctx())
+      , builder_(builder->ctx_->llvm_context(), llvm::ConstantFolder(), IRBuilderInserterWithDebug(builder))
       , method_info_(info)
-      , ls_(ls)
-      , module_(ls->module())
+      , ctx_(builder->ctx_)
+      , module_(builder->ctx_->module())
       , function_(info.function())
       , call_frame_(info.call_frame())
       , inline_policy_(0)
       , own_policy_(false)
     {
-      zero_ = ConstantInt::get(ls_->Int32Ty, 0);
-      one_ =  ConstantInt::get(ls_->Int32Ty, 1);
+      zero_ = ConstantInt::get(ctx_->Int32Ty, 0);
+      one_ =  ConstantInt::get(ctx_->Int32Ty, 1);
 
 #ifdef IS_X8664
-      FixnumTy = llvm::IntegerType::get(ls_->ctx(), 63);
+      FixnumTy = llvm::IntegerType::get(ctx_->llvm_context(), 63);
 #else
-      FixnumTy = llvm::IntegerType::get(ls_->ctx(), 31);
+      FixnumTy = llvm::IntegerType::get(ctx_->llvm_context(), 31);
 #endif
 
-      NativeIntTy = ls_->IntPtrTy;
+      NativeIntTy = ctx_->IntPtrTy;
 
       One = ConstantInt::get(NativeIntTy, 1);
       Zero = ConstantInt::get(NativeIntTy, 0);
+      NegOne = ConstantInt::get(NativeIntTy, -1);
+
+      object_memory_mark_pos_ = b().CreateIntToPtr(
+        clong((intptr_t)llvm_state()->shared().object_memory_mark_address()),
+        llvm::PointerType::getUnqual(ctx_->Int32Ty), "cast_to_intptr");
 
       ObjType = ptr_type("Object");
       ObjArrayTy = llvm::PointerType::getUnqual(ObjType);
 
-      VMTy = ptr_type("VM");
+      StateTy = ptr_type("State");
       CallFrameTy = ptr_type("CallFrame");
 
       Function::arg_iterator input = function_->arg_begin();
-      vm_ = input++;
+      state_ = input++;
 
       builder_.SetInsertPoint(start);
     }
@@ -151,13 +180,14 @@ namespace rubinius {
       out_args_block_= ptr_gep(out_args_, 2, "out_args_block");
       out_args_total_= ptr_gep(out_args_, 3, "out_args_total");
       out_args_arguments_ = ptr_gep(out_args_, 4, "out_args_arguments");
-      out_args_container_ = ptr_gep(out_args_, offset::args_container,
+      out_args_container_ = ptr_gep(out_args_, offset::Arguments::argument_container,
                                     "out_args_container");
     }
 
-    void setup_out_args(int args) {
+    void setup_out_args(Symbol* name, int args) {
       b().CreateStore(stack_back(args), out_args_recv_);
-      b().CreateStore(constant(Qnil), out_args_block_);
+      b().CreateStore(constant(name, ptr_type("Symbol")), out_args_name_);
+      b().CreateStore(constant(cNil), out_args_block_);
       b().CreateStore(cint(args),
                     out_args_total_);
       b().CreateStore(Constant::getNullValue(ptr_type("Tuple")),
@@ -171,7 +201,7 @@ namespace rubinius {
       return out_args_;
     }
 
-    IRBuilder<>& b() { return builder_; }
+    IRBuilder& b() { return builder_; }
 
     void set_valid_flag(llvm::Value* val) {
       valid_flag_ = val;
@@ -185,8 +215,8 @@ namespace rubinius {
       inline_policy_ = policy;
     }
 
-    void init_policy() {
-      inline_policy_ = InlinePolicy::create_policy(vmmethod());
+    void init_policy(Context* ctx) {
+      inline_policy_ = InlinePolicy::create_policy(ctx, machine_code());
       own_policy_ = true;
     }
 
@@ -194,27 +224,23 @@ namespace rubinius {
       return inline_policy_;
     }
 
-    jit::Context& context() {
-      return method_info_.context();
-    }
-
     JITMethodInfo& info() {
       return method_info_;
     }
 
-    VMMethod* vmmethod() {
-      return method_info_.vmm;
+    MachineCode* machine_code() {
+      return method_info_.machine_code;
     }
 
     Symbol* method_name() {
-      return vmmethod()->name();
+      return machine_code()->name();
     }
 
-    VMMethod* root_vmmethod() {
+    MachineCode* root_machine_code() {
       if(method_info_.root) {
-        return method_info_.root->vmm;
+        return method_info_.root->machine_code;
       } else {
-        return vmmethod();
+        return machine_code();
       }
     }
 
@@ -230,12 +256,16 @@ namespace rubinius {
       return &method_info_;
     }
 
-    LLVMState* state() {
-      return ls_;
+    Context* context() {
+      return ctx_;
     }
 
-    Value* vm() {
-      return vm_;
+    LLVMState* llvm_state() {
+      return ctx_->llvm_state();
+    }
+
+    Value* state() {
+      return state_;
     }
 
     Function* function() {
@@ -246,25 +276,25 @@ namespace rubinius {
       return call_frame_;
     }
 
-    llvm::Value* cint(int num) {
-      return ls_->cint(num);
+    llvm::Constant* cint(int num) {
+      return ctx_->cint(num);
     }
 
     llvm::Value* clong(uintptr_t num) {
-      return llvm::ConstantInt::get(ls_->IntPtrTy, num);
+      return ctx_->clong(num);
     }
 
-    // Type resolution and manipulation
-    //
-    const llvm::Type* ptr_type(std::string name) {
-      std::string full_name = std::string("struct.rubinius::") + name;
-      return llvm::PointerType::getUnqual(
-          module_->getTypeByName(full_name.c_str()));
+    llvm::Type* ptr_type(llvm::Type* type) {
+      return ctx_->ptr_type(type);
     }
 
-    const llvm::Type* type(std::string name) {
+    llvm::Type* ptr_type(std::string name) {
+      return ctx_->ptr_type(name);
+    }
+
+    llvm::Type* type(std::string name) {
       std::string full_name = std::string("struct.rubinius::") + name;
-      return module_->getTypeByName(full_name.c_str());
+      return module_->getTypeByName(full_name);
     }
 
     Value* ptr_gep(Value* ptr, int which, const char* name) {
@@ -272,7 +302,7 @@ namespace rubinius {
     }
 
     Value* upcast(Value* rec, const char* name) {
-      const Type* type = ptr_type(name);
+      Type* type = ptr_type(name);
 
       return b().CreateBitCast(rec, type, "upcast");
     }
@@ -281,7 +311,7 @@ namespace rubinius {
       return b().CreateBitCast(rec, ptr_type("Object"), "downcast");
     }
 
-    Value* check_type_bits(Value* obj, int type, const char* name = "is_type") {
+    Value* object_flags(Value* obj) {
       Value* word_idx[] = {
         zero_,
         zero_,
@@ -293,32 +323,140 @@ namespace rubinius {
         obj = b().CreateBitCast(obj, ObjType);
       }
 
-      // This checks 2 things, not just the type bits. It also checks
-      // that the inflated flag is 0, because if it's a 1, then the type
-      // bits have nothing to do with the type.
-      //
-      // We don't handle checking the type bits in the inflated header also.
-
-      Value* gep = create_gep(obj, word_idx, 4, "word_pos");
+      Value* gep = b().CreateGEP(obj, ArrayRef<Value*>(word_idx, 4), "word_pos");
       Value* word = create_load(gep, "flags");
-      Value* flags = b().CreatePtrToInt(word, ls_->Int64Ty, "word2flags");
+      return b().CreatePtrToInt(word, ctx_->Int64Ty, "word2flags");
+    }
 
-      // 10 bits worth of mask
-      Value* mask = ConstantInt::get(ls_->Int64Ty, ((1 << 10) - 1));
+    Value* check_type_bits(Value* obj, int type, const char* name = "is_type") {
+
+      Value* flags = object_flags(obj);
+
+      // 8 bits worth of mask
+      Value* mask = ConstantInt::get(ctx_->Int64Ty, ((1 << (OBJECT_FLAGS_OBJ_TYPE + 1)) - 1));
       Value* obj_type = b().CreateAnd(flags, mask, "mask");
 
-      // Compare all 10 bits.
-      Value* tag = ConstantInt::get(ls_->Int64Ty, type << 2);
+      // Compare all 8 bits.
+      Value* tag = ConstantInt::get(ctx_->Int64Ty, type);
 
       return b().CreateICmpEQ(obj_type, tag, name);
     }
 
     Value* check_is_reference(Value* obj) {
-      Value* mask = ConstantInt::get(ls_->IntPtrTy, TAG_REF_MASK);
-      Value* zero = ConstantInt::get(ls_->IntPtrTy, TAG_REF);
+      Value* mask = ConstantInt::get(ctx_->IntPtrTy, TAG_REF_MASK);
+      Value* zero = ConstantInt::get(ctx_->IntPtrTy, TAG_REF);
 
       Value* lint = create_and(cast_int(obj), mask, "masked");
       return create_equal(lint, zero, "is_reference");
+    }
+
+    Value* check_header_bit(Value* obj, BasicBlock* failure, int bit) {
+      Value* is_ref = check_is_reference(obj);
+      BasicBlock* cont = new_block("reference");
+      BasicBlock* positive = new_block("positive");
+      BasicBlock* negative = new_block("negative");
+      BasicBlock* done     = new_block("done");
+
+      create_conditional_branch(cont, failure, is_ref);
+
+      set_block(cont);
+
+      Value* flags = object_flags(obj);
+      Value* mask = ConstantInt::get(ctx_->Int64Ty, 1 << bit);
+
+      Value* bit_obj = b().CreateAnd(flags, mask, "mask");
+      Value* is_bit  = b().CreateICmpEQ(bit_obj, mask, "is_bit");
+
+      create_conditional_branch(positive, negative, is_bit);
+      set_block(positive);
+      create_branch(done);
+
+      set_block(negative);
+      create_branch(done);
+
+      set_block(done);
+
+      PHINode* phi = b().CreatePHI(ObjType, 2, "equal_value");
+      phi->addIncoming(constant(cTrue), positive);
+      phi->addIncoming(constant(cFalse), negative);
+
+      return phi;
+    }
+
+    Value* get_header_value(Value* recv, int header, const char* fallback) {
+      BasicBlock* done = new_block("done");
+      BasicBlock* check = new_block("check");
+      BasicBlock* failure = new_block("failure");
+
+      create_branch(check);
+      set_block(check);
+
+      Value* flag_res = check_header_bit(recv, failure, header);
+
+      check = current_block();
+
+      create_branch(done);
+      set_block(failure);
+
+      Signature sig(ctx_, "Object");
+      sig << "State";
+      sig << "Object";
+
+      Function* func = sig.function(fallback);
+      func->setDoesNotAlias(0); // return value
+
+      Value* call_args[] = { state_, recv };
+      CallInst* call_res = sig.call(fallback, call_args, 2, "result", b());
+      call_res->setOnlyReadsMemory();
+      call_res->setDoesNotThrow();
+
+      create_branch(done);
+      set_block(done);
+
+      PHINode* res = b().CreatePHI(ObjType, 2, "result");
+      res->addIncoming(flag_res, check);
+      res->addIncoming(call_res, failure);
+
+      return res;
+    }
+
+    void check_is_frozen(Value* obj) {
+
+      Value* is_ref = check_is_reference(obj);
+      BasicBlock* done = new_block("done");
+      BasicBlock* cont = new_block("reference");
+      BasicBlock* failure = new_block("use_call");
+
+      create_conditional_branch(cont, done, is_ref);
+
+      set_block(cont);
+
+      Value* flags = object_flags(obj);
+      Value* mask = ConstantInt::get(ctx_->Int64Ty, 1 << OBJECT_FLAGS_FROZEN);
+
+      Value* frozen_obj = b().CreateAnd(flags, mask, "mask");
+
+      Value* not_frozen  = b().CreateICmpEQ(frozen_obj, ConstantInt::get(ctx_->Int64Ty, 0), "not_frozen");
+      create_conditional_branch(done, failure, not_frozen);
+
+      set_block(failure);
+
+      Signature sig(ctx_, "Object");
+
+      sig << "State";
+      sig << "CallFrame";
+      sig << "Object";
+
+      Value* call_args[] = { state_, call_frame_, stack_top() };
+
+      CallInst* res = sig.call("rbx_check_frozen", call_args, 3, "", b());
+      res->setOnlyReadsMemory();
+      res->setDoesNotThrow();
+
+      check_for_exception(res, false);
+
+      b().CreateBr(done);
+      set_block(done);
     }
 
     Value* reference_class(Value* obj) {
@@ -328,22 +466,28 @@ namespace rubinius {
     }
 
     Value* get_class_id(Value* cls) {
-      Value* idx[] = { zero_, cint(offset::class_class_id) };
+      Value* idx[] = { zero_, cint(offset::Class::class_id) };
       Value* gep = create_gep(cls, idx, 2, "class_id_pos");
       return create_load(gep, "class_id");
     }
 
+    Value* get_serial_id(Value* cls) {
+      Value* idx[] = { zero_, cint(offset::Class::serial_id) };
+      Value* gep = create_gep(cls, idx, 2, "serial_id_pos");
+      return create_load(gep, "serial_id");
+    }
+
     Value* check_is_symbol(Value* obj) {
-      Value* mask = ConstantInt::get(ls_->IntPtrTy, TAG_SYMBOL_MASK);
-      Value* zero = ConstantInt::get(ls_->IntPtrTy, TAG_SYMBOL);
+      Value* mask = ConstantInt::get(ctx_->IntPtrTy, TAG_SYMBOL_MASK);
+      Value* zero = ConstantInt::get(ctx_->IntPtrTy, TAG_SYMBOL);
 
       Value* lint = create_and(cast_int(obj), mask, "masked");
       return create_equal(lint, zero, "is_symbol");
     }
 
     Value* check_is_fixnum(Value* obj) {
-      Value* mask = ConstantInt::get(ls_->IntPtrTy, TAG_FIXNUM_MASK);
-      Value* zero = ConstantInt::get(ls_->IntPtrTy, TAG_FIXNUM);
+      Value* mask = ConstantInt::get(ctx_->IntPtrTy, TAG_FIXNUM_MASK);
+      Value* zero = ConstantInt::get(ctx_->IntPtrTy, TAG_FIXNUM);
 
       Value* lint = create_and(cast_int(obj), mask, "masked");
       return create_equal(lint, zero, "is_fixnum");
@@ -357,6 +501,297 @@ namespace rubinius {
       return check_type_bits(obj, rubinius::Tuple::type);
     }
 
+    Value* check_is_bytearray(Value* obj) {
+      return check_type_bits(obj, rubinius::ByteArray::type);
+    }
+
+    Value* check_is_matchdata(Value* obj) {
+      return check_type_bits(obj, rubinius::MatchData::type);
+    }
+
+    Value* check_is_regexp(Value* obj) {
+      return check_type_bits(obj, rubinius::Regexp::type);
+    }
+
+    Value* check_is_class(Value* obj) {
+      return check_type_bits(obj, rubinius::Class::type);
+    }
+
+    void check_direct_class(Value* obj, Value* klass, BasicBlock* success, BasicBlock* failure, bool allow_integer = false) {
+
+      BasicBlock* verify_class_block = new_block("class_verified_block");
+      BasicBlock* reference_block = new_block("reference_block");
+      BasicBlock* check_symbol_block = new_block("check_symbol_block");
+      BasicBlock* is_symbol_block = new_block("is_symbol_block");
+      BasicBlock* check_fixnum_block = new_block("check_fixnum_block");
+      BasicBlock* is_fixnum_block = new_block("is_fixnum_block");
+      BasicBlock* is_integer_block = new_block("is_integer_block");
+
+      BasicBlock* check_nil_block = new_block("check_nil_block");
+      BasicBlock* is_nil_block = new_block("is_nil_block");
+      BasicBlock* check_true_block = new_block("check_true_block");
+      BasicBlock* is_true_block = new_block("is_true_block");
+      BasicBlock* check_false_block = new_block("check_false_block");
+      BasicBlock* is_false_block = new_block("is_false_block");
+
+      Value* is_ref = check_is_reference(obj);
+
+      create_conditional_branch(reference_block, verify_class_block, is_ref);
+      set_block(reference_block);
+
+      Value* obj_klass = b().CreateBitCast(reference_class(obj), ptr_type("Object"), "downcast");
+      Value* check_class = create_equal(obj_klass, klass, "check_class");
+
+      create_conditional_branch(success, failure, check_class);
+
+      set_block(verify_class_block);
+
+      Value* is_class = check_is_class(klass);
+      create_conditional_branch(check_symbol_block, failure, is_class);
+      set_block(check_symbol_block);
+
+      Value* cast_klass = b().CreateBitCast(klass, ptr_type("Class"), "upcast");
+      Value* class_id = get_class_id(cast_klass);
+
+      Value* is_symbol = check_is_symbol(obj);
+      create_conditional_branch(is_symbol_block, check_fixnum_block, is_symbol);
+      set_block(is_symbol_block);
+      Value* is_symbol_class = create_equal(class_id, cint(llvm_state()->symbol_class_id()), "check_class_id");
+      create_conditional_branch(success, failure, is_symbol_class);
+
+      set_block(check_fixnum_block);
+      Value* is_fixnum = check_is_fixnum(obj);
+      create_conditional_branch(is_fixnum_block, check_nil_block, is_fixnum);
+      set_block(is_fixnum_block);
+      Value* is_fixnum_class = create_equal(class_id, cint(llvm_state()->fixnum_class_id()), "check_class_id");
+
+      if(allow_integer) {
+        create_conditional_branch(success, is_integer_block, is_fixnum_class);
+        set_block(is_integer_block);
+        Value* is_integer_class = create_equal(class_id, cint(llvm_state()->integer_class_id()), "check_class_id");
+        create_conditional_branch(success, failure, is_integer_class);
+      } else {
+        create_conditional_branch(success, failure, is_fixnum_class);
+      }
+
+      set_block(check_nil_block);
+      Value* is_nil = check_is_immediate(obj, cNil);
+      create_conditional_branch(is_nil_block, check_true_block, is_nil);
+      set_block(is_nil_block);
+      Value* is_nil_class = create_equal(class_id, cint(llvm_state()->nil_class_id()), "check_class_id");
+      create_conditional_branch(success, failure, is_nil_class);
+
+      set_block(check_true_block);
+      Value* is_true = check_is_immediate(obj, cTrue);
+      create_conditional_branch(is_true_block, check_false_block, is_true);
+      set_block(is_true_block);
+      Value* is_true_class = create_equal(class_id, cint(llvm_state()->true_class_id()), "check_class_id");
+      create_conditional_branch(success, failure, is_true_class);
+
+      set_block(check_false_block);
+      Value* is_false = check_is_immediate(obj, cFalse);
+      create_conditional_branch(is_false_block, failure, is_false);
+      set_block(is_false_block);
+      Value* is_false_class = create_equal(class_id, cint(llvm_state()->false_class_id()), "check_class_id");
+      create_conditional_branch(success, failure, is_false_class);
+    }
+
+    Value* check_kind_of(Value* obj, Value* check_klass) {
+      type::KnownType kt = type::KnownType::extract(ctx_, check_klass);
+
+      BasicBlock* cont = new_block("continue");
+      BasicBlock* immediate_positive_block = 0;
+      BasicBlock* immediate_negative_block = 0;
+      Class* klass = 0;
+      BasicBlock* use_call  = new_block("use_call");
+      BasicBlock* positive  = new_block("positive");
+      BasicBlock* negative  = new_block("negative");
+
+      uint32_t class_id = 0;
+
+      if(kt.class_p()) {
+        class_id = kt.class_id();
+      }
+
+      if(kt.constant_cache_p()) {
+        ConstantCache* constant_cache = kt.constant_cache();
+        klass = try_as<Class>(constant_cache->value());
+        if(klass) {
+          class_id = klass->class_id();
+        }
+      }
+
+      if(class_id) {
+        if(llvm_state()->config().jit_inline_debug) {
+          ctx_->inline_log("inlining") << "direct class used for kind_of ";
+        }
+
+          BasicBlock* use_cache = new_block("use_cache");
+
+          type::KnownType recv_type = type::KnownType::extract(ctx_, obj);
+          uint32_t recv_class_id = recv_type.class_id();
+
+          if(recv_type.instance_p() && class_id == recv_class_id) {
+            if(llvm_state()->config().jit_inline_debug) {
+              ctx_->log() << "(eliding because of staticly known match)\n";
+            }
+            create_branch(positive);
+          } else if(class_id == llvm_state()->fixnum_class_id()) {
+            if(llvm_state()->config().jit_inline_debug) {
+              ctx_->log() << "(against Fixnum)\n";
+            }
+            Value* is_fixnum = check_is_fixnum(obj);
+            create_conditional_branch(positive, negative, is_fixnum);
+          } else if(class_id == llvm_state()->integer_class_id() ||
+                    class_id == llvm_state()->numeric_class_id()) {
+            if(llvm_state()->config().jit_inline_debug) {
+              ctx_->log() << "(against Integer / Numeric)\n";
+            }
+            Value* is_fixnum = check_is_fixnum(obj);
+            create_conditional_branch(positive, use_call, is_fixnum);
+          } else if(class_id == llvm_state()->bignum_class_id()) {
+            if(llvm_state()->config().jit_inline_debug) {
+              ctx_->log() << "(against Bignum)\n";
+            }
+            Value* is_ref = check_is_reference(obj);
+            create_conditional_branch(use_cache, negative, is_ref);
+            set_block(use_cache);
+
+            Value* is_type = check_type_bits(obj, BignumType);
+            create_conditional_branch(positive, negative, is_type);
+          } else if(class_id == llvm_state()->float_class_id()) {
+            if(llvm_state()->config().jit_inline_debug) {
+              ctx_->log() << "(against Float)\n";
+            }
+            Value* is_ref = check_is_reference(obj);
+            create_conditional_branch(use_cache, negative, is_ref);
+            set_block(use_cache);
+
+            Value* is_type = check_type_bits(obj, FloatType);
+            create_conditional_branch(positive, negative, is_type);
+          } else if(class_id == llvm_state()->symbol_class_id()) {
+            if(llvm_state()->config().jit_inline_debug) {
+              ctx_->log() << "(against Symbol)\n";
+            }
+            Value* is_symbol = check_is_symbol(obj);
+            create_conditional_branch(positive, negative, is_symbol);
+          } else if(class_id == llvm_state()->string_class_id()) {
+            if(llvm_state()->config().jit_inline_debug) {
+              ctx_->log() << "(against String)\n";
+            }
+            Value* is_ref = check_is_reference(obj);
+            create_conditional_branch(use_cache, negative, is_ref);
+          set_block(use_cache);
+
+          Value* is_type = check_type_bits(obj, StringType);
+          create_conditional_branch(positive, negative, is_type);
+        } else if(class_id == llvm_state()->regexp_class_id()) {
+          if(llvm_state()->config().jit_inline_debug) {
+            ctx_->log() << "(against Regexp)\n";
+          }
+          Value* is_ref = check_is_reference(obj);
+          create_conditional_branch(use_cache, negative, is_ref);
+          set_block(use_cache);
+
+          Value* is_type = check_type_bits(obj, RegexpType);
+          create_conditional_branch(positive, negative, is_type);
+        } else if(class_id == llvm_state()->encoding_class_id()) {
+          if(llvm_state()->config().jit_inline_debug) {
+            ctx_->log() << "(against Encoding)\n";
+          }
+          Value* is_ref = check_is_reference(obj);
+          create_conditional_branch(use_cache, negative, is_ref);
+          set_block(use_cache);
+
+          Value* is_type = check_type_bits(obj, EncodingType);
+          create_conditional_branch(positive, negative, is_type);
+        } else if(class_id == llvm_state()->module_class_id()) {
+          if(llvm_state()->config().jit_inline_debug) {
+            ctx_->log() << "(against Module)\n";
+          }
+          Value* is_ref = check_is_reference(obj);
+          create_conditional_branch(use_cache, negative, is_ref);
+          set_block(use_cache);
+
+          Value* is_type = check_type_bits(obj, ModuleType);
+          // Use call here since Class has a different VM type
+          // but still is a Module.
+          create_conditional_branch(positive, use_call, is_type);
+        } else if(class_id == llvm_state()->class_class_id()) {
+          if(llvm_state()->config().jit_inline_debug) {
+            ctx_->log() << "(against Class)\n";
+          }
+          Value* is_ref = check_is_reference(obj);
+          create_conditional_branch(use_cache, negative, is_ref);
+          set_block(use_cache);
+
+          Value* is_type = check_type_bits(obj, ClassType);
+          create_conditional_branch(positive, use_call, is_type);
+        } else if(class_id == llvm_state()->true_class_id()) {
+          if(llvm_state()->config().jit_inline_debug) {
+            ctx_->log() << "(against TrueClass)\n";
+          }
+          Value* is_true = create_equal(obj, constant(cTrue), "is_true");
+          create_conditional_branch(positive, negative, is_true);
+        } else if(class_id == llvm_state()->false_class_id()) {
+          if(llvm_state()->config().jit_inline_debug) {
+            ctx_->log() << "(against FalseClass)\n";
+          }
+          Value* is_false = create_equal(obj, constant(cFalse), "is_false");
+          create_conditional_branch(positive, negative, is_false);
+        } else if(class_id == llvm_state()->nil_class_id()) {
+          if(llvm_state()->config().jit_inline_debug) {
+            ctx_->log() << "(against NilClass)\n";
+          }
+          Value* is_nil = create_equal(obj, constant(cNil), "is_nil");
+          create_conditional_branch(positive, negative, is_nil);
+        } else {
+          if(llvm_state()->config().jit_inline_debug) {
+            ctx_->log() << "(regular Ruby class)\n";
+          }
+          check_direct_class(obj, check_klass, positive, use_call, true);
+        }
+      }
+
+      if(!class_id) {
+        if(llvm_state()->config().jit_inline_debug) {
+          ctx_->inline_log("inlining") << "no cache for kind_of fast path\n";
+        }
+        check_direct_class(obj, check_klass, positive, use_call, true);
+      }
+
+      set_block(positive);
+      immediate_positive_block = current_block();
+      create_branch(cont);
+
+      set_block(negative);
+      immediate_negative_block = current_block();
+      create_branch(cont);
+
+      set_block(use_call);
+
+      Signature sig(ctx_, ctx_->ptr_type("Object"));
+      sig << "State";
+      sig << "Object";
+      sig << "Object";
+
+      Value* call_args[] = { state_, obj, check_klass };
+
+      CallInst* val = sig.call("rbx_kind_of", call_args, 3, "kind_of", b());
+      val->setOnlyReadsMemory();
+      val->setDoesNotThrow();
+
+      BasicBlock* ret_block = current_block();
+      create_branch(cont);
+      set_block(cont);
+
+      PHINode* phi = b().CreatePHI(ObjType, 3, "constant");
+      phi->addIncoming(constant(cTrue), immediate_positive_block);
+      phi->addIncoming(constant(cFalse), immediate_negative_block);
+      phi->addIncoming(val, ret_block);
+      return phi;
+    }
+
     void verify_guard(Value* cmp, BasicBlock* failure) {
       BasicBlock* cont = new_block("guarded_body");
       create_conditional_branch(cont, failure, cmp);
@@ -366,16 +801,99 @@ namespace rubinius {
       failure->moveAfter(cont);
     }
 
-    type::KnownType check_class(Value* obj, Class* klass, BasicBlock* failure) {
+    type::KnownType check_class(Value* obj, Class* klass, uint32_t class_id, uint32_t serial_id,
+                                BasicBlock* class_id_failure, BasicBlock* serial_id_failure) {
+
       object_type type = (object_type)klass->instance_type()->to_native();
 
       switch(type) {
       case rubinius::Symbol::type:
-        if(ls_->type_optz()) {
-          type::KnownType kt = type::KnownType::extract(ls_, obj);
+        if(ctx_->llvm_state()->type_optz()) {
+          type::KnownType kt = type::KnownType::extract(ctx_, obj);
 
           if(kt.symbol_p()) {
-            context().info("eliding guard: detected symbol");
+            ctx_->info("eliding guard: detected symbol");
+            return kt;
+          } else {
+            verify_guard(check_is_symbol(obj), class_id_failure);
+          }
+        } else {
+          verify_guard(check_is_symbol(obj), class_id_failure);
+        }
+
+        return type::KnownType::symbol();
+      case rubinius::Fixnum::type:
+        {
+          if(ctx_->llvm_state()->type_optz()) {
+            type::KnownType kt = type::KnownType::extract(ctx_, obj);
+
+            if(kt.static_fixnum_p()) {
+              ctx_->info("eliding guard: detected static fixnum");
+              return kt;
+            } else {
+              verify_guard(check_is_fixnum(obj), class_id_failure);
+            }
+          } else {
+            verify_guard(check_is_fixnum(obj), class_id_failure);
+          }
+        }
+        return type::KnownType::fixnum();
+      case NilType:
+        verify_guard(check_is_immediate(obj, cNil), class_id_failure);
+        return type::KnownType::nil();
+      case TrueType:
+        verify_guard(check_is_immediate(obj, cTrue), class_id_failure);
+        return type::KnownType::true_();
+      case FalseType:
+        verify_guard(check_is_immediate(obj, cFalse), class_id_failure);
+        return type::KnownType::false_();
+      default:
+        {
+          type::KnownType kt = type::KnownType::extract(ctx_, obj);
+
+          if(kt.type_p()) {
+            if(ctx_->llvm_state()->config().jit_inline_debug) {
+              ctx_->info_log("eliding guard") << "Type object used statically\n";
+            }
+
+            return kt;
+
+          } else if(kt.class_id() == class_id) {
+            if(ctx_->llvm_state()->config().jit_inline_debug) {
+              ctx_->info_log("eliding redundant guard")
+                << "class " << ctx_->llvm_state()->symbol_debug_str(klass->module_name())
+                << " (" << class_id << ")\n";
+            }
+
+            return kt;
+          }
+
+          check_reference_class(obj, class_id, serial_id, class_id_failure, serial_id_failure);
+          if(SingletonClass* singleton = try_as<SingletonClass>(klass)) {
+            if(Class* attached_class = try_as<Class>(singleton->attached_instance())) {
+              return type::KnownType::class_object(attached_class->class_id());
+            } else {
+              return type::KnownType::singleton_instance(class_id);
+            }
+          } else {
+            return type::KnownType::instance(class_id);
+          }
+        }
+      }
+    }
+
+    type::KnownType check_class(Value* obj, Class* klass,
+                                BasicBlock* failure) {
+
+      object_type type = (object_type)klass->instance_type()->to_native();
+
+      switch(type) {
+      case rubinius::Symbol::type:
+        if(ctx_->llvm_state()->type_optz()) {
+          type::KnownType kt = type::KnownType::extract(ctx_, obj);
+
+          if(kt.symbol_p()) {
+            ctx_->info("eliding guard: detected symbol");
             return kt;
           } else {
             verify_guard(check_is_symbol(obj), failure);
@@ -387,11 +905,11 @@ namespace rubinius {
         return type::KnownType::symbol();
       case rubinius::Fixnum::type:
         {
-          if(ls_->type_optz()) {
-            type::KnownType kt = type::KnownType::extract(ls_, obj);
+          if(ctx_->llvm_state()->type_optz()) {
+            type::KnownType kt = type::KnownType::extract(ctx_, obj);
 
-            if(kt.static_fixnum_p()) {
-              context().info("eliding guard: detected static fixnum");
+            if(kt.fixnum_p()) {
+              ctx_->info("eliding guard: detected fixnum");
               return kt;
             } else {
               verify_guard(check_is_fixnum(obj), failure);
@@ -402,42 +920,46 @@ namespace rubinius {
         }
         return type::KnownType::fixnum();
       case NilType:
-        verify_guard(check_is_immediate(obj, Qnil), failure);
+        verify_guard(check_is_immediate(obj, cNil), failure);
         return type::KnownType::nil();
       case TrueType:
-        verify_guard(check_is_immediate(obj, Qtrue), failure);
+        verify_guard(check_is_immediate(obj, cTrue), failure);
         return type::KnownType::true_();
       case FalseType:
-        verify_guard(check_is_immediate(obj, Qfalse), failure);
+        verify_guard(check_is_immediate(obj, cFalse), failure);
         return type::KnownType::false_();
       default:
         {
-          type::KnownType kt = type::KnownType::extract(ls_, obj);
+          type::KnownType kt = type::KnownType::extract(ctx_, obj);
 
           if(kt.type_p()) {
-            if(ls_->config().jit_inline_debug) {
-              context().info_log("eliding guard") << "Type object used statically\n";
+            if(ctx_->llvm_state()->config().jit_inline_debug) {
+              ctx_->info_log("eliding guard") << "Type object used statically\n";
             }
 
             return kt;
 
           } else if(kt.class_id() == klass->class_id()) {
-            if(ls_->config().jit_inline_debug) {
-              context().info_log("eliding redundant guard")
-                << "class " << ls_->symbol_cstr(klass->name())
+            if(ctx_->llvm_state()->config().jit_inline_debug) {
+              ctx_->info_log("eliding redundant guard")
+                << "class " << ctx_->llvm_state()->symbol_debug_str(klass->module_name())
                 << " (" << klass->class_id() << ")\n";
             }
 
             return kt;
           }
 
-          check_reference_class(obj, klass->class_id(), failure);
-          return type::KnownType::instance(klass->class_id());
+          check_reference_class(obj, klass, failure);
+          if(kind_of<SingletonClass>(klass)) {
+            return type::KnownType::singleton_instance(klass->class_id());
+          } else {
+            return type::KnownType::instance(klass->class_id());
+          }
         }
       }
     }
 
-    void check_reference_class(Value* obj, int needed_id, BasicBlock* failure) {
+    void check_reference_class(Value* obj, Class* klass, BasicBlock* failure) {
       Value* is_ref = check_is_reference(obj);
       BasicBlock* cont = new_block("check_class_id");
       BasicBlock* body = new_block("correct_class");
@@ -446,16 +968,42 @@ namespace rubinius {
 
       set_block(cont);
 
-      Value* klass = reference_class(obj);
-      Value* class_id = get_class_id(klass);
+      Value* target = reference_class(obj);
+      Value* match = create_equal(get_class_id(target), cint(klass->class_id()), "check_class_id");
 
-      Value* cmp = create_equal(class_id, cint(needed_id), "check_class_id");
-
-      create_conditional_branch(body, failure, cmp);
+      create_conditional_branch(body, failure, match);
 
       set_block(body);
 
       failure->moveAfter(body);
+    }
+
+    void check_reference_class(Value* obj, uint32_t class_id, uint32_t serial_id,
+                               BasicBlock* class_id_failure, BasicBlock* serial_id_failure) {
+      Value* is_ref = check_is_reference(obj);
+      BasicBlock* cont = new_block("check_class_id");
+      BasicBlock* body = new_block("correct_class");
+      BasicBlock* serial = new_block("correct_serial");
+
+      create_conditional_branch(cont, class_id_failure, is_ref);
+
+      set_block(cont);
+
+      Value* klass = reference_class(obj);
+      Value* class_match = create_equal(get_class_id(klass), cint(class_id), "check_class_id");
+
+      create_conditional_branch(body, class_id_failure, class_match);
+
+      set_block(body);
+      class_id_failure->moveAfter(body);
+
+      Value* serial_match = create_equal(get_serial_id(klass), cint(serial_id), "check_serial_id");
+
+      create_conditional_branch(serial, serial_id_failure, serial_match);
+
+      set_block(serial);
+
+      serial_id_failure->moveAfter(serial);
     }
 
     // BasicBlock management
@@ -465,7 +1013,7 @@ namespace rubinius {
     }
 
     BasicBlock* new_block(const char* name = "continue") {
-      return BasicBlock::Create(ls_->ctx(), name, function_);
+      return BasicBlock::Create(ctx_->llvm_context(), name, function_);
     }
 
     void set_block(BasicBlock* bb) {
@@ -476,7 +1024,7 @@ namespace rubinius {
     // Stack manipulations
     //
     Value* stack_slot_position(int which) {
-      assert(which >= 0 && which < vmmethod()->stack_size);
+      assert(which >= 0 && which < machine_code()->stack_size);
       return b().CreateConstGEP1_32(stack_, which, "stack_pos");
     }
 
@@ -486,7 +1034,7 @@ namespace rubinius {
 
     void set_sp(int sp) {
       sp_ = sp;
-      assert(sp_ >= -1 && sp_ < vmmethod()->stack_size);
+      assert(sp_ >= -1 && sp_ < machine_code()->stack_size);
       hints_.clear();
     }
 
@@ -510,7 +1058,7 @@ namespace rubinius {
 
     Value* stack_position(int amount) {
       int pos = sp_ + amount;
-      assert(pos >= 0 && pos < vmmethod()->stack_size);
+      assert(pos >= 0 && pos < machine_code()->stack_size);
 
       return b().CreateConstGEP1_32(stack_, pos, "stack_pos");
     }
@@ -519,18 +1067,24 @@ namespace rubinius {
       return stack_position(-back);
     }
 
+    void store_stack_back_position(int back, Value* val) {
+      Value* pos = stack_back_position(back);
+      clear_hint(-back);
+      b().CreateStore(val, pos);
+    }
+
     Value* stack_objects(int count) {
       return stack_position(-(count - 1));
     }
 
     void stack_ptr_adjust(int amount) {
       sp_ += amount;
-      assert(sp_ >= -1 && sp_ < vmmethod()->stack_size);
+      assert(sp_ >= -1 && sp_ < machine_code()->stack_size);
     }
 
     void stack_remove(int count=1) {
       sp_ -= count;
-      assert(sp_ >= -1 && sp_ < vmmethod()->stack_size);
+      assert(sp_ >= -1 && sp_ < machine_code()->stack_size);
     }
 
     void stack_push(Value* val) {
@@ -548,13 +1102,13 @@ namespace rubinius {
 
       clear_hint();
 
-      if(type::KnownType::has_hint(ls_, val)) {
-        set_known_type(type::KnownType::extract(ls_, val));
+      if(type::KnownType::has_hint(ctx_, val)) {
+        set_known_type(type::KnownType::extract(ctx_, val));
       }
     }
 
     void stack_push(Value* val, type::KnownType kt) {
-      kt.associate(ls_, val);
+      kt.associate(ctx_, val);
 
       stack_ptr_adjust(1);
       Value* stack_pos = stack_ptr();
@@ -649,10 +1203,19 @@ namespace rubinius {
       }
     }
 
+    void clear_hint(int back) {
+      int target = sp_ + back;
+      if(hints_.size() > (size_t)target) {
+        hints_[target].hint = 0;
+        hints_[target].metadata = 0;
+        hints_[target].known_type = type::KnownType::unknown();
+      }
+    }
+
     llvm::Value* stack_back(int back) {
       Instruction* I = b().CreateLoad(stack_back_position(back), "stack_load");
       type::KnownType kt = hint_known_type(back);
-      kt.associate(ls_, I);
+      kt.associate(ctx_, I);
 
       return I;
     }
@@ -666,8 +1229,8 @@ namespace rubinius {
 
       clear_hint();
 
-      if(type::KnownType::has_hint(ls_, val)) {
-        set_known_type(type::KnownType::extract(ls_, val));
+      if(type::KnownType::has_hint(ctx_, val)) {
+        set_known_type(type::KnownType::extract(ctx_, val));
       }
     }
 
@@ -680,7 +1243,7 @@ namespace rubinius {
 
     // Scope maintenance
     void flush_scope_to_heap(Value* vars) {
-      Value* pos = b().CreateConstGEP2_32(vars, 0, offset::vars_on_heap,
+      Value* pos = b().CreateConstGEP2_32(vars, 0, offset::StackVariables::on_heap,
                                      "on_heap_pos");
 
       Value* on_heap = b().CreateLoad(pos, "on_heap");
@@ -695,11 +1258,11 @@ namespace rubinius {
 
       set_block(do_flush);
 
-      Signature sig(ls_, "Object");
-      sig << "VM";
+      Signature sig(ctx_, "Object");
+      sig << "State";
       sig << "StackVariables";
 
-      Value* call_args[] = { vm_, vars };
+      Value* call_args[] = { state_, vars };
 
       sig.call("rbx_flush_scope", call_args, 2, "", b());
 
@@ -712,18 +1275,18 @@ namespace rubinius {
     //
     Value* constant(Object* obj) {
       return b().CreateIntToPtr(
-          ConstantInt::get(ls_->IntPtrTy, (intptr_t)obj),
+          ConstantInt::get(ctx_->IntPtrTy, (intptr_t)obj),
           ObjType, "const_obj");
     }
 
-    Value* constant(void* obj, const Type* type) {
+    Value* constant(void* obj, Type* type) {
       return b().CreateIntToPtr(
-          ConstantInt::get(ls_->IntPtrTy, (intptr_t)obj),
+          ConstantInt::get(ctx_->IntPtrTy, (intptr_t)obj),
           type, "const_of_type");
     }
 
     Value* ptrtoint(Value* ptr) {
-      return b().CreatePtrToInt(ptr, ls_->IntPtrTy, "ptr2int");
+      return b().CreatePtrToInt(ptr, ctx_->IntPtrTy, "ptr2int");
     }
 
     Value* subtract_pointers(Value* ptra, Value* ptrb) {
@@ -732,7 +1295,7 @@ namespace rubinius {
 
       Value* sub = b().CreateSub(inta, intb, "ptr_diff");
 
-      Value* size_of = ConstantInt::get(ls_->IntPtrTy, sizeof(uintptr_t));
+      Value* size_of = ConstantInt::get(ctx_->IntPtrTy, sizeof(uintptr_t));
 
       return b().CreateSDiv(sub, size_of, "ptr_diff_adj");
     }
@@ -742,39 +1305,6 @@ namespace rubinius {
     Value* cast_int(Value* obj) {
       return b().CreatePtrToInt(
           obj, NativeIntTy, "cast");
-    }
-
-    // Fixnum manipulations
-    //
-    Value* tag_strip(Value* obj, const Type* type = NULL) {
-      if(!type) type = FixnumTy;
-
-      Value* i = b().CreatePtrToInt(
-          obj, NativeIntTy, "as_int");
-
-      Value* more = b().CreateLShr(
-          i, ConstantInt::get(NativeIntTy, 1),
-          "lshr");
-      return b().CreateIntCast(
-          more, type, true, "stripped");
-    }
-
-    Value* tag_strip32(Value* obj) {
-      Value* i = b().CreatePtrToInt(
-          obj, ls_->Int32Ty, "as_int");
-
-      return b().CreateLShr(
-          i, one_,
-          "lshr");
-    }
-
-    Value* fixnum_to_native(Value* obj) {
-      Value* i = b().CreatePtrToInt(
-          obj, NativeIntTy, "as_int");
-
-      return b().CreateLShr(
-          i, ConstantInt::get(NativeIntTy, 1),
-          "lshr");
     }
 
     Value* fixnum_tag(Value* obj) {
@@ -795,7 +1325,7 @@ namespace rubinius {
       Value* i = b().CreatePtrToInt(
           obj, NativeIntTy, "as_int");
 
-      return b().CreateLShr(i, One, "lshr");
+      return b().CreateAShr(i, One, "ashr");
     }
 
     Value* as_obj(Value* val) {
@@ -803,8 +1333,23 @@ namespace rubinius {
     }
 
     Value* check_if_fixnum(Value* val) {
-      Value* fix_mask = ConstantInt::get(ls_->IntPtrTy, TAG_FIXNUM_MASK);
-      Value* fix_tag  = ConstantInt::get(ls_->IntPtrTy, TAG_FIXNUM);
+      Value* fix_mask = ConstantInt::get(ctx_->IntPtrTy, TAG_FIXNUM_MASK);
+      Value* fix_tag  = ConstantInt::get(ctx_->IntPtrTy, TAG_FIXNUM);
+
+      Value* lint = cast_int(val);
+      Value* masked = b().CreateAnd(lint, fix_mask, "masked");
+
+      return b().CreateICmpEQ(masked, fix_tag, "is_fixnum");
+    }
+
+    Value* check_if_positive_fixnum(Value* val) {
+      /**
+       * Add the sign bit to the mask, when and'ed the result
+       * should be the default fixnum mask for a positive number
+       */
+      Value* fix_mask = ConstantInt::get(ctx_->IntPtrTy,
+                        (1UL << (FIXNUM_WIDTH + 1)) | TAG_FIXNUM_MASK);
+      Value* fix_tag  = ConstantInt::get(ctx_->IntPtrTy, TAG_FIXNUM);
 
       Value* lint = cast_int(val);
       Value* masked = b().CreateAnd(lint, fix_mask, "masked");
@@ -813,8 +1358,8 @@ namespace rubinius {
     }
 
     Value* check_if_fixnums(Value* val, Value* val2) {
-      Value* fix_mask = ConstantInt::get(ls_->IntPtrTy, TAG_FIXNUM_MASK);
-      Value* fix_tag  = ConstantInt::get(ls_->IntPtrTy, TAG_FIXNUM);
+      Value* fix_mask = ConstantInt::get(ctx_->IntPtrTy, TAG_FIXNUM_MASK);
+      Value* fix_tag  = ConstantInt::get(ctx_->IntPtrTy, TAG_FIXNUM);
 
       Value* lint = cast_int(val);
       Value* rint = cast_int(val2);
@@ -825,11 +1370,77 @@ namespace rubinius {
       return b().CreateICmpEQ(masked, fix_tag, "is_fixnum");
     }
 
+    Value* check_if_positive_fixnums(Value* val, Value* val2) {
+      /**
+       * Add the sign bit to the mask, when and'ed the result
+       * should be the default fixnum mask for a positive number
+       */
+      Value* fix_mask = ConstantInt::get(ctx_->IntPtrTy,
+                        (1UL << (FIXNUM_WIDTH + 1)) | TAG_FIXNUM_MASK);
+      Value* fix_tag  = ConstantInt::get(ctx_->IntPtrTy, TAG_FIXNUM);
+
+      Value* lint = cast_int(val);
+      Value* rint = cast_int(val2);
+
+      /**
+       * And both numbers with the mask for positive numbers.
+       * Then OR them so if one of them is negative, the result
+       * is not equal to the fixnum tag obtained from both arguments
+       */
+      Value* masked1 = b().CreateAnd(lint, fix_mask, "masked");
+      Value* masked2 = b().CreateAnd(rint, fix_mask, "masked");
+      Value* anded   = b().CreateAnd(masked1, masked2, "fixnums_anded");
+      Value* ored    = b().CreateOr(masked1, masked2, "fixnums_ored");
+
+      Value* and_fix = b().CreateICmpEQ(anded, fix_tag, "is_fixnum_and");
+      Value* ored_fix = b().CreateICmpEQ(ored, fix_tag, "is_fixnum_ored");
+
+      return b().CreateAnd(and_fix, ored_fix, "is_fixnum");
+    }
+
+    Value* check_if_non_zero_fixnum(Value* val) {
+      Value* fix_tag  = ConstantInt::get(ctx_->IntPtrTy, TAG_FIXNUM);
+
+      Value* lint = cast_int(val);
+      return b().CreateICmpNE(lint, fix_tag, "is_fixnum");
+    }
+
+    Value* check_if_fits_fixnum(Value* val) {
+      Value* fixnum_max = ConstantInt::get(ctx_->IntPtrTy, FIXNUM_MAX);
+      Value* fixnum_min = ConstantInt::get(ctx_->IntPtrTy, FIXNUM_MIN);
+      Value* val_int = cast_int(val);
+
+      Value* less = b().CreateICmpSLE(val_int, fixnum_max);
+      Value* more = b().CreateICmpSGE(val_int, fixnum_min);
+
+      return b().CreateAnd(less, more, "fits_fixnum");
+    }
+
+    Value* promote_to_bignum(Value* arg) {
+      std::vector<Type*> types;
+
+      types.push_back(StateTy);
+      types.push_back(NativeIntTy);
+
+      FunctionType* ft = FunctionType::get(ObjType, types, false);
+      Function* func = cast<Function>(
+          module_->getOrInsertFunction("rbx_create_bignum", ft));
+
+      Value* call_args[] = {
+        state_,
+        arg
+      };
+
+      CallInst* result = b().CreateCall(func, call_args, "big_value");
+      result->setDoesNotThrow();
+      return result;
+    }
+
     // Tuple access
     Value* get_tuple_size(Value* tup) {
       Value* idx[] = {
         zero_,
-        cint(offset::tuple_full_size)
+        cint(offset::Tuple::full_size)
       };
 
       Value* pos = create_gep(tup, idx, 2, "table_size_pos");
@@ -840,11 +1451,32 @@ namespace rubinius {
                         true,
                         "to_native_int");
 
-      Value* header = ConstantInt::get(NativeIntTy, sizeof(Tuple));
+      Value* header = ConstantInt::get(NativeIntTy, Tuple::fields_offset);
       Value* body_bytes = b().CreateSub(bytes, header);
 
       Value* ptr_size = ConstantInt::get(NativeIntTy, sizeof(Object*));
       return b().CreateSDiv(body_bytes, ptr_size);
+    }
+
+    // Tuple access
+    Value* get_bytearray_size(Value* bytearray) {
+      Value* idx[] = {
+        zero_,
+        cint(offset::ByteArray::full_size)
+      };
+
+      Value* pos = create_gep(bytearray, idx, 2, "bytearray_size_pos");
+
+      Value* bytes = b().CreateIntCast(
+                        create_load(pos, "bytearray_size"),
+                        NativeIntTy,
+                        true,
+                        "to_native_int");
+
+      Value* header = ConstantInt::get(NativeIntTy, ByteArray::bytes_offset);
+      Value* body_bytes = b().CreateSub(bytes, header);
+
+      return body_bytes;
     }
 
     // Object access
@@ -862,6 +1494,72 @@ namespace rubinius {
       Value* pos = create_gep(cst, idx2, 1, "field_pos");
 
       return create_load(pos, "field");
+    }
+
+    void set_object_type_slot(Value* obj, int field, int offset, object_type type, Value* val) {
+      BasicBlock* not_nil = new_block("not_nil");
+      BasicBlock* cont    = new_block("type_verified");
+      BasicBlock* failure = new_block("type_unverified");
+      BasicBlock* done    = new_block("done");
+      BasicBlock* ref     = new_block("is_reference");
+
+
+      create_conditional_branch(cont, not_nil, check_is_immediate(val, cNil));
+      set_block(not_nil);
+
+      switch(type) {
+        case Fixnum::type:
+        case Integer::type:
+          // Optimize here for the common case that the integer is a fixnum
+          create_conditional_branch(cont, failure, check_is_fixnum(val));
+          break;
+        case Symbol::type:
+          create_conditional_branch(cont, failure, check_is_symbol(val));
+          break;
+        case Object::type:
+          // Any type here is a valid type, so no need for a type check
+          create_branch(cont);
+          break;
+        default:
+          create_conditional_branch(ref, failure, check_is_reference(val));
+          set_block(ref);
+          create_conditional_branch(cont, failure, check_type_bits(val, type));
+          break;
+      }
+
+      set_block(cont);
+      set_object_slot(obj, offset, val);
+      cont = current_block();
+      create_branch(done);
+
+      set_block(failure);
+
+      Signature sig(ctx_, ObjType);
+
+      sig << StateTy;
+      sig << ObjType;
+      sig << ctx_->Int32Ty;
+      sig << ObjType;
+
+      Value* call_args[] = {
+        state_,
+        obj,
+        cint(field),
+        val
+      };
+
+      Value* ret = sig.call("rbx_set_my_field", call_args, 4, "field", b());
+      check_for_exception(ret, false);
+
+      failure = current_block();
+
+      create_branch(done);
+
+      set_block(done);
+
+      PHINode* phi = b().CreatePHI(ObjType, 2, "push_ivar");
+      phi->addIncoming(val, cont);
+      phi->addIncoming(ret, failure);
     }
 
     void set_object_slot(Value* obj, int offset, Value* val) {
@@ -885,7 +1583,7 @@ namespace rubinius {
     //
     GetElementPtrInst* create_gep(Value* rec, Value** idx, int count,
                                   const char* name) {
-      return cast<GetElementPtrInst>(b().CreateGEP(rec, idx, idx+count, name));
+      return cast<GetElementPtrInst>(b().CreateGEP(rec, ArrayRef<Value*>(idx, count), name));
     }
 
     LoadInst* create_load(Value* ptr, const char* name = "") {
@@ -926,8 +1624,46 @@ namespace rubinius {
     }
 
     void write_barrier(Value* obj, Value* val) {
-      Signature wb(ls_, ObjType);
-      wb << VMTy;
+
+      Value* is_ref = check_is_reference(val);
+
+      BasicBlock* cont = new_block("reference_obj");
+      BasicBlock* cont_notscan = new_block("object_not_scanned");
+
+      BasicBlock* run_barrier = new_block("run_barrier");
+      BasicBlock* done = new_block("done");
+
+      create_conditional_branch(cont, done, is_ref);
+
+      set_block(cont);
+
+      // Check if obj is scanned already
+      Value* object_memory_mark = b().CreateLoad(object_memory_mark_pos_, "object_memory_mark");
+      Value* flags = object_flags(obj);
+
+      Value* mark_mask  = ConstantInt::get(ctx_->Int64Ty, (7UL << (OBJECT_FLAGS_MARKED - 2)));
+      Value* mark_masked = b().CreateAnd(flags, mark_mask, "mark_mask");
+      Value* scan_val   = b().CreateIntCast(
+                            b().CreateAdd(object_memory_mark, cint(1), "scan_mark"),
+                            ctx_->Int64Ty, false);
+
+      Value* scan_mark = b().CreateShl(scan_val, llvm::ConstantInt::get(ctx_->Int64Ty, OBJECT_FLAGS_MARKED - 2), "lshr");
+      Value* is_scanned = b().CreateICmpEQ(mark_masked, scan_mark, "is_scanned");
+
+      create_conditional_branch(run_barrier, cont_notscan, is_scanned);
+      set_block(cont_notscan);
+
+      Value* zone_mask  = ConstantInt::get(ctx_->Int64Ty, (3UL << (OBJECT_FLAGS_GC_ZONE - 1)));
+      Value* young_mask = ConstantInt::get(ctx_->Int64Ty, YoungObjectZone << (OBJECT_FLAGS_GC_ZONE - 1));
+
+      Value* zone_masked = b().CreateAnd(flags, zone_mask, "zone_mask");
+      Value* is_young = b().CreateICmpEQ(zone_masked, young_mask, "is_young");
+
+      create_conditional_branch(done, run_barrier, is_young);
+      set_block(run_barrier);
+
+      Signature wb(ctx_, ObjType);
+      wb << StateTy;
       wb << ObjType;
       wb << ObjType;
 
@@ -935,13 +1671,17 @@ namespace rubinius {
         obj = b().CreateBitCast(obj, ObjType, "casted");
       }
 
-      Value* call_args[] = { vm_, obj, val };
+      Value* call_args[] = { state_, obj, val };
       wb.call("rbx_write_barrier", call_args, 3, "", b());
+
+      create_branch(done);
+      set_block(done);
+
     }
 
     void call_debug_spot(int spot) {
-      Signature sig(ls_, ObjType);
-      sig << ls_->Int32Ty;
+      Signature sig(ctx_, ObjType);
+      sig << ctx_->Int32Ty;
 
       Value* call_args[] = { cint(spot) };
 
@@ -949,18 +1689,12 @@ namespace rubinius {
     }
 
     void call_debug_spot(Value* val) {
-      Signature sig(ls_, ObjType);
+      Signature sig(ctx_, ObjType);
       sig << val->getType();
 
       Value* call_args[] = { val };
 
       sig.call("rbx_jit_debug_spot", call_args, 1, "", b());
-    }
-
-    Value* gc_literal(Object* obj, const Type* type) {
-      jit::GCLiteral* lit = method_info_.runtime_data()->new_literal(obj);
-      Value* ptr = constant(lit->address_of_object(), llvm::PointerType::getUnqual(type));
-      return b().CreateLoad(ptr, "gc_literal");
     }
 
     virtual void check_for_exception(llvm::Value* val, bool pass_top=true) = 0;

@@ -8,316 +8,334 @@
 
 #include "llvm/stack_args.hpp"
 
+#include "builtin/alias.hpp"
 #include "builtin/methodtable.hpp"
 #include "builtin/nativefunction.hpp"
 #include "builtin/lookuptable.hpp"
+#include "builtin/mono_inline_cache.hpp"
+#include "builtin/poly_inline_cache.hpp"
 
 #include "ffi_util.hpp"
 
 namespace rubinius {
 
-  void Inliner::check_class(llvm::Value* recv, Class* klass, llvm::BasicBlock* bb) {
-    if(!bb) bb = failure();
-
-    guarded_type_ = ops_.check_class(recv, klass, bb);
-    guarded_type_.inherit_source(ops_.state(), recv);
+  void Inliner::check_class(llvm::Value* recv, Class* klass, ClassData data) {
+    guarded_type_ = ops_.check_class(recv, klass,
+                                     data.f.class_id, data.f.serial_id,
+                                     class_id_failure(), serial_id_failure());
+    guarded_type_.inherit_source(ops_.context(), recv);
   }
 
-  void Inliner::check_recv(Class* klass, llvm::BasicBlock* bb) {
-    check_class(recv(), klass, bb);
+  void Inliner::check_recv(Class* klass, ClassData data) {
+    check_class(recv(), klass, data);
   }
 
-  bool Inliner::consider() {
-    Class* klass = cache_->dominating_class();
-    if(!klass) {
+  bool Inliner::consider_mono() {
+    MonoInlineCache* cache = try_as<MonoInlineCache>(call_site_);
+    if(!cache) return false;
+    int hits = cache->hits();
+    return inline_for_class(cache->receiver_class(), cache->receiver_data(), hits);
+  }
 
-      if(ops_.state()->type_optz()) {
-        // If the receiver has a known type, then attempt to pull that specific
-        // class out of the cache.
-        type::KnownType kt = type::KnownType::extract(ops_.state(), recv());
+  bool Inliner::consider_poly() {
+    PolyInlineCache* cache = try_as<PolyInlineCache>(call_site_);
 
-        if(kt.instance_p()) {
-          klass = cache_->find_class_by_id(kt.class_id());
-        } else if(kt.class_p()) {
-          klass = cache_->find_singletonclass(kt.class_id());
-        } else if(kt.fixnum_p()) {
-          klass = cache_->find_class_by_id(ops_.state()->fixnum_class_id());
-        } else if(kt.symbol_p()) {
-          klass = cache_->find_class_by_id(ops_.state()->symbol_class_id());
+    if(!cache) return false;
+
+    int classes_seen = cache->classes_seen();
+
+    std::vector<InlineCacheEntry*> reachable_caches;
+
+    for(int i = 0; i < classes_seen; ++i) {
+      InlineCacheEntry* ice = cache->get_cache(i);
+
+      // If we staticly know the type, don't inline code that can never
+      // match by definition because of wrong class id's.
+      type::KnownType type = type::KnownType::extract(ctx_, recv());
+      if(type.known_p()) {
+        if(type.fixnum_p()) {
+          if(ice->receiver_class_id() != ops_.llvm_state()->fixnum_class_id()) continue;
+        } else if(type.symbol_p()) {
+          if(ice->receiver_class_id() != ops_.llvm_state()->symbol_class_id()) continue;
+        } else if(type.instance_p()) {
+          if(ice->receiver_class_id() != type.class_id()) continue;
         }
       }
-
-      if(!klass) {
-        if(ops_.state()->config().jit_inline_debug) {
-          std::ostream& log = context_.inline_log("NOT inlining");
-          log << ops_.state()->symbol_cstr(cache_->name)
-              << ". Cache contains " << cache_->classes_seen() << " entries: ";
-
-          for(int i = 0; i < cache_->classes_seen(); i++) {
-            log << ops_.state()->symbol_cstr(cache_->tracked_class(i)->name())
-                << " ";
-          }
-          log << "\n";
-        }
-        return false;
-      }
+      reachable_caches.push_back(ice);
     }
 
-    // If the cache has a dominating class, inline!
+    if(reachable_caches.empty()) {
+      if(ops_.llvm_state()->config().jit_inline_debug) {
+        ctx_->inline_log("NOT inlining")
+          << ops_.llvm_state()->symbol_debug_str(call_site_->name())
+          << ". No reachable types found in IC.\n";
+      }
+      return false;
+    }
+
+    BasicBlock* fail = class_id_failure();
+    BasicBlock* fallback = ops_.new_block("poly_fallback");
+    BasicBlock* merge = ops_.new_block("merge");
+    BasicBlock* current = ops_.current_block();
+
+    ops_.set_block(merge);
+    PHINode* phi = ops_.b().CreatePHI(ops_.ObjType, classes_seen, "poly_result");
+
+    ops_.set_block(current);
+
+    for(size_t i = 0; i < reachable_caches.size(); ++i) {
+      InlineCacheEntry* ice = reachable_caches[i];
+
+      // Fallback to the next for failure
+      set_class_id_failure(fallback);
+
+      if(!inline_for_class(ice->receiver_class(), ice->receiver_data(), ice->hits())) {
+        // If we fail to inline this, emit a send to the method
+
+        Value* call_site_ptr_const = ops_.b().CreateIntToPtr(
+          ConstantInt::get(ops_.context()->IntPtrTy, (reinterpret_cast<uintptr_t>(call_site_ptr_))),
+          ops_.ptr_type(ops_.ptr_type("CallSite")), "cast_to_call_site_ptr");
+
+        Value* call_site_const = ops_.b().CreateLoad(call_site_ptr_const, "call_site_const");
+
+        Value* execute_pos_idx[] = {
+          ops_.context()->cint(0),
+          ops_.context()->cint(offset::CallSite::executor),
+        };
+
+        Value* execute_pos = ops_.b().CreateGEP(call_site_const,
+            execute_pos_idx, "execute_pos");
+
+        Value* execute = ops_.b().CreateLoad(execute_pos, "execute");
+        ops_.setup_out_args(call_site_->name(), count_);
+
+        Value* call_args[] = {
+          ops_.state(),
+          call_site_const,
+          ops_.call_frame(),
+          ops_.out_args()
+        };
+
+        Value* res = ops_.b().CreateCall(execute, call_args, "ic_send");
+        ops_.check_for_exception(res);
+        set_result(res);
+      }
+
+      ops_.b().CreateBr(merge);
+
+      BasicBlock* branch = ops_.current_block();
+
+      ops_.set_block(merge);
+
+      phi->addIncoming(result(), branch);
+
+      ops_.set_block(fallback);
+      fallback = ops_.new_block("poly_fallback");
+    }
+
+    ops_.b().CreateBr(fallback);
+    ops_.set_block(fallback);
+    ops_.b().CreateBr(fail);
+
+    ops_.set_block(merge);
+    set_class_id_failure(fail);
+
+    set_result(phi);
+
+    return true;
+  }
+
+  bool Inliner::inline_for_class(Class* klass, ClassData data, int hits) {
+    if(!klass) return false;
 
     Module* defined_in = 0;
-    Executable* meth = klass->find_method(cache_->name, &defined_in);
+    Executable* meth = klass->find_method(call_site_->name(), &defined_in);
 
     if(!meth) {
-      if(ops_.state()->config().jit_inline_debug) {
-        context_.inline_log("NOT inlining")
-          << ops_.state()->symbol_cstr(cache_->name)
+      if(ops_.llvm_state()->config().jit_inline_debug) {
+        ctx_->inline_log("NOT inlining")
+          << ops_.llvm_state()->symbol_debug_str(call_site_->name())
           << ". Inliner error, method missing.\n";
       }
       return false;
     }
 
-    if(instance_of<Module>(defined_in)) {
-      if(ops_.state()->config().jit_inline_debug) {
-        context_.inline_log("NOT inlining")
-          << ops_.state()->symbol_cstr(cache_->name)
-          << ". Not inlining methods defined in Modules.\n";
-      }
-      return false;
+    if(Alias* alias = try_as<Alias>(meth)) {
+      meth = alias->original_exec();
     }
 
     if(AccessVariable* acc = try_as<AccessVariable>(meth)) {
       if(acc->write()->true_p()) {
-        inline_ivar_write(klass, acc);
+        inline_ivar_write(klass, data, acc);
       } else {
-        inline_ivar_access(klass, acc);
+        inline_ivar_access(klass, data, acc);
       }
-    } else if(CompiledMethod* cm = try_as<CompiledMethod>(meth)) {
-      VMMethod* vmm = cm->backend_method();
+    } else if(CompiledCode* code = try_as<CompiledCode>(meth)) {
+      MachineCode* mcode = code->machine_code();
 
-      if(!cm->primitive()->nil_p()) {
-        if(!inline_primitive(klass, cm, meth->execute)) return false;
+      if(!code->primitive()->nil_p()) {
+        if(!inline_primitive(klass, data, code, meth->execute)) return false;
         goto remember;
       }
 
-      // Not yet sure why we'd hit a CompiledMethod that hasn't been
+      // Not yet sure why we'd hit a CompiledCode that hasn't been
       // internalized, but protect against that case none the less.
-      if(!vmm) return false;
+      if(!mcode) return false;
 
-      if(detect_trivial_method(vmm, cm)) {
-        inline_trivial_method(klass, cm);
-      } else if(int which = detect_jit_intrinsic(klass, cm)) {
-        inline_intrinsic(klass, cm, which);
-      } else if(ops_.state()->config().jit_inline_generic) {
+      if(detect_trivial_method(mcode, code)) {
+        inline_trivial_method(klass, data, code);
+      } else if(int which = detect_jit_intrinsic(klass, data, code)) {
+        inline_intrinsic(klass, data, code, which);
+      } else if(ops_.llvm_state()->config().jit_inline_generic) {
         InlineDecision decision;
         InlineOptions opts;
 
         InlinePolicy* policy = ops_.inline_policy();
         assert(policy);
 
-        if(vmm->no_inline_p()) {
+        if(mcode->no_inline_p()) {
           decision = cInlineDisabled;
+        } else if(ops_.info().hits / 10 > hits) {
+          decision = cTooFewSends;
         } else {
-          decision = policy->inline_p(vmm, opts);
-        }
-
-        // If a method was too big and has a compiled version, then
-        // rather than inline it, emit a straight call to the compiled
-        // version!
-        if(decision == cTooBig && !inline_block_
-                               && !kind_of<IncludedModule>(defined_in)
-                               && vmm->jitted()) {
-          if(ops_.state()->config().jit_inline_debug) {
-            context_.inline_log("direct call")
-              << ops_.state()->enclosure_name(cm)
-              << "#"
-              << ops_.state()->symbol_cstr(cm->name())
-              << " into "
-              << ops_.state()->symbol_cstr(ops_.method_name())
-              << ".\n";
-          }
-
-          check_recv(klass);
-          ops_.setup_out_args(count_);
-
-          std::vector<const Type*> ftypes;
-          ftypes.push_back(ops_.state()->ptr_type("VM"));
-          ftypes.push_back(ops_.state()->ptr_type("CallFrame"));
-          ftypes.push_back(ops_.state()->ptr_type("Executable"));
-          ftypes.push_back(ops_.state()->ptr_type("Module"));
-          ftypes.push_back(ops_.state()->ptr_type("Arguments"));
-
-          const Type *ft = llvm::PointerType::getUnqual(FunctionType::get(ops_.state()->ptr_type("Object"), ftypes, false));
-
-          // We can't extract and use a specialized version of cm because we don't
-          // yet have the ability to check if the specialized version has been
-          // invalidated. Once that is added, we can use find_specialized on cm.
-          // Until then, we need to go the slow path through the specialized picker.
-          executor target = cm->execute;
-
-          Value* func = ops_.b().CreateIntToPtr(
-              ops_.clong(reinterpret_cast<uintptr_t>(target)),
-              ft, "direct_method");
-
-          jit::RuntimeData* rd = new jit::RuntimeData(cm, cache_->name, defined_in);
-          ops_.context().add_runtime_data(rd);
-
-          Value* rt_rd = ops_.constant(rd, ops_.state()->ptr_type("jit::RuntimeData"));
-
-          // cm
-          Value* rd_method = 
-            ops_.b().CreateBitCast(
-              ops_.b().CreateLoad(
-                ops_.b().CreateConstGEP2_32(rt_rd, 0, offset::runtime_data_method, "method_pos"),
-                "cm"),
-              ops_.state()->ptr_type("Executable"));
-
-          Value* rd_mod = ops_.b().CreateLoad(
-              ops_.b().CreateConstGEP2_32(rt_rd, 0, offset::runtime_data_module, "module_pos"),
-              "module");
-
-          Value* call_args[] = {
-            ops_.vm(),
-            ops_.call_frame(),
-            rd_method,
-            rd_mod,
-            ops_.out_args()
-          };
-
-          Value* dc_res = ops_.b().CreateCall(func, call_args, call_args+5, "dc_res");
-          set_result(dc_res);
-
-          goto remember;
+          decision = policy->inline_p(mcode, opts);
         }
 
         if(decision != cInline) {
-          if(ops_.state()->config().jit_inline_debug) {
+          if(ops_.llvm_state()->config().jit_inline_debug) {
 
-            context_.inline_log("NOT inlining")
-              << ops_.state()->enclosure_name(cm)
+            ctx_->inline_log("NOT inlining")
+              << ops_.llvm_state()->enclosure_name(code)
               << "#"
-              << ops_.state()->symbol_cstr(cm->name())
+              << ops_.llvm_state()->symbol_debug_str(code->name())
               << " into "
-              << ops_.state()->symbol_cstr(ops_.method_name())
+              << ops_.llvm_state()->symbol_debug_str(ops_.method_name())
               << ". ";
 
             switch(decision) {
             case cInlineDisabled:
-              ops_.state()->log() << "inlining disabled by request";
+              ops_.llvm_state()->log() << "inlining disabled by request";
               break;
             case cTooBig:
-              ops_.state()->log() << policy->current_size() << " + "
-                << vmm->total << " > "
+              ops_.llvm_state()->log() << policy->current_size() << " + "
+                << mcode->total << " > "
                 << policy->max_size();
               break;
             case cTooComplex:
-              ops_.state()->log() << "too complex";
+              ops_.llvm_state()->log() << "too complex";
               if(!opts.allow_blocks) {
-                ops_.state()->log() << " (block not allowed)";
+                ops_.llvm_state()->log() << " (block not allowed)";
               }
               break;
+            case cTooFewSends:
+              ops_.llvm_state()->log() << "too few sends: (" << hits << " / " << ops_.info().hits << ")";
+              break;
             default:
-              ops_.state()->log() << "no policy";
+              ops_.llvm_state()->log() << "no policy";
             }
-            if(vmm->jitted()) {
-              ops_.state()->log() << " (jitted)\n";
+
+            ops_.llvm_state()->log() << " ("
+              << ops_.llvm_state()->symbol_debug_str(klass->module_name()) << ")";
+
+            if(mcode->jitted()) {
+              ops_.llvm_state()->log() << " (jitted)\n";
             } else {
-              ops_.state()->log() << " (interp)\n";
+              ops_.llvm_state()->log() << " (interp)\n";
             }
           }
           return false;
         }
 
-        if(ops_.state()->config().jit_inline_debug) {
-          context_.inline_log("inlining")
-            << ops_.state()->enclosure_name(cm)
+        if(ops_.llvm_state()->config().jit_inline_debug) {
+          ctx_->inline_log("inlining")
+            << ops_.llvm_state()->enclosure_name(code)
             << "#"
-            << ops_.state()->symbol_cstr(cm->name())
+            << ops_.llvm_state()->symbol_debug_str(code->name())
             << " into "
-            << ops_.state()->symbol_cstr(ops_.method_name());
+            << ops_.llvm_state()->symbol_debug_str(ops_.method_name());
 
-          StaticScope* ss = cm->scope();
-          if(kind_of<StaticScope>(ss) && klass != ss->module() && !klass->name()->nil_p()) {
-            ops_.state()->log() << " ("
-              << ops_.state()->symbol_cstr(klass->name()) << ")";
+          ConstantScope* cs = code->scope();
+          if(kind_of<ConstantScope>(cs) && klass != cs->module() && !klass->module_name()->nil_p()) {
+            ops_.llvm_state()->log() << " ("
+              << ops_.llvm_state()->symbol_debug_str(klass->module_name()) << ")";
           }
 
           if(inline_block_) {
-            ops_.state()->log() << " (w/ inline block)";
+            ops_.llvm_state()->log() << " (w/ inline block)";
           }
 
-          ops_.state()->log() << "\n";
+          ops_.llvm_state()->log() << "\n";
         }
 
-        policy->increase_size(vmm);
-        meth->add_inliner(ops_.state()->shared().om, ops_.root_method_info()->method());
+        policy->increase_size(mcode);
+        meth->add_inliner(ops_.llvm_state()->shared().om, ops_.root_method_info()->method());
 
-        inline_generic_method(klass, defined_in, cm, vmm);
+        inline_generic_method(klass, data, defined_in, code, mcode, hits);
         return true;
       } else {
-        if(ops_.state()->config().jit_inline_debug) {
-          context_.inline_log("NOT inlining")
-            << ops_.state()->enclosure_name(cm)
+        if(ops_.llvm_state()->config().jit_inline_debug) {
+          ctx_->inline_log("NOT inlining")
+            << ops_.llvm_state()->enclosure_name(code)
             << "#"
-            << ops_.state()->symbol_cstr(cm->name())
+            << ops_.llvm_state()->symbol_debug_str(code->name())
             << " into "
-            << ops_.state()->symbol_cstr(ops_.method_name())
+            << ops_.llvm_state()->symbol_debug_str(ops_.method_name())
             << ". generic inlining disabled\n";
         }
 
         return false;
       }
     } else if(NativeFunction* nf = try_as<NativeFunction>(meth)) {
-      if(inline_ffi(klass, nf)) {
-        if(ops_.state()->config().jit_inline_debug) {
-          context_.inline_log("inlining")
+      if(inline_ffi(klass, data, nf)) {
+        if(ops_.llvm_state()->config().jit_inline_debug) {
+          ctx_->inline_log("inlining")
             << "FFI call to "
-            << ops_.state()->symbol_cstr(nf->name())
+            << ops_.llvm_state()->symbol_debug_str(nf->name())
             << "() into "
-            << ops_.state()->symbol_cstr(ops_.method_name())
-            << " (" << ops_.state()->symbol_cstr(klass->name()) << ")\n";
+            << ops_.llvm_state()->symbol_debug_str(ops_.method_name())
+            << " (" << ops_.llvm_state()->symbol_debug_str(klass->module_name()) << ")\n";
         }
       } else {
         return false;
       }
     } else {
-      if(ops_.state()->config().jit_inline_debug) {
-        context_.inline_log("NOT inlining")
-          << ops_.state()->symbol_cstr(klass->name())
+      if(ops_.llvm_state()->config().jit_inline_debug) {
+        ctx_->inline_log("NOT inlining")
+          << ops_.llvm_state()->symbol_debug_str(klass->module_name())
           << "#"
-          << ops_.state()->symbol_cstr(cache_->name)
+          << ops_.llvm_state()->symbol_debug_str(call_site_->name())
           << " into "
-          << ops_.state()->symbol_cstr(ops_.method_name())
+          << ops_.llvm_state()->symbol_debug_str(ops_.method_name())
           << ". unhandled executable type\n";
       }
       return false;
     }
 
 remember:
-    meth->add_inliner(ops_.state()->shared().om, ops_.root_method_info()->method());
+    meth->add_inliner(ops_.llvm_state()->shared().om, ops_.root_method_info()->method());
 
     return true;
   }
 
   void Inliner::inline_block(JITInlineBlock* ib, Value* self) {
-    if(ops_.state()->config().jit_inline_debug) {
-      context_.inline_log("inlining block into")
-        << ops_.state()->symbol_cstr(ops_.method_name())
+    if(ops_.llvm_state()->config().jit_inline_debug) {
+      ctx_->inline_log("inlining block into")
+        << ops_.llvm_state()->symbol_debug_str(ops_.method_name())
         << "\n";
     }
 
     emit_inline_block(ib, self);
   }
 
-  bool Inliner::detect_trivial_method(VMMethod* vmm, CompiledMethod* cm) {
-    opcode* stream = vmm->opcodes;
+  bool Inliner::detect_trivial_method(MachineCode* mcode, CompiledCode* code) {
+    opcode* stream = mcode->opcodes;
     size_t size_max = 2;
     switch(stream[0]) {
     case InstructionSequence::insn_push_int:
       size_max++;
       break;
     case InstructionSequence::insn_push_literal:
-      if(cm && kind_of<Symbol>(cm->literals()->at(stream[1]))) {
+      if(code && kind_of<Symbol>(code->literals()->at(stream[1]))) {
         size_max++;
       } else {
         return false;
@@ -333,38 +351,37 @@ remember:
       return false;
     }
 
-    if(vmm->total == size_max &&
+    if(mcode->total == size_max &&
         count_ == 0 &&
-        vmm->required_args == vmm->total_args &&
-        vmm->total_args == 0) return true;
+        mcode->required_args == mcode->total_args &&
+        mcode->total_args == 0) return true;
     return false;
   }
 
-  void Inliner::inline_trivial_method(Class* klass, CompiledMethod* cm) {
-    if(ops_.state()->config().jit_inline_debug) {
-      context_.inline_log("inlining")
-        << ops_.state()->enclosure_name(cm)
+  void Inliner::inline_trivial_method(Class* klass, ClassData data, CompiledCode* code) {
+    if(ops_.llvm_state()->config().jit_inline_debug) {
+      ctx_->inline_log("inlining")
+        << ops_.llvm_state()->enclosure_name(code)
         << "#"
-        << ops_.state()->symbol_cstr(cm->name())
+        << ops_.llvm_state()->symbol_debug_str(code->name())
         << " into "
-        << ops_.state()->symbol_cstr(ops_.method_name())
-        << " (" << ops_.state()->symbol_cstr(klass->name()) << ") trivial\n";
+        << ops_.llvm_state()->symbol_debug_str(ops_.method_name())
+        << " (" << ops_.llvm_state()->symbol_debug_str(klass->module_name()) << ") trivial\n";
     }
 
-    VMMethod* vmm = cm->backend_method();
+    MachineCode* mcode = code->machine_code();
 
-    if(klass) check_recv(klass);
+    check_recv(klass, data);
 
     Value* val = 0;
-    /////
 
-    opcode* stream = vmm->opcodes;
+    opcode* stream = mcode->opcodes;
     switch(stream[0]) {
     case InstructionSequence::insn_push_int:
       val = ops_.constant(Fixnum::from(stream[1]));
       break;
     case InstructionSequence::insn_push_literal: {
-      Symbol* sym = try_as<Symbol>(cm->literals()->at(stream[1]));
+      Symbol* sym = try_as<Symbol>(code->literals()->at(stream[1]));
       assert(sym);
 
       val = ops_.constant(sym);
@@ -396,25 +413,24 @@ remember:
     set_result(val);
   }
 
-  void Inliner::inline_ivar_write(Class* klass, AccessVariable* acc) {
+  void Inliner::inline_ivar_write(Class* klass, ClassData data, AccessVariable* acc) {
     if(count_ != 1) return;
 
-    if(ops_.state()->config().jit_inline_debug) {
-      context_.inline_log("inlining")
+    if(ops_.llvm_state()->config().jit_inline_debug) {
+      ctx_->inline_log("inlining")
         << "writer to '"
-        << ops_.state()->symbol_cstr(acc->name())
+        << ops_.llvm_state()->symbol_debug_str(acc->name())
         << "' on "
-        << ops_.state()->symbol_cstr(klass->name())
+        << ops_.llvm_state()->symbol_debug_str(klass->module_name())
         << " in "
         << "#"
-        << ops_.state()->symbol_cstr(ops_.method_name())
-        << "\n";
+        << ops_.llvm_state()->symbol_debug_str(ops_.method_name());
     }
 
-    context_.enter_inline();
-    ops_.state()->add_accessor_inlined();
+    ctx_->enter_inline();
+    ops_.llvm_state()->add_accessor_inlined();
 
-    check_recv(klass);
+    check_recv(klass, data);
 
     Value* val  = arg(0);
 
@@ -426,55 +442,81 @@ remember:
     TypeInfo* ti = klass->type_info();
     TypeInfo::Slots::iterator it = ti->slots.find(acc->name()->index());
 
+    bool found = false;
+
     if(it != ti->slots.end()) {
-      int offset = ti->slot_locations[it->second];
-      ops_.set_object_slot(self, offset, val);
+      int field = it->second;
+      int offset = ti->slot_locations[field];
+      ops_.set_object_type_slot(self, field, offset, ti->slot_types[field], val);
+      found = true;
+      if(ops_.llvm_state()->config().jit_inline_debug) {
+        ops_.llvm_state()->log() << " (slot: " << it->second << ")\n";
+      }
     } else {
-      Signature sig2(ops_.state(), "Object");
-      sig2 << "VM";
-      sig2 << "CallFrame";
-      sig2 << "Object";
-      sig2 << "Object";
-      sig2 << "Object";
+      LookupTable* pii = klass->packed_ivar_info();
+      if(!pii->nil_p()) {
+        Fixnum* which = try_as<Fixnum>(pii->fetch(0, acc->name(), &found));
+        if(found) {
+          int index = which->to_native();
+          int offset = sizeof(Object) + (sizeof(Object*) * index);
 
-      Value* call_args2[] = {
-        ops_.vm(),
-        ops_.call_frame(),
-        self,
-        ops_.constant(acc->name()),
-        val
-      };
+          ops_.set_object_slot(self, offset, val);
 
-      sig2.call("rbx_set_ivar", call_args2, 5, "ivar",
-          ops_.b());
+          if(ops_.llvm_state()->config().jit_inline_debug) {
+            ops_.llvm_state()->log() << " (packed index: " << index << ", " << offset << ")";
+          }
+        }
+      }
+
+      if(!found) {
+        Signature sig2(ops_.context(), "Object");
+        sig2 << "State";
+        sig2 << "CallFrame";
+        sig2 << "Object";
+        sig2 << "Object";
+        sig2 << "Object";
+
+        Value* call_args2[] = {
+          ops_.state(),
+          ops_.call_frame(),
+          self,
+          ops_.constant(acc->name()),
+          val
+        };
+
+        sig2.call("rbx_set_ivar", call_args2, 5, "ivar",
+            ops_.b());
+      }
     }
 
     exception_safe();
     set_result(val);
 
-    context_.leave_inline();
-  }
-
-  void Inliner::inline_ivar_access(Class* klass, AccessVariable* acc) {
-    if(count_ != 0) return;
-
-    if(ops_.state()->config().jit_inline_debug) {
-      context_.inline_log("inlining")
-        << "read to '"
-        << ops_.state()->symbol_cstr(acc->name())
-        << "' on "
-        << ops_.state()->symbol_cstr(klass->name())
-        << " in "
-        << "#"
-        << ops_.state()->symbol_cstr(ops_.method_name());
+    if(ops_.llvm_state()->config().jit_inline_debug) {
+      ops_.llvm_state()->log() << "\n";
     }
 
-    context_.enter_inline();
-    ops_.state()->add_accessor_inlined();
+    ctx_->leave_inline();
+  }
 
-    Value* self = recv();
+  void Inliner::inline_ivar_access(Class* klass, ClassData data, AccessVariable* acc) {
+    if(count_ != 0) return;
 
-    ops_.check_reference_class(self, klass->class_id(), failure());
+    if(ops_.llvm_state()->config().jit_inline_debug) {
+      ctx_->inline_log("inlining")
+        << "read to '"
+        << ops_.llvm_state()->symbol_debug_str(acc->name())
+        << "' on "
+        << ops_.llvm_state()->symbol_debug_str(klass->module_name())
+        << " in "
+        << "#"
+        << ops_.llvm_state()->symbol_debug_str(ops_.method_name());
+    }
+
+    ctx_->enter_inline();
+    ops_.llvm_state()->add_accessor_inlined();
+
+    check_recv(klass, data);
 
     // Figure out if we should use the table ivar lookup or
     // the slot ivar lookup.
@@ -483,12 +525,13 @@ remember:
     TypeInfo::Slots::iterator it = ti->slots.find(acc->name()->index());
 
     Value* ivar = 0;
+    Value* self = recv();
 
     if(it != ti->slots.end()) {
       int offset = ti->slot_locations[it->second];
       ivar = ops_.get_object_slot(self, offset);
-      if(ops_.state()->config().jit_inline_debug) {
-        ops_.state()->log() << " (slot: " << it->second << ")";
+      if(ops_.llvm_state()->config().jit_inline_debug) {
+        ops_.llvm_state()->log() << " (slot: " << it->second << ")";
       }
     } else {
       LookupTable* pii = klass->packed_ivar_info();
@@ -501,43 +544,45 @@ remember:
           int offset = sizeof(Object) + (sizeof(Object*) * index);
           Value* slot_val = ops_.get_object_slot(self, offset);
 
-          Value* cmp = ops_.b().CreateICmpEQ(slot_val, ops_.constant(Qundef), "prune_undef");
+          Value* cmp = ops_.b().CreateICmpEQ(slot_val, ops_.constant(cUndef), "prune_undef");
 
           ivar = ops_.b().CreateSelect(cmp,
-                                       ops_.constant(Qnil), slot_val,
+                                       ops_.constant(cNil), slot_val,
                                        "select ivar");
 
-          if(ops_.state()->config().jit_inline_debug) {
-            ops_.state()->log() << " (packed index: " << index << ", " << offset << ")";
+          if(ops_.llvm_state()->config().jit_inline_debug) {
+            ops_.llvm_state()->log() << " (packed index: " << index << ", " << offset << ")";
           }
         }
       }
 
       if(!ivar) {
-        Signature sig2(ops_.state(), "Object");
-        sig2 << "VM";
+        Signature sig2(ops_.context(), "Object");
+        sig2 << "State";
         sig2 << "Object";
         sig2 << "Object";
 
         Value* call_args2[] = {
-          ops_.vm(),
+          ops_.state(),
           self,
           ops_.constant(acc->name())
         };
 
-        ivar = sig2.call("rbx_get_ivar", call_args2, 3, "ivar",
-            ops_.b());
+        CallInst* ivar_call = sig2.call("rbx_push_ivar", call_args2, 3, "ivar", ops_.b());
+        ivar_call->setOnlyReadsMemory();
+        ivar_call->setDoesNotThrow();
+        ivar = ivar_call;
       }
     }
 
     exception_safe();
     set_result(ivar);
 
-    if(ops_.state()->config().jit_inline_debug) {
-      ops_.state()->log() << "\n";
+    if(ops_.llvm_state()->config().jit_inline_debug) {
+      ops_.llvm_state()->log() << "\n";
     }
 
-    context_.leave_inline();
+    ctx_->leave_inline();
 
   }
 
@@ -550,25 +595,26 @@ remember:
     info.set_inline_block(inline_block_);
   }
 
-  void Inliner::inline_generic_method(Class* klass, Module* defined_in,
-                                      CompiledMethod* cm, VMMethod* vmm) {
-    context_.enter_inline();
+  void Inliner::inline_generic_method(Class* klass, ClassData data, Module* defined_in,
+                                      CompiledCode* code, MachineCode* mcode, int hits) {
 
-    check_recv(klass);
+    ctx_->enter_inline();
 
-    JITMethodInfo info(context_, cm, vmm);
+    check_recv(klass, data);
+
+    JITMethodInfo info(ctx_, code, mcode);
 
     prime_info(info);
+    info.hits = hits;
 
     info.self_type = guarded_type_;
 
     info.set_self_class(klass);
 
-    jit::RuntimeData* rd = new jit::RuntimeData(cm, cache_->name, defined_in);
-    context_.add_runtime_data(rd);
-    info.set_runtime_data(rd);
+    jit::RuntimeData* rd = new jit::RuntimeData(code, call_site_->name(), defined_in);
+    ctx_->add_runtime_data(rd);
 
-    jit::InlineMethodBuilder work(ops_.state(), info, rd);
+    jit::InlineMethodBuilder work(ops_.context(), info, rd);
     work.valid_flag = ops_.valid_flag();
 
     Value* blk = 0;
@@ -580,13 +626,13 @@ remember:
         args.push_back(ops_.stack_back(i));
       }
     } else {
-      blk = ops_.constant(Qnil);
+      blk = ops_.constant(cNil);
       for(int i = count_ - 1; i >= 0; i--) {
         args.push_back(ops_.stack_back(i));
       }
     }
 
-    if(vmm->call_count >= 0) vmm->call_count /= 2;
+    if(mcode->call_count >= 0) mcode->call_count /= 2;
 
     BasicBlock* entry = work.setup_inline(recv(), blk, args);
 
@@ -604,27 +650,28 @@ remember:
     // check and use.
     set_result(info.return_phi());
 
-    context_.leave_inline();
+    ctx_->leave_inline();
   }
 
   void Inliner::emit_inline_block(JITInlineBlock* ib, Value* self) {
-    context_.enter_inline();
+    ctx_->enter_inline();
 
-    JITMethodInfo info(context_, ib->method(), ib->code());
+    JITMethodInfo info(ctx_, ib->method(), ib->machine_code());
 
     prime_info(info);
 
     info.is_block = true;
+    info.hits = 0;
 
     info.set_creator_info(creator_info_);
     info.set_block_info(block_info_);
     info.self_type = ops_.info().self_type;
+    info.set_self_class(creator_info_->self_class());
 
     jit::RuntimeData* rd = new jit::RuntimeData(ib->method(), nil<Symbol>(), nil<Module>());
-    context_.add_runtime_data(rd);
-    info.set_runtime_data(rd);
+    ctx_->add_runtime_data(rd);
 
-    jit::InlineBlockBuilder work(ops_.state(), info, rd);
+    jit::InlineBlockBuilder work(ops_.context(), info, rd);
     work.valid_flag = ops_.valid_flag();
 
     JITStackArgs args(count_);
@@ -636,10 +683,10 @@ remember:
 
     info.stack_args = &args;
 
-    if(ib->code()->call_count >= 0) ib->code()->call_count /= 2;
+    if(ib->machine_code()->call_count >= 0) ib->machine_code()->call_count /= 2;
 
     BasicBlock* entry = work.setup_inline_block(self,
-        ops_.constant(Qnil, ops_.state()->ptr_type("Module")), args);
+        ops_.constant(cNil, ops_.context()->ptr_type("Module")), args);
 
     if(!work.generate_body()) {
       rubinius::bug("LLVM failed to compile a function");
@@ -655,47 +702,46 @@ remember:
     // check and use.
     set_result(info.return_phi());
 
-    context_.leave_inline();
+    ctx_->leave_inline();
   }
 
-  const Type* find_type(JITOperations& ops_, size_t type) {
+  Type* find_type(JITOperations& ops_, size_t type) {
     switch(type) {
       case RBX_FFI_TYPE_CHAR:
       case RBX_FFI_TYPE_UCHAR:
-        return ops_.state()->Int8Ty;
+        return ops_.context()->Int8Ty;
 
       case RBX_FFI_TYPE_SHORT:
       case RBX_FFI_TYPE_USHORT:
-        return ops_.state()->Int16Ty;
+        return ops_.context()->Int16Ty;
 
       case RBX_FFI_TYPE_INT:
       case RBX_FFI_TYPE_UINT:
-        return ops_.state()->Int32Ty;
+        return ops_.context()->Int32Ty;
 
       case RBX_FFI_TYPE_LONG:
       case RBX_FFI_TYPE_ULONG:
 #ifdef IS_X8664
-        return ops_.state()->Int64Ty;
+        return ops_.context()->Int64Ty;
 #else
-        return ops_.state()->Int32Ty;
+        return ops_.context()->Int32Ty;
 #endif
 
       case RBX_FFI_TYPE_LONG_LONG:
       case RBX_FFI_TYPE_ULONG_LONG:
-        return ops_.state()->Int64Ty;
+        return ops_.context()->Int64Ty;
 
       case RBX_FFI_TYPE_FLOAT:
-        return ops_.state()->FloatTy;
+        return ops_.context()->FloatTy;
 
       case RBX_FFI_TYPE_DOUBLE:
-        return ops_.state()->DoubleTy;
+        return ops_.context()->DoubleTy;
 
-      case RBX_FFI_TYPE_OBJECT:
       case RBX_FFI_TYPE_STRING:
       case RBX_FFI_TYPE_STRPTR:
       case RBX_FFI_TYPE_PTR:
       case RBX_FFI_TYPE_VOID:
-        return llvm::PointerType::getUnqual(ops_.state()->Int8Ty);
+        return llvm::PointerType::getUnqual(ops_.context()->Int8Ty);
     }
 
     assert(0 && "unknown type to return!");
@@ -703,23 +749,34 @@ remember:
     return 0;
   }
 
-  bool Inliner::inline_ffi(Class* klass, NativeFunction* nf) {
-    check_recv(klass);
+  bool Inliner::inline_ffi(Class* klass, ClassData data, NativeFunction* nf) {
 
-    ///
+    for(size_t i = 0; i < nf->ffi_data->arg_count; i++) {
+        if(nf->ffi_data->args_info[i].type==RBX_FFI_TYPE_ENUM ||
+           nf->ffi_data->args_info[i].type==RBX_FFI_TYPE_CALLBACK ||
+           nf->ffi_data->args_info[i].type == RBX_FFI_TYPE_VARARGS) {
+            return false;
+        }
+    }
+    if(nf->ffi_data->ret_info.type==RBX_FFI_TYPE_ENUM ||
+       nf->ffi_data->ret_info.type==RBX_FFI_TYPE_CALLBACK) {
+        return false;
+    }
+
+    check_recv(klass, data);
 
     std::vector<Value*> ffi_args;
-    std::vector<const Type*> ffi_type;
+    std::vector<Type*> ffi_type;
 
-    std::vector<const Type*> struct_types;
-    struct_types.push_back(ops_.state()->Int32Ty);
-    struct_types.push_back(ops_.state()->Int1Ty);
+    std::vector<Type*> struct_types;
+    struct_types.push_back(ops_.context()->Int32Ty);
+    struct_types.push_back(ops_.context()->Int1Ty);
 
     for(size_t i = 0; i < nf->ffi_data->arg_count; i++) {
       Value* current_arg = arg(i);
-      Value* call_args[] = { ops_.vm(), current_arg, ops_.valid_flag() };
+      Value* call_args[] = { ops_.state(), current_arg, ops_.valid_flag() };
 
-      switch(nf->ffi_data->arg_types[i]) {
+      switch(nf->ffi_data->args_info[i].type) {
       case RBX_FFI_TYPE_CHAR:
       case RBX_FFI_TYPE_UCHAR:
       case RBX_FFI_TYPE_SHORT:
@@ -728,15 +785,15 @@ remember:
       case RBX_FFI_TYPE_UINT:
       case RBX_FFI_TYPE_LONG:
       case RBX_FFI_TYPE_ULONG: {
-        Signature sig(ops_.state(), ops_.NativeIntTy);
-        sig << "VM";
+        Signature sig(ops_.context(), ops_.NativeIntTy);
+        sig << "State";
         sig << "Object";
-        sig << llvm::PointerType::getUnqual(ops_.state()->Int1Ty);
+        sig << llvm::PointerType::getUnqual(ops_.context()->Int1Ty);
 
         Value* val = sig.call("rbx_ffi_to_int", call_args, 3, "to_int",
                               ops_.b());
 
-        const Type* type = find_type(ops_, nf->ffi_data->arg_types[i]);
+        Type* type = find_type(ops_, nf->ffi_data->args_info[i].type);
         ffi_type.push_back(type);
 
         if(type != ops_.NativeIntTy) {
@@ -748,17 +805,17 @@ remember:
         Value* valid = ops_.create_load(ops_.valid_flag());
 
         BasicBlock* cont = ops_.new_block("ffi_continue");
-        ops_.create_conditional_branch(cont, failure(), valid);
+        ops_.create_conditional_branch(cont, class_id_failure(), valid);
 
         ops_.set_block(cont);
         break;
       }
 
       case RBX_FFI_TYPE_FLOAT: {
-        Signature sig(ops_.state(), ops_.state()->FloatTy);
-        sig << "VM";
+        Signature sig(ops_.context(), ops_.context()->FloatTy);
+        sig << "State";
         sig << "Object";
-        sig << llvm::PointerType::getUnqual(ops_.state()->Int1Ty);
+        sig << llvm::PointerType::getUnqual(ops_.context()->Int1Ty);
 
         Value* val = sig.call("rbx_ffi_to_float", call_args, 3, "to_float",
                               ops_.b());
@@ -769,17 +826,17 @@ remember:
         Value* valid = ops_.create_load(ops_.valid_flag());
 
         BasicBlock* cont = ops_.new_block("ffi_continue");
-        ops_.create_conditional_branch(cont, failure(), valid);
+        ops_.create_conditional_branch(cont, class_id_failure(), valid);
 
         ops_.set_block(cont);
         break;
       }
 
       case RBX_FFI_TYPE_DOUBLE: {
-        Signature sig(ops_.state(), ops_.state()->DoubleTy);
-        sig << "VM";
+        Signature sig(ops_.context(), ops_.context()->DoubleTy);
+        sig << "State";
         sig << "Object";
-        sig << llvm::PointerType::getUnqual(ops_.state()->Int1Ty);
+        sig << llvm::PointerType::getUnqual(ops_.context()->Int1Ty);
 
         Value* val = sig.call("rbx_ffi_to_double", call_args, 3, "to_double",
                               ops_.b());
@@ -790,7 +847,7 @@ remember:
         Value* valid = ops_.create_load(ops_.valid_flag());
 
         BasicBlock* cont = ops_.new_block("ffi_continue");
-        ops_.create_conditional_branch(cont, failure(), valid);
+        ops_.create_conditional_branch(cont, class_id_failure(), valid);
 
         ops_.set_block(cont);
         break;
@@ -798,10 +855,10 @@ remember:
 
       case RBX_FFI_TYPE_LONG_LONG:
       case RBX_FFI_TYPE_ULONG_LONG: {
-        Signature sig(ops_.state(), ops_.state()->Int64Ty);
-        sig << "VM";
+        Signature sig(ops_.context(), ops_.context()->Int64Ty);
+        sig << "State";
         sig << "Object";
-        sig << llvm::PointerType::getUnqual(ops_.state()->Int1Ty);
+        sig << llvm::PointerType::getUnqual(ops_.context()->Int1Ty);
 
         Value* val = sig.call("rbx_ffi_to_int64", call_args, 3, "to_int64",
                               ops_.b());
@@ -812,29 +869,19 @@ remember:
         Value* valid = ops_.create_load(ops_.valid_flag());
 
         BasicBlock* cont = ops_.new_block("ffi_continue");
-        ops_.create_conditional_branch(cont, failure(), valid);
+        ops_.create_conditional_branch(cont, class_id_failure(), valid);
 
         ops_.set_block(cont);
         break;
       }
 
-      case RBX_FFI_TYPE_STATE:
-        ffi_type.push_back(ops_.vm()->getType());
-        ffi_args.push_back(ops_.vm());
-        break;
-
-      case RBX_FFI_TYPE_OBJECT:
-        ffi_type.push_back(current_arg->getType());
-        ffi_args.push_back(current_arg);
-        break;
-
       case RBX_FFI_TYPE_PTR: {
-        const Type* type = llvm::PointerType::getUnqual(ops_.state()->Int8Ty);
+        Type* type = llvm::PointerType::getUnqual(ops_.context()->Int8Ty);
 
-        Signature sig(ops_.state(), type);
-        sig << "VM";
+        Signature sig(ops_.context(), type);
+        sig << "State";
         sig << "Object";
-        sig << llvm::PointerType::getUnqual(ops_.state()->Int1Ty);
+        sig << llvm::PointerType::getUnqual(ops_.context()->Int1Ty);
 
         Value* val = sig.call("rbx_ffi_to_ptr", call_args, 3, "to_ptr",
                               ops_.b());
@@ -845,19 +892,19 @@ remember:
         Value* valid = ops_.create_load(ops_.valid_flag());
 
         BasicBlock* cont = ops_.new_block("ffi_continue");
-        ops_.create_conditional_branch(cont, failure(), valid);
+        ops_.create_conditional_branch(cont, class_id_failure(), valid);
 
         ops_.set_block(cont);
         break;
       }
 
       case RBX_FFI_TYPE_STRING: {
-        const Type* type = llvm::PointerType::getUnqual(ops_.state()->Int8Ty);
+        Type* type = llvm::PointerType::getUnqual(ops_.context()->Int8Ty);
 
-        Signature sig(ops_.state(), type);
-        sig << "VM";
+        Signature sig(ops_.context(), type);
+        sig << "State";
         sig << "Object";
-        sig << llvm::PointerType::getUnqual(ops_.state()->Int1Ty);
+        sig << llvm::PointerType::getUnqual(ops_.context()->Int1Ty);
 
         Value* val = sig.call("rbx_ffi_to_string", call_args, 3, "to_string",
                               ops_.b());
@@ -868,7 +915,7 @@ remember:
         Value* valid = ops_.create_load(ops_.valid_flag());
 
         BasicBlock* cont = ops_.new_block("ffi_continue");
-        ops_.create_conditional_branch(cont, failure(), valid);
+        ops_.create_conditional_branch(cont, class_id_failure(), valid);
 
         ops_.set_block(cont);
         break;
@@ -879,29 +926,28 @@ remember:
       }
     }
 
-    Signature check(ops_.state(), ops_.NativeIntTy);
-    check << "VM";
+    Signature check(ops_.context(), ops_.NativeIntTy);
+    check << "State";
     check << "CallFrame";
 
-    Value* check_args[] = { ops_.vm(), ops_.call_frame() };
+    Value* check_args[] = { ops_.state(), ops_.call_frame() };
     check.call("rbx_enter_unmanaged", check_args, 2, "unused", ops_.b());
 
-    const Type* return_type = find_type(ops_, nf->ffi_data->ret_type);
+    Type* return_type = find_type(ops_, nf->ffi_data->ret_info.type);
 
     FunctionType* ft = FunctionType::get(return_type, ffi_type, false);
     Value* ep_ptr = ops_.b().CreateIntToPtr(
-            ConstantInt::get(ops_.state()->IntPtrTy, (intptr_t)nf->ffi_data->ep),
+            ConstantInt::get(ops_.context()->IntPtrTy, (intptr_t)nf->ffi_data->ep),
             llvm::PointerType::getUnqual(ft), "cast_to_function");
 
-    Value* ffi_result = ops_.b().CreateCall(ep_ptr, ffi_args.begin(),
-                           ffi_args.end(), "ffi_result");
+    Value* ffi_result = ops_.b().CreateCall(ep_ptr, ffi_args, "ffi_result");
 
     check.call("rbx_exit_unmanaged", check_args, 2, "unused", ops_.b());
 
-    Value* res_args[] = { ops_.vm(), ffi_result };
+    Value* res_args[] = { ops_.state(), ffi_result };
 
     Value* result;
-    switch(nf->ffi_data->ret_type) {
+    switch(nf->ffi_data->ret_info.type) {
     case RBX_FFI_TYPE_CHAR:
     case RBX_FFI_TYPE_UCHAR:
     case RBX_FFI_TYPE_SHORT:
@@ -913,12 +959,12 @@ remember:
     case RBX_FFI_TYPE_ULONG:
 #endif
     {
-      Signature sig(ops_.state(), ops_.ObjType);
-      sig << "VM";
-      sig << ops_.state()->Int32Ty;
+      Signature sig(ops_.context(), ops_.ObjType);
+      sig << "State";
+      sig << ops_.context()->Int32Ty;
 
       res_args[1] = ops_.b().CreateSExtOrBitCast(res_args[1],
-                               ops_.state()->Int32Ty);
+                               ops_.context()->Int32Ty);
 
       result = sig.call("rbx_ffi_from_int32", res_args, 2, "to_obj",
                         ops_.b());
@@ -932,9 +978,9 @@ remember:
     case RBX_FFI_TYPE_ULONG:
 #endif
     {
-      Signature sig(ops_.state(), ops_.ObjType);
-      sig << "VM";
-      sig << ops_.state()->Int64Ty;
+      Signature sig(ops_.context(), ops_.ObjType);
+      sig << "State";
+      sig << ops_.context()->Int64Ty;
 
       result = sig.call("rbx_ffi_from_int64", res_args, 2, "to_obj",
                         ops_.b());
@@ -942,9 +988,9 @@ remember:
     }
 
     case RBX_FFI_TYPE_FLOAT: {
-      Signature sig(ops_.state(), ops_.ObjType);
-      sig << "VM";
-      sig << ops_.state()->FloatTy;
+      Signature sig(ops_.context(), ops_.ObjType);
+      sig << "State";
+      sig << ops_.context()->FloatTy;
 
       result = sig.call("rbx_ffi_from_float", res_args, 2, "to_obj",
                         ops_.b());
@@ -952,9 +998,9 @@ remember:
     }
 
     case RBX_FFI_TYPE_DOUBLE: {
-      Signature sig(ops_.state(), ops_.ObjType);
-      sig << "VM";
-      sig << ops_.state()->DoubleTy;
+      Signature sig(ops_.context(), ops_.ObjType);
+      sig << "State";
+      sig << ops_.context()->DoubleTy;
 
       result = sig.call("rbx_ffi_from_double", res_args, 2, "to_obj",
                         ops_.b());
@@ -962,23 +1008,19 @@ remember:
     }
 
     case RBX_FFI_TYPE_PTR: {
-      Signature sig(ops_.state(), ops_.ObjType);
-      sig << "VM";
-      sig << llvm::PointerType::getUnqual(ops_.state()->Int8Ty);
+      Signature sig(ops_.context(), ops_.ObjType);
+      sig << "State";
+      sig << llvm::PointerType::getUnqual(ops_.context()->Int8Ty);
 
       result = sig.call("rbx_ffi_from_ptr", res_args, 2, "to_obj",
                         ops_.b());
       break;
     }
 
-    case RBX_FFI_TYPE_OBJECT:
-      result = ffi_result;
-      break;
-
     case RBX_FFI_TYPE_STRING: {
-      Signature sig(ops_.state(), ops_.ObjType);
-      sig << "VM";
-      sig << llvm::PointerType::getUnqual(ops_.state()->Int8Ty);
+      Signature sig(ops_.context(), ops_.ObjType);
+      sig << "State";
+      sig << llvm::PointerType::getUnqual(ops_.context()->Int8Ty);
 
       result = sig.call("rbx_ffi_from_string", res_args, 2, "to_obj",
                         ops_.b());
@@ -986,9 +1028,9 @@ remember:
     }
 
     case RBX_FFI_TYPE_STRPTR: {
-      Signature sig(ops_.state(), ops_.ObjType);
-      sig << "VM";
-      sig << llvm::PointerType::getUnqual(ops_.state()->Int8Ty);
+      Signature sig(ops_.context(), ops_.ObjType);
+      sig << "State";
+      sig << llvm::PointerType::getUnqual(ops_.context()->Int8Ty);
 
       result = sig.call("rbx_ffi_from_string_with_pointer", res_args, 2, "to_obj",
                         ops_.b());
@@ -996,7 +1038,7 @@ remember:
     }
 
     case RBX_FFI_TYPE_VOID:
-      result = ops_.constant(Qnil);
+      result = ops_.constant(cNil);
       break;
 
     default:

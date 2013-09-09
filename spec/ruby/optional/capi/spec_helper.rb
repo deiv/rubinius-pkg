@@ -14,7 +14,9 @@ end
 
 CAPI_RUBY_SIGNATURE = "#{RUBY_NAME}-#{RUBY_VERSION}"
 
-def compile_extension(path, name)
+def compile_extension(name)
+  path = extension_path
+
   # TODO use rakelib/ext_helper.rb?
   arch_hdrdir = nil
   ruby_hdrdir = nil
@@ -29,6 +31,9 @@ def compile_extension(path, name)
       hdrdir = RbConfig::CONFIG["archdir"]
     end
   elsif RUBY_NAME == 'jruby'
+    require 'mkmf'
+    hdrdir = $hdrdir
+  elsif RUBY_NAME == "maglev"
     require 'mkmf'
     hdrdir = $hdrdir
   else
@@ -57,6 +62,7 @@ def compile_extension(path, name)
 
   cc        = RbConfig::CONFIG["CC"]
   cflags    = (ENV["CFLAGS"] || RbConfig::CONFIG["CFLAGS"]).dup
+  cflags   += " #{RbConfig::CONFIG["ARCH_FLAG"]}" if RbConfig::CONFIG["ARCH_FLAG"]
   cflags   += " -fPIC" unless cflags.include?("-fPIC")
   incflags  = "-I#{path} -I#{hdrdir}"
   incflags << " -I#{arch_hdrdir}" if arch_hdrdir
@@ -70,9 +76,11 @@ def compile_extension(path, name)
   end
 
   ldshared  = RbConfig::CONFIG["LDSHARED"]
+  ldshared += " #{RbConfig::CONFIG["ARCH_FLAG"]}" if RbConfig::CONFIG["ARCH_FLAG"]
   libpath   = "-L#{path}"
   libs      = RbConfig::CONFIG["LIBS"]
-  dldflags  = RbConfig::CONFIG["DLDFLAGS"]
+  dldflags  = "#{RbConfig::CONFIG["LDFLAGS"]} #{RbConfig::CONFIG["DLDFLAGS"]}"
+  dldflags.sub!(/-Wl,-soname,\S+/, '')
 
   output = `#{ldshared} #{obj} #{libpath} #{dldflags} #{libs} -o #{lib}`
 
@@ -86,11 +94,12 @@ def compile_extension(path, name)
   lib
 end
 
-def load_extension(name)
-  path = File.join(File.dirname(__FILE__), 'ext')
+def extension_path
+  File.expand_path("../ext", __FILE__)
+end
 
-  ext = compile_extension path, name
-  require ext
+def load_extension(name)
+  require compile_extension(name)
 end
 
 # Constants

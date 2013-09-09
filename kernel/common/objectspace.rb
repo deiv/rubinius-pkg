@@ -1,4 +1,10 @@
+# -*- encoding: us-ascii -*-
+
 module ObjectSpace
+  def self.find_object(query, callable)
+    Rubinius.primitive :vm_find_object
+    raise PrimitiveFailure, "ObjectSpace#find_object primitive failed"
+  end
 
   def self._id2ref(id)
     ary = []
@@ -75,5 +81,4 @@ module ObjectSpace
   def self.garbage_collect
     GC.start
   end
-
 end

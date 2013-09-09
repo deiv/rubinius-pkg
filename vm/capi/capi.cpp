@@ -1,4 +1,4 @@
-#include "vm/config.h"
+#include "config.h"
 
 #include "builtin/array.hpp"
 #include "builtin/data.hpp"
@@ -13,7 +13,10 @@
 #include "builtin/location.hpp"
 #include "builtin/block_environment.hpp"
 #include "builtin/proc.hpp"
+#include "builtin/exception.hpp"
 
+#include "call_frame.hpp"
+#include "configuration.hpp"
 #include "lookup_data.hpp"
 #include "dispatch.hpp"
 #include "arguments.hpp"
@@ -25,19 +28,9 @@
 #include "dispatch.hpp"
 #include "capi/capi.hpp"
 #include "capi/18/include/ruby.h"
-#include <string>
-#include <vector>
-#include <tr1/unordered_map>
-
-#ifdef RBX_WINDOWS
-#include <malloc.h>
-#endif
 
 namespace rubinius {
   namespace capi {
-
-    typedef std::vector<std::string> CApiConstantNameMap;
-    typedef std::tr1::unordered_map<int, VALUE> CApiConstantHandleMap;
 
     /**
      * This looks like a complicated scheme but there is a reason for
@@ -45,83 +38,27 @@ namespace rubinius {
      * We need to avoid global data to better support embedding and
      * other features like MVM. @see capi_get_constant().
      */
-    std::string& capi_get_constant_name(int type) {
-      static CApiConstantNameMap map;
-
-      if(map.empty()) {
-        map.resize(cCApiMaxConstant + 1);
-
-        map[cCApiArray]      = "Array";
-        map[cCApiBignum]     = "Bignum";
-        map[cCApiClass]      = "Class";
-        map[cCApiComparable] = "Comparable";
-        map[cCApiData]       = "Data";
-        map[cCApiEnumerable] = "Enumerable";
-        map[cCApiFalse]      = "FalseClass";
-        map[cCApiFile]       = "File";
-        map[cCApiFixnum]     = "Fixnum";
-        map[cCApiFloat]      = "Float";
-        map[cCApiHash]       = "Hash";
-        map[cCApiInteger]    = "Integer";
-        map[cCApiIO]         = "IO";
-        map[cCApiKernel]     = "Kernel";
-        map[cCApiMatch]      = "MatchData";
-        map[cCApiModule]     = "Module";
-        map[cCApiNil]        = "NilClass";
-        map[cCApiNumeric]    = "Numeric";
-        map[cCApiObject]     = "Object";
-        map[cCApiRange]      = "Range";
-        map[cCApiRegexp]     = "Regexp";
-        map[cCApiRubinius]   = "Rubinius";
-        map[cCApiString]     = "String";
-        map[cCApiStruct]     = "Struct";
-        map[cCApiSymbol]     = "Symbol";
-        map[cCApiThread]     = "Thread";
-        map[cCApiTime]       = "Time";
-        map[cCApiTrue]       = "TrueClass";
-        map[cCApiProc]       = "Proc";
-        map[cCApiGC]         = "GC";
-        map[cCApiCAPI]       = "Rubinius::CAPI";
-        map[cCApiMethod]     = "Method";
-
-        map[cCApiArgumentError]       = "ArgumentError";
-        map[cCApiEOFError]            = "EOFError";
-        map[cCApiErrno]               = "Errno";
-        map[cCApiException]           = "Exception";
-        map[cCApiFatal]               = "FatalError";
-        map[cCApiFloatDomainError]    = "FloatDomainError";
-        map[cCApiIndexError]          = "IndexError";
-        map[cCApiInterrupt]           = "Interrupt";
-        map[cCApiIOError]             = "IOError";
-        map[cCApiLoadError]           = "LoadError";
-        map[cCApiLocalJumpError]      = "LocalJumpError";
-        map[cCApiNameError]           = "NameError";
-        map[cCApiNoMemoryError]       = "NoMemoryError";
-        map[cCApiNoMethodError]       = "NoMethodError";
-        map[cCApiNotImplementedError] = "NotImplementedError";
-        map[cCApiRangeError]          = "RangeError";
-        map[cCApiRegexpError]         = "RegexpError";
-        map[cCApiRuntimeError]        = "RuntimeError";
-        map[cCApiScriptError]         = "ScriptError";
-        map[cCApiSecurityError]       = "SecurityError";
-        map[cCApiSignalException]     = "SignalException";
-        map[cCApiStandardError]       = "StandardError";
-        map[cCApiSyntaxError]         = "SyntaxError";
-        map[cCApiSystemCallError]     = "SystemCallError";
-        map[cCApiSystemExit]          = "SystemExit";
-        map[cCApiSystemStackError]    = "SystemStackError";
-        map[cCApiTypeError]           = "TypeError";
-        map[cCApiThreadError]         = "ThreadError";
-        map[cCApiZeroDivisionError]   = "ZeroDivisionError";
-      }
+    std::string capi_get_constant_name(int type) {
+      NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
       if(type < 0 || type >= cCApiMaxConstant) {
-        NativeMethodEnvironment* env = NativeMethodEnvironment::get();
         rb_raise(env->get_handle(env->state()->globals().exception.get()),
               "C-API: invalid constant index");
       }
 
+      CApiConstantNameMap map = env->state()->shared().capi_constant_name_map();
       return map[type];
+    }
+
+    bool capi_check_interrupts(STATE, CallFrame* call_frame, void* end) {
+      if(!state->check_stack(call_frame, end)) {
+        return false;
+      }
+
+      if(unlikely(state->check_local_interrupts())) {
+        if(!state->process_async(call_frame)) return false;
+      }
+      return true;
     }
 
     /**
@@ -139,7 +76,7 @@ namespace rubinius {
         args->set(env->state(), i, env->get_object(arg_array[i]));
       }
 
-      Object* blk = RBX_Qnil;
+      Object* blk = cNil;
 
       if(VALUE blk_handle = env->outgoing_block()) {
         blk = env->get_object(blk_handle);
@@ -149,7 +86,7 @@ namespace rubinius {
       Object* recv = env->get_object(receiver);
 
       // Unlock, we're leaving extension code.
-      env->state()->shared.leave_capi(env->state());
+      LEAVE_CAPI(env->state());
 
       Object* ret = recv->send(env->state(), env->current_call_frame(),
           reinterpret_cast<Symbol*>(method_name), args, blk);
@@ -160,7 +97,7 @@ namespace rubinius {
       if(ret) ret_handle = env->get_handle(ret);
 
       // Re-entering extension code
-      env->state()->shared.enter_capi(env->state());
+      ENTER_CAPI(env->state());
 
       env->update_cached_data();
 
@@ -177,21 +114,27 @@ namespace rubinius {
                                       Object** args, Object* block)
     {
       int marker = 0;
-      if(!env->state()->check_stack(env->current_call_frame(), &marker)) {
+      if(!capi_check_interrupts(env->state(), env->current_call_frame(), &marker)) {
         env->current_ep()->return_to(env);
       }
 
       env->flush_cached_data();
 
       // Unlock, we're leaving extension code.
-      env->state()->shared.leave_capi(env->state());
+      LEAVE_CAPI(env->state());
 
-      LookupData lookup(recv, recv->lookup_begin(env->state()), true);
-      Arguments args_o(method, recv, block, arg_count, args);
-      Dispatch dis(method);
+      Object* ret = cNil;
 
-      Object* ret = dis.send(env->state(), env->current_call_frame(),
-                             lookup, args_o);
+      // Run in a block so objects are properly deconstructed when we
+      // do a longjmp because of an exception.
+      {
+        LookupData lookup(recv, recv->lookup_begin(env->state()), env->state()->globals().sym_private.get());
+        Arguments args_o(method, recv, block, arg_count, args);
+        Dispatch dis(method);
+
+        ret = dis.send(env->state(), env->current_call_frame(),
+                      lookup, args_o);
+      }
 
       // We need to get the handle for the return value before getting
       // the GEL so that ret isn't accidentally GCd while we wait.
@@ -199,9 +142,55 @@ namespace rubinius {
       if(ret) ret_handle = env->get_handle(ret);
 
       // Re-entering extension code
-      env->state()->shared.enter_capi(env->state());
+      ENTER_CAPI(env->state());
 
       env->update_cached_data();
+
+      // An exception occurred
+      if(!ret) env->current_ep()->return_to(env);
+
+      return ret_handle;
+    }
+
+    VALUE capi_fast_call(VALUE receiver, ID method_name, int arg_count, ...) {
+      NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+
+      va_list varargs;
+      va_start(varargs, arg_count);
+
+      Object* args[arg_count];
+
+      for(int i = 0; i < arg_count; i++) {
+        args[i] = env->get_object(va_arg(varargs, VALUE));
+      }
+
+      va_end(varargs);
+
+      // Unlock, we're leaving extension code.
+      LEAVE_CAPI(env->state());
+
+      Object* recv = env->get_object(receiver);
+      Symbol* method = (Symbol*)method_name;
+
+      Object* ret = cNil;
+      // Run in block so we properly deconstruct objects allocated
+      // on the stack if we do a longjmp because of an exception.
+      {
+        LookupData lookup(recv, recv->lookup_begin(env->state()), env->state()->globals().sym_private.get());
+        Arguments args_o(method, recv, cNil, arg_count, args);
+        Dispatch dis(method);
+
+        ret = dis.send(env->state(), env->current_call_frame(),
+                       lookup, args_o);
+      }
+
+      // We need to get the handle for the return value before getting
+      // the GEL so that ret isn't accidentally GCd while we wait.
+      VALUE ret_handle = 0;
+      if(ret) ret_handle = env->get_handle(ret);
+
+      // Re-entering extension code
+      ENTER_CAPI(env->state());
 
       // An exception occurred
       if(!ret) env->current_ep()->return_to(env);
@@ -214,32 +203,36 @@ namespace rubinius {
                               size_t arg_count, Object** arg_vals)
     {
       int marker = 0;
-      if(!env->state()->check_stack(env->current_call_frame(), &marker)) {
+      if(!capi_check_interrupts(env->state(), env->current_call_frame(), &marker)) {
         env->current_ep()->return_to(env);
       }
 
       env->flush_cached_data();
 
       // Unlock, we're leaving extension code.
-      env->state()->shared.leave_capi(env->state());
+      LEAVE_CAPI(env->state());
 
-      Object* ret = RBX_Qnil;
+      Object* ret = cNil;
       STATE = env->state();
 
       CallFrame* call_frame = env->current_call_frame();
-      Arguments args(G(sym_call), blk, arg_count, arg_vals);
 
-      if(BlockEnvironment* be = try_as<BlockEnvironment>(blk)) {
-        ret = be->call(state, call_frame, args);
-      } else if(Proc* proc = try_as<Proc>(blk)) {
-        ret = proc->yield(state, call_frame, args);
-      } else if(blk->nil_p()) {
-        state->thread_state()->raise_exception(
-            Exception::make_lje(state, call_frame));
-        ret = NULL;
-      } else {
-        Dispatch dis(G(sym_call));
-        ret = dis.send(state, call_frame, args);
+      // Run in separate block so the arguments are destructed
+      // properly before we make a potential longjmp.
+      {
+        Arguments args(G(sym_call), blk, arg_count, arg_vals);
+
+        if(BlockEnvironment* be = try_as<BlockEnvironment>(blk)) {
+          ret = be->call(state, call_frame, args);
+        } else if(Proc* proc = try_as<Proc>(blk)) {
+          ret = proc->yield(state, call_frame, args);
+        } else if(blk->nil_p()) {
+          state->raise_exception(Exception::make_lje(state, call_frame));
+          ret = NULL;
+        } else {
+          Dispatch dis(G(sym_call));
+          ret = dis.send(state, call_frame, args);
+        }
       }
 
       // We need to get the handle for the return value before getting
@@ -248,7 +241,7 @@ namespace rubinius {
       if(ret) ret_handle = env->get_handle(ret);
 
       // Re-entering extension code
-      env->state()->shared.enter_capi(env->state());
+      ENTER_CAPI(env->state());
 
       env->update_cached_data();
 
@@ -262,7 +255,7 @@ namespace rubinius {
                                  size_t arg_count, Object** args)
     {
       int marker = 0;
-      if(!env->state()->check_stack(env->current_call_frame(), &marker)) {
+      if(!capi_check_interrupts(env->state(), env->current_call_frame(), &marker)) {
         env->current_ep()->return_to(env);
       }
 
@@ -275,14 +268,19 @@ namespace rubinius {
       Symbol* name = c_as<NativeMethod>(env->get_object(frame->method()))->name();
 
       // Unlock, we're leaving extension code.
-      env->state()->shared.leave_capi(env->state());
+      LEAVE_CAPI(env->state());
 
-      LookupData lookup(recv, mod->superclass(), true);
-      Arguments args_o(name, recv, arg_count, args);
-      Dispatch dis(name);
+      Object* ret = cNil;
+      // Use a block objects on the stack are properly deconstructed when
+      // we do a potential longjmp.
+      {
+        LookupData lookup(recv, mod->superclass(), env->state()->globals().sym_private.get());
+        Arguments args_o(name, recv, arg_count, args);
+        Dispatch dis(name);
 
-      Object* ret = dis.send(env->state(), env->current_call_frame(),
-                             lookup, args_o);
+        ret = dis.send(env->state(), env->current_call_frame(),
+                       lookup, args_o);
+      }
 
       // We need to get the handle for the return value before getting
       // the GEL so that ret isn't accidentally GCd while we wait.
@@ -290,7 +288,7 @@ namespace rubinius {
       if(ret) ret_handle = env->get_handle(ret);
 
       // Re-entering extension code
-      env->state()->shared.enter_capi(env->state());
+      ENTER_CAPI(env->state());
 
       env->update_cached_data();
 
@@ -316,7 +314,7 @@ namespace rubinius {
     /** Make sure the name has the given prefix. */
     Symbol* prefixed_by(STATE, const char* prefix, size_t len, ID name) {
       Symbol* sym_obj = reinterpret_cast<Symbol*>(name);
-      std::string& sym = state->shared.symbols.lookup_cppstring(sym_obj);
+      std::string& sym = state->shared().symbols.lookup_cppstring(sym_obj);
 
       if(sym.compare(0UL, len, prefix) == 0) return sym_obj;
 
@@ -328,7 +326,7 @@ namespace rubinius {
 
     Symbol* prefixed_by(STATE, const char prefix, ID name) {
       Symbol* sym_obj = reinterpret_cast<Symbol*>(name);
-      std::string& sym = state->shared.symbols.lookup_cppstring(sym_obj);
+      std::string& sym = state->shared().symbols.lookup_cppstring(sym_obj);
 
       if(sym.c_str()[0] == prefix) return sym_obj;
 
@@ -345,8 +343,8 @@ namespace rubinius {
     void capi_raise_type_error(object_type type, Object* object) {
       NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
-      TypeInfo* expected = env->state()->find_type(type);
-      TypeInfo* actual = env->state()->find_type(object->get_type());
+      TypeInfo* expected = env->state()->vm()->find_type(type);
+      TypeInfo* actual = env->state()->vm()->find_type(object->get_type());
 
       rb_raise(rb_eTypeError, "wrong argument type %s (expected %s)",
           actual->type_name.c_str(), expected->type_name.c_str());
@@ -356,23 +354,47 @@ namespace rubinius {
       NativeMethodEnvironment* env = NativeMethodEnvironment::get();
       exception->locations(env->state(), Location::from_call_stack(env->state(),
                            env->current_call_frame()));
-      env->state()->thread_state()->raise_exception(exception);
+      env->state()->raise_exception(exception);
 
       env->current_ep()->return_to(env);
     }
 
+    void capi_raise_backend(VALUE exception) {
+      NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+      Exception *exc = capi::c_as<Exception>(env->get_object(exception));
+      capi_raise_backend(exc);
+    }
+
+    void capi_raise_backend(VALUE klass, const char* reason) {
+      NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+      Class* cls = c_as<Class>(env->get_object(klass));
+      Exception* exc = Exception::make_exception(env->state(), cls, reason);
+      capi_raise_backend(exc);
+    }
+
+    void capi_raise_break(VALUE obj) {
+      NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+      env->state()->vm()->thread_state()->raise_break(env->get_object(obj), env->scope()->parent());
+      env->current_ep()->return_to(env);
+    }
 
     Proc* wrap_c_function(void* cb, VALUE cb_data, int arity) {
       NativeMethodEnvironment* env = NativeMethodEnvironment::get();
       NativeMethod* nm = NativeMethod::create(env->state(),
-                          nil<String>(), env->state()->shared.globals.rubinius.get(),
+                          nil<String>(), env->state()->vm()->shared.globals.rubinius.get(),
                           env->state()->symbol("call"), cb,
-                          Fixnum::from(arity));
+                          Fixnum::from(arity), 0);
 
       nm->set_ivar(env->state(), env->state()->symbol("cb_data"),
                    env->get_object(cb_data));
 
-      Proc* prc = Proc::create(env->state(), env->state()->shared.globals.proc.get());
+      Object* current_block = env->block();
+      if(!current_block->nil_p()) {
+        nm->set_ivar(env->state(), env->state()->symbol("original_block"),
+                     current_block);
+      }
+
+      Proc* prc = Proc::create(env->state(), env->state()->vm()->shared.globals.proc.get());
       prc->bound_method(env->state(), nm);
 
       return prc;
@@ -386,23 +408,32 @@ using namespace rubinius::capi;
 extern "C" {
 
   VALUE capi_get_constant(CApiConstant type) {
-    static CApiConstantHandleMap map;
+    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+
+    env->shared().capi_constant_lock().lock();
+    CApiConstantHandleMap map = env->state()->shared().capi_constant_handle_map();
 
     CApiConstantHandleMap::iterator entry = map.find(type);
     if(entry == map.end()) {
-      VALUE val = rb_path2class(capi_get_constant_name(type).c_str());
-      capi::Handle::from(val)->ref(); // Extra ref, since we save it in the map
-      map[type] = val;
+      std::string constant_name = capi_get_constant_name(type);
+
+      VALUE val = rb_path2class(constant_name.c_str());
+      capi::Handle* hdl = capi::Handle::from(val);
+      hdl->ref(); // Extra ref, since we save it in the map
+      map[type] = hdl;
+      env->shared().capi_constant_lock().unlock();
       return val;
     } else {
-      return entry->second;
+      VALUE val = entry->second->as_value();
+      env->shared().capi_constant_lock().unlock();
+      return val;
     }
   }
 
   VALUE rb_call_super(int argc, const VALUE *argv) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
-    Object** args = reinterpret_cast<Object**>(alloca(sizeof(Object*) * argc));
+    Object* args[argc];
     for(int i = 0; i < argc; i++) {
       args[i] = env->get_object(argv[i]);
     }
@@ -416,7 +447,7 @@ extern "C" {
     va_list varargs;
     va_start(varargs, arg_count);
 
-    Object** args = reinterpret_cast<Object**>(alloca(sizeof(Object*) * arg_count));
+    Object* args[arg_count];
 
     for(int i = 0; i < arg_count; i++) {
       args[i] = env->get_object(va_arg(varargs, VALUE));
@@ -424,7 +455,7 @@ extern "C" {
 
     va_end(varargs);
 
-    Object* blk = RBX_Qnil;
+    Object* blk = cNil;
 
     if(VALUE blk_handle = env->outgoing_block()) {
       blk = env->get_object(blk_handle);
@@ -440,13 +471,13 @@ extern "C" {
   VALUE rb_funcall2(VALUE receiver, ID method_name, int arg_count, const VALUE* v_args) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
-    Object** args = reinterpret_cast<Object**>(alloca(sizeof(Object**) * arg_count));
+    Object* args[arg_count];
 
     for(int i = 0; i < arg_count; i++) {
       args[i] = env->get_object(v_args[i]);
     }
 
-    Object* blk = RBX_Qnil;
+    Object* blk = cNil;
 
     if(VALUE blk_handle = env->outgoing_block()) {
       blk = env->get_object(blk_handle);
@@ -464,7 +495,7 @@ extern "C" {
   {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
-    Object** args = reinterpret_cast<Object**>(alloca(sizeof(Object**) * arg_count));
+    Object* args[arg_count];
 
     for(int i = 0; i < arg_count; i++) {
       args[i] = env->get_object(v_args[i]);
@@ -481,7 +512,7 @@ extern "C" {
 
     Object* blk = env->block();
 
-    if(!RBX_RTEST(blk)) {
+    if(!CBOOL(blk)) {
       rb_raise(rb_eLocalJumpError, "no block given", 0);
     }
 
@@ -495,7 +526,7 @@ extern "C" {
 
     Object* blk = env->block();
 
-    if(!RBX_RTEST(blk)) {
+    if(!CBOOL(blk)) {
       rb_raise(rb_eLocalJumpError, "no block given", 0);
     }
 
@@ -503,7 +534,7 @@ extern "C" {
       return capi_yield_backend(env, blk, 0, 0);
     }
 
-    Object** vars = reinterpret_cast<Object**>(alloca(sizeof(Object*) * n));
+    Object* vars[n];
 
     va_list args;
     va_start(args, n);
@@ -522,13 +553,13 @@ extern "C" {
 
     Object* blk = env->block();
 
-    if(!RBX_RTEST(blk)) {
+    if(!CBOOL(blk)) {
       rb_raise(rb_eLocalJumpError, "no block given", 0);
     }
 
     if(Array* ary = try_as<Array>(env->get_object(array_handle))) {
       int count = ary->size();
-      Object** vars = reinterpret_cast<Object**>(alloca(sizeof(Object*) * count));
+      Object* vars[count];
 
       for(int i = 0; i < count; i++) {
         vars[i] = ary->get(env->state(), i);
@@ -542,13 +573,27 @@ extern "C" {
 
   int rb_block_given_p() {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
-    return RBX_RTEST(env->block());
+    return CBOOL(env->block());
   }
 
   void rb_need_block() {
-    if (!rb_block_given_p()) {
+    if(!rb_block_given_p()) {
       rb_raise(rb_eLocalJumpError, "no block given", 0);
     }
+  }
+
+  VALUE rb_block_call(VALUE obj, ID meth, int argc, VALUE* argv,
+                      VALUE(*cb)(ANYARGS), VALUE cb_data) {
+    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+
+    if(cb) {
+      Proc* prc = capi::wrap_c_function((void*)cb, cb_data, C_BLOCK_CALL);
+      env->set_outgoing_block(env->get_handle(prc));
+    } else {
+      env->set_outgoing_block(env->get_handle(env->block()));
+    }
+
+    return rb_funcall2(obj, meth, argc, argv);
   }
 
   VALUE rb_apply(VALUE recv, ID mid, VALUE args) {
@@ -560,10 +605,10 @@ extern "C" {
     Object* obj = env->get_object(recv);
 
     // Unlock, we're leaving extension code.
-    env->state()->shared.leave_capi(env->state());
+    LEAVE_CAPI(env->state());
 
     Object* ret = obj->send(env->state(), env->current_call_frame(),
-        reinterpret_cast<Symbol*>(mid), ary, RBX_Qnil);
+        reinterpret_cast<Symbol*>(mid), ary, cNil);
 
     // We need to get the handle for the return value before getting
     // the GEL so that ret isn't accidentally GCd while we wait.
@@ -571,7 +616,7 @@ extern "C" {
     if(ret) ret_handle = env->get_handle(ret);
 
     // Re-entering extension code
-    env->state()->shared.enter_capi(env->state());
+    ENTER_CAPI(env->state());
 
     env->update_cached_data();
 
@@ -582,19 +627,19 @@ extern "C" {
   }
 
 
-  void capi_infect(VALUE obj1, VALUE obj2) {
+  void capi_infect(VALUE h, VALUE s) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
-    Object* object1 = env->get_object(obj1);
-    Object* object2 = env->get_object(obj2);
+    Object* host   = env->get_object(h);
+    Object* source = env->get_object(s);
 
-    object1->infect(env->state(), object2);
+    source->infect(env->state(), host);
   }
 
   int capi_nil_p(VALUE expression_result) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
-    return RBX_NIL_P(env->get_object(expression_result));
+    return env->get_object(expression_result)->nil_p();
   }
 
   void capi_taint(VALUE obj) {
@@ -617,7 +662,7 @@ extern "C" {
   {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
-    VM* state = env->state();
+    State* state = env->state();
     Symbol* method_name = state->symbol(name);
 
     Module* module = NULL;
@@ -631,25 +676,27 @@ extern "C" {
     NativeMethod* method = NULL;
     method = NativeMethod::create(state, String::create(state, file),
                                   module, method_name,
-                                  (void*)fptr, Fixnum::from(arity));
+                                  (void*)fptr, Fixnum::from(arity),
+                                  env->current_native_frame()->capi_lock_index());
 
     Symbol* visibility;
 
     switch(kind) {
     case cCApiPrivateMethod:
-      visibility = state->symbol("private");
+      visibility = G(sym_private);
       break;
 
     case cCApiProtectedMethod:
-      visibility = state->symbol("protected");
+      visibility = G(sym_protected);
       break;
 
     default:  /* Also catches singletons for now. @todo Verify OK. --rue */
-      visibility = state->symbol("public");
+      visibility = G(sym_public);
       break;
     }
 
     module->add_method(state, method_name, method, visibility);
+    System::vm_reset_method_cache(env->state(), module, method_name, env->current_call_frame());
   }
 
   VALUE capi_class_superclass(VALUE class_handle) {

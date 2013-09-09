@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 # TODO: Temporary! Object should find these methods in BasicObject
 # but we fake that until method lookup is fixed for 1.9.
 module Kernel
@@ -11,7 +13,9 @@ module Kernel
   alias_method :===,  :equal?
 
   def !~(other)
-    self =~ other ? false : true
+    res = self =~ other ? false : true
+    Regexp.last_match = Regexp.last_match
+    res
   end
 
   def trust
@@ -28,4 +32,13 @@ module Kernel
     Rubinius.primitive :object_untrusted_p
     raise PrimitiveFailure, "Kernel#untrusted? primitive failed"
   end
+
+  def respond_to?(meth, include_private=false)
+    respond_to_prim?(meth, include_private)
+  end.custom_call_site
+
+  def respond_to_missing?(meth, include_private)
+    false
+  end
+
 end

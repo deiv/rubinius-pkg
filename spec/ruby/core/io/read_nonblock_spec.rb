@@ -15,6 +15,12 @@ describe "IO#read_nonblock" do
     lambda { @read.read_nonblock(5) }.should raise_error(Errno::EAGAIN)
   end
 
+  ruby_version_is "1.9" do
+    it "raises IO::WaitReadable when there is no data" do
+      lambda { @read.read_nonblock(5) }.should raise_error(IO::WaitReadable)
+    end
+  end
+
   it "returns at most the number of bytes requested" do
     @write << "hello"
     @read.read_nonblock(4).should == "hell"
@@ -23,6 +29,16 @@ describe "IO#read_nonblock" do
   it "returns less data if that is all that is available" do
     @write << "hello"
     @read.read_nonblock(10).should == "hello"
+  end
+
+  it "allows for reading 0 bytes before any write" do
+    @read.read_nonblock(0).should == ""
+  end
+
+  it "allows for reading 0 bytes after a write" do
+    @write.write "1"
+    @read.read_nonblock(0).should == ""
+    @read.read_nonblock(1).should == "1"
   end
 
   not_compliant_on :rubinius, :jruby do

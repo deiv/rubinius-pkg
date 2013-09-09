@@ -32,11 +32,11 @@ describe "String#tr" do
   end
 
   ruby_version_is '1.9.2' do
-    it "raises a ArgumentError a descending range in the replacement as containing just the start character" do
+    it "raises an ArgumentError a descending range in the replacement as containing just the start character" do
       lambda { "hello".tr("a-y", "z-b") }.should raise_error(ArgumentError)
     end
 
-    it "raises a ArgumentError a descending range in the source as empty" do
+    it "raises an ArgumentError a descending range in the source as empty" do
       lambda { "hello".tr("l-a", "z") }.should raise_error(ArgumentError)
     end
   end
@@ -55,6 +55,10 @@ describe "String#tr" do
     "hello ^-^".tr("^---l-o", "x").should == "xxlloxx-x"
   end
 
+  it "supports non-injective replacements" do
+    "hello".tr("helo", "1212").should == "12112"
+  end
+
   it "tries to convert from_str and to_str to strings using to_str" do
     from_str = mock('ab')
     from_str.should_receive(:to_str).and_return("ab")
@@ -66,7 +70,7 @@ describe "String#tr" do
   end
 
   it "returns subclass instances when called on a subclass" do
-    StringSpecs::MyString.new("hello").tr("e", "a").should be_kind_of(StringSpecs::MyString)
+    StringSpecs::MyString.new("hello").tr("e", "a").should be_an_instance_of(StringSpecs::MyString)
   end
 
   it "taints the result when self is tainted" do
@@ -89,6 +93,22 @@ describe "String#tr" do
       b.should == "über"
       b.encoding.should == Encoding::UTF_8
     end
+
+    it "can replace a multibyte character with a single byte one" do
+      a = "über"
+      a.encoding.should == Encoding::UTF_8
+      b = a.tr("ü","u")
+      b.should == "uber"
+      b.encoding.should == Encoding::UTF_8
+    end
+
+    it "does not replace a multibyte character where part of the bytes match the tr string" do
+      str = "椎名深夏"
+      a = "\u0080\u0082\u0083\u0084\u0085\u0086\u0087\u0088\u0089\u008A\u008B\u008C\u008E\u0091\u0092\u0093\u0094\u0095\u0096\u0097\u0098\u0099\u009A\u009B\u009C\u009E\u009F"
+      b = "€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“”•–—˜™š›œžŸ"
+      str.tr(a, b).should == "椎名深夏"
+    end
+
   end
 end
 

@@ -11,8 +11,9 @@ namespace rubinius {
   class Object;
 
   class InstructionSequence;
-  class CompiledMethod;
+  class CompiledCode;
   class String;
+  class Encoding;
   class Array;
   class Bignum;
   class Float;
@@ -36,7 +37,9 @@ namespace rubinius {
 
     Float* get_float();
     InstructionSequence* get_iseq();
-    CompiledMethod* get_cmethod();
+    CompiledCode* get_compiled_code();
+    Object* get_constant();
+    Object* get_encoding();
 
   public:
     class Error {
@@ -47,7 +50,7 @@ namespace rubinius {
         : message_(msg)
       {}
 
-      const char* message() {
+      const char* message() const {
         return message_;
       }
     };

@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   module AST
     class Alias < Node
@@ -115,8 +117,7 @@ module Rubinius
       end
 
       def new_local(name)
-        variable = Compiler::LocalVariable.new allocate_slot
-        variables[name] = variable
+        variables[name] ||= Compiler::LocalVariable.new allocate_slot
       end
 
       def new_nested_local(name)
@@ -147,6 +148,7 @@ module Rubinius
         meth = new_generator(g, name)
 
         meth.push_state self
+        meth.for_module_body = true
 
         if scoped
           meth.push_self
@@ -167,24 +169,11 @@ module Rubinius
 
         meth.pop_state
 
-        g.dup
-        g.push_rubinius
-        g.swap
-        g.push_literal arg_name
-        g.swap
-        g.push_generator meth
+        g.create_block meth
         g.swap
         g.push_scope
-        g.swap
-        g.send :attach_method, 4
-        g.pop
-
-        if pass_block
-          g.push_block
-          g.send_with_block arg_name, 0
-        else
-          g.send arg_name, 0
-        end
+        g.push_true
+        g.send :call_under, 3
 
         return meth
       end
@@ -290,12 +279,13 @@ module Rubinius
 
     class FormalArguments < Node
       attr_accessor :names, :required, :optional, :defaults, :splat
-      attr_reader :block_arg
+      attr_reader :block_arg, :block_index
 
       def initialize(line, args, defaults, splat)
         @line = line
         @defaults = nil
         @block_arg = nil
+        @block_index = nil
 
         if defaults
           defaults = DefaultArguments.new line, defaults
@@ -313,7 +303,7 @@ module Rubinius
         if splat.kind_of? Symbol
           args << splat
         elsif splat
-          splat = :@unnamed_splat
+          splat = :*
           args << splat
         end
         @names = args
@@ -322,14 +312,18 @@ module Rubinius
 
       def block_arg=(node)
         @names << node.name
+
+        @block_index = @names.length - 1
         @block_arg = node
       end
 
       def bytecode(g)
+        g.state.check_for_locals = false
         map_arguments g.state.scope
 
         @defaults.bytecode(g) if @defaults
         @block_arg.bytecode(g) if @block_arg
+        g.state.check_for_locals = true
       end
 
       def required_args
@@ -384,7 +378,7 @@ module Rubinius
         @required.each { |x| sexp << x }
         sexp += @defaults.names if @defaults
 
-        if @splat == :@unnamed_splat
+        if @splat == :*
           sexp << :*
         elsif @splat
           sexp << :"*#{@splat}"
@@ -408,6 +402,7 @@ module Rubinius
         @defaults = nil
         @block_arg = nil
         @splat_index = nil
+        @block_index = nil
 
         @required = []
         names = []
@@ -437,23 +432,30 @@ module Rubinius
         when Symbol
           names << splat
         when true
-          splat = :@unnamed_splat
+          splat = :*
           names << splat
         when false
           @splat_index = -3
           splat = nil
         end
 
+        @post = []
         if post
-          names.concat post
-          @post = post
-        else
-          @post = []
+          post.each do |arg|
+            case arg
+            when MultipleAssignment
+              @post << PatternArguments.from_masgn(arg)
+            when Symbol
+              @post << arg
+              names << arg
+            end
+          end
         end
 
         if block
           @block_arg = BlockArgument.new line, block
           names << block
+          @block_index = names.length - 1
         end
 
         @splat = splat
@@ -485,23 +487,34 @@ module Rubinius
       end
 
       def map_arguments(scope)
-        @required.each.with_index do |arg, index|
+        @required.each_with_index do |arg, index|
           case arg
           when PatternArguments
             arg.map_arguments scope
           when Symbol
-            @required[index] = arg = :"_#{index}" if arg == :_
+            @required[index] = arg = :"_#{index}" if arg == :_ and index > 0
             scope.new_local arg
           end
         end
 
         @defaults.map_arguments scope if @defaults
         scope.new_local @splat if @splat.kind_of? Symbol
-        @post.each { |arg| scope.new_local arg }
+
+        @post.each do |arg|
+          case arg
+          when PatternArguments
+            arg.map_arguments scope
+          when Symbol
+            scope.new_local arg
+          end
+        end
+
         scope.assign_local_reference @block_arg if @block_arg
+
       end
 
       def bytecode(g)
+        g.state.check_for_locals = false
         map_arguments g.state.scope
 
         @required.each do |arg|
@@ -511,9 +524,16 @@ module Rubinius
             g.pop
           end
         end
-
         @defaults.bytecode(g) if @defaults
         @block_arg.bytecode(g) if @block_arg
+        @post.each do |arg|
+          if arg.kind_of? PatternArguments
+            arg.argument.position_bytecode(g)
+            arg.bytecode(g)
+            g.pop
+          end
+        end
+        g.state.check_for_locals = true
       end
     end
 
@@ -522,12 +542,41 @@ module Rubinius
 
       def self.from_masgn(node)
         array = []
-        node.left.body.map do |n|
+        size = 0
+        if node.left
+          size += node.left.body.size
+          node.left.body.map do |n|
+            case n
+            when MultipleAssignment
+              array << PatternArguments.from_masgn(n)
+            when LocalVariable
+              array << LeftPatternVariable.new(n.line, n.name)
+            end
+          end
+        end
+
+        if node.post
+          idx = 0
+          post_args = []
+          node.post.body.map do |n|
+            case n
+            when MultipleAssignment
+              post_args << PatternArguments.from_masgn(n)
+            when LocalVariable
+              post_args << PostPatternVariable.new(n.line, n.name, idx)
+            end
+            idx += 1
+          end
+          array.concat(post_args.reverse)
+        end
+
+        if node.splat
+          n = node.splat
           case n
-          when MultipleAssignment
-            array << PatternArguments.from_masgn(n)
-          when LocalVariable
-            array << PatternVariable.new(n.line, n.name)
+          when EmptySplat
+            array << SplatPatternVariable.new(n.line, :*)
+          when SplatAssignment, SplatWrapped, SplatArray
+            array << SplatPatternVariable.new(n.value.line, n.value.name)
           end
         end
 
@@ -547,8 +596,10 @@ module Rubinius
         arguments = @arguments.body
         while arguments
           node = arguments.first
-          if node.kind_of? PatternVariable
+          case node
+          when LeftPatternVariable, PostPatternVariable, SplatPatternVariable
             @argument = node
+            scope.new_local node.name
             scope.assign_local_reference node
             return
           end
@@ -557,7 +608,16 @@ module Rubinius
       end
 
       def bytecode(g)
-        @arguments.body.each { |arg| arg.bytecode(g) }
+        @arguments.body.each do |arg|
+          if arg.kind_of? PatternArguments
+            g.shift_array
+            g.cast_array
+            arg.bytecode(g)
+            g.pop
+          else
+            arg.bytecode(g)
+          end
+        end
       end
     end
 
@@ -611,7 +671,13 @@ module Rubinius
         pos(g)
 
         g.push_proc
-        g.set_local @variable.slot
+
+        if @variable.respond_to?(:depth) && @variable.depth != 0
+          g.set_local_depth @variable.depth, @variable.slot
+        else
+          g.set_local @variable.slot
+        end
+
         g.pop
       end
     end
@@ -898,8 +964,7 @@ module Rubinius
       def bytecode(g)
         pos(g)
 
-        g.push_rubinius
-        g.find_const :Type
+        g.push_type
         g.swap
         g.send :object_singleton_class, 1
 
@@ -920,20 +985,40 @@ module Rubinius
     end
 
     class Container < ClosedScope
-      attr_accessor :file, :name, :variable_scope
+      attr_accessor :file, :name, :variable_scope, :pre_exe
 
       def initialize(body)
         @body = body || NilLiteral.new(1)
+        @pre_exe = []
+      end
+
+      def push_state(g)
+        g.push_state self
+      end
+
+      def pop_state(g)
+        g.pop_state
       end
 
       def container_bytecode(g)
         g.name = @name
         g.file = @file.to_sym
 
+        push_state(g)
+        @pre_exe.each { |pe| pe.pre_bytecode(g) }
+
         yield if block_given?
+        pop_state(g)
 
         g.local_count = local_count
         g.local_names = local_names
+      end
+
+      def to_sexp
+        sexp = [sexp_name]
+        @pre_exe.each { |pe| sexp << pe.pre_sexp }
+        sexp << @body.to_sexp
+        sexp
       end
     end
 
@@ -951,7 +1036,7 @@ module Rubinius
         depth = 1
         scope = @variable_scope
         while scope
-          if slot = scope.method.local_slot(name)
+          if !scope.method.for_eval? and slot = scope.method.local_slot(name)
             return Compiler::NestedLocalVariable.new(depth, slot)
           elsif scope.eval_local_defined?(name, false)
             return Compiler::EvalLocalVariable.new(name)
@@ -978,8 +1063,7 @@ module Rubinius
       end
 
       def new_local(name)
-        variable = Compiler::EvalLocalVariable.new name
-        variables[name] = variable
+        variables[name] ||= Compiler::EvalLocalVariable.new name
       end
 
       def assign_local_reference(var)
@@ -991,20 +1075,22 @@ module Rubinius
         var.variable = reference
       end
 
+      def push_state(g)
+        g.push_state self
+        g.state.push_eval self
+      end
+
       def bytecode(g)
         super(g)
 
         container_bytecode(g) do
-          g.push_state self
-          g.state.push_eval self
           @body.bytecode(g)
           g.ret
-          g.pop_state
         end
       end
 
-      def to_sexp
-        [:eval, @body.to_sexp]
+      def sexp_name
+        :eval
       end
     end
 
@@ -1018,14 +1104,12 @@ module Rubinius
         super(g)
 
         container_bytecode(g) do
-          g.push_state self
           @body.bytecode(g)
-          g.pop_state
         end
       end
 
-      def to_sexp
-        [:snippet, @body.to_sexp]
+      def sexp_name
+        :snippet
       end
     end
 
@@ -1039,17 +1123,15 @@ module Rubinius
         super(g)
 
         container_bytecode(g) do
-          g.push_state self
           @body.bytecode(g)
           g.pop
           g.push :true
           g.ret
-          g.pop_state
         end
       end
 
-      def to_sexp
-        [:script, @body.to_sexp]
+      def sexp_name
+        :script
       end
     end
 

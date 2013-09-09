@@ -6,6 +6,7 @@
 #include "gc/root.hpp"
 #include "gc/baker.hpp"
 #include "gc/marksweep.hpp"
+#include "capi/handles.hpp"
 
 #include "object_utils.hpp"
 
@@ -22,17 +23,19 @@ public:
   Roots* roots;
   VariableRootBuffers variable_buffers;
   capi::Handles handles;
-  capi::Handles cached_handles;
+  std::list<capi::Handle*> cached_handles;
 
   void setUp() {
     create();
     roots = &state->globals().roots;
-    gc_data = new GCData(*roots,
-                         &handles, &cached_handles, state->global_cache());
+    gc_data = new GCData(*roots, &handles,
+                         &cached_handles, state->vm()->global_cache());
   }
 
   void tearDown() {
-    delete gc_data;
+    if(gc_data) {
+      delete gc_data;
+    }
     destroy();
   }
 
@@ -41,7 +44,7 @@ public:
   }
 
   void test_new_object() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
 
     Tuple* obj;
 
@@ -52,7 +55,7 @@ public:
   }
 
   void test_write_barrier() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Object* obj;
     Object* obj2;
 
@@ -74,21 +77,21 @@ public:
 
   /* Causes a segfault when fails. */
   void test_write_barrier_not_called_for_immediates() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Object* obj;
     Object* obj2;
 
     obj = util_new_object(om);
     obj->set_zone(MatureObjectZone);
 
-    obj2 = Qnil;
+    obj2 = cNil;
 
     om.write_barrier(obj, obj2);
     TS_ASSERT_EQUALS(obj->remembered_p(), 0U);
   }
 
   void test_collect_young() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Object* obj;
     size_t start = om.young_->bytes_used();
 
@@ -96,16 +99,9 @@ public:
     util_new_object(om);
     util_new_object(om);
     util_new_object(om);
-    obj = util_new_object(om);
+    util_new_object(om);
 
-    // Commented this test, since objects are allocated from slabs
-    // now by default. This means that the bytes used doesn't increase
-    // since the slab where the objects are allocated is already
-    // allocated in the young space.
-
-    // TS_ASSERT_EQUALS(om.young_->bytes_used(), start + obj->size_in_bytes(state) * 5);
-
-    om.collect_young(*gc_data);
+    om.collect_young(state, gc_data);
 
     TS_ASSERT(om.young_->bytes_used() <= start);
 
@@ -113,43 +109,43 @@ public:
     TS_ASSERT_EQUALS(obj->age(), 0U);
     Root r(roots, obj);
 
-    om.collect_young(*gc_data);
+    om.collect_young(state, gc_data);
     TS_ASSERT(obj->forwarded_p());
   }
 
   void test_collect_young_through_references() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Tuple *obj, *obj2, *obj3;
 
-    obj =  (Tuple*)util_new_object(om);
-    obj2 = (Tuple*)util_new_object(om);
+    obj =  as<Tuple>(util_new_object(om));
+    obj2 = as<Tuple>(util_new_object(om));
 
     obj->field[0] = obj2;
-    obj2->field[0] = Qtrue;
+    obj2->field[0] = cTrue;
 
     om.write_barrier(obj, obj2);
 
     Root r(roots, obj);
 
-    om.collect_young(*gc_data);
+    om.collect_young(state, gc_data);
 
     TS_ASSERT(obj->forwarded_p());
     TS_ASSERT(obj2->forwarded_p());
 
     Object* new_obj = roots->front()->get();
     TS_ASSERT(obj != new_obj);
-    obj = (Tuple*)new_obj;
+    obj = as<Tuple>(new_obj);
 
     TS_ASSERT(om.young_->in_current_p(obj));
-    obj3 = (Tuple*)obj->field[0];
+    obj3 = as<Tuple>(obj->field[0]);
     TS_ASSERT(obj2 != obj3);
 
-    TS_ASSERT_EQUALS(obj2->field[0], Qtrue);
+    TS_ASSERT_EQUALS(obj2->field[0], cTrue);
   }
 
   /* Could crash on failure */
   void test_collect_young_skips_byte_storage() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
 
     //ByteArray *obj, *obj2;
 
@@ -163,14 +159,14 @@ public:
 
     //Root r(&roots, obj);
 
-    om.collect_young(*gc_data);
+    om.collect_young(state, gc_data);
 
     //tup = reinterpret_cast<Tuple*>(roots->front()->get());
     //TS_ASSERT_EQUALS(tup->field[0], obj2);
   }
 
   void test_new_large_object() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Tuple* obj;
 
     om.large_object_threshold = 10;
@@ -185,7 +181,7 @@ public:
   }
 
   void test_collect_young_doesnt_move_mature_objects() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Object* obj;
 
     om.large_object_threshold = 10;
@@ -194,36 +190,36 @@ public:
 
     Root r(roots, obj);
 
-    om.collect_young(*gc_data);
+    om.collect_young(state, gc_data);
 
     TS_ASSERT_EQUALS(obj, roots->front()->get());
   }
 
   void test_collect_young_uses_remember_set() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Tuple *young, *mature;
 
-    om.large_object_threshold = 50 * 8 * sizeof(void *) / 32;
+    om.large_object_threshold = sizeof(void *) * 50 * 8 / 32;
 
-    young =  (Tuple*)util_new_object(om);
+    young =  as<Tuple>(util_new_object(om));
     TS_ASSERT_EQUALS(young->zone(), YoungObjectZone);
-    mature = (Tuple*)util_new_object(om,20);
+    mature = as<Tuple>(util_new_object(om,20));
     TS_ASSERT_EQUALS(mature->zone(), MatureObjectZone);
 
-    young->field[0] = Qtrue;
+    young->field[0] = cTrue;
     mature->field[0] = young;
 
     om.write_barrier(mature, young);
     TS_ASSERT_EQUALS(mature->remembered_p(), 1U);
 
-    om.collect_young(*gc_data);
+    om.collect_young(state, gc_data);
 
     TS_ASSERT(mature->field[0] != young);
-    TS_ASSERT_EQUALS(((Tuple*)mature->field[0])->field[0], Qtrue);
+    TS_ASSERT_EQUALS((as<Tuple>(mature->field[0])->field[0]), cTrue);
   }
 
   void test_collect_young_promotes_objects() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Object* young;
 
     young = util_new_object(om);
@@ -233,23 +229,21 @@ public:
     om.set_young_lifetime(1);
 
     TS_ASSERT_EQUALS(young->age(), 0U);
-    om.collect_young(*gc_data);
+    om.collect_young(state, gc_data);
     TS_ASSERT_EQUALS(roots->front()->get()->age(), 1U);
-    om.collect_young(*gc_data);
-
-    TS_ASSERT_EQUALS(roots->front()->get()->age(), 0U);
+    om.collect_young(state, gc_data);
 
     TS_ASSERT(roots->front()->get()->mature_object_p());
   }
 
   void test_collect_young_resets_remember_set() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Tuple *young, *mature;
 
-    om.large_object_threshold = 50 * 8 * sizeof(void *) / 32;
+    om.large_object_threshold = sizeof(void *) * 50 * 8 / 32;
 
-    young =  (Tuple*)util_new_object(om);
-    mature = (Tuple*)util_new_object(om,20);
+    young =  as<Tuple>(util_new_object(om));
+    mature = as<Tuple>(util_new_object(om,20));
 
     TS_ASSERT(mature->mature_object_p());
     TS_ASSERT(young->young_object_p());
@@ -262,17 +256,17 @@ public:
     TS_ASSERT_EQUALS(mature->remembered_p(), 1U);
 
     TS_ASSERT_EQUALS(young->age(), 0U);
-    om.collect_young(*gc_data);
+    om.collect_young(state, gc_data);
     TS_ASSERT_EQUALS(mature->field[0]->age(), 1U);
-    om.collect_young(*gc_data);
+    om.collect_young(state, gc_data);
   }
 
   void test_collect_young_uses_forwarding_pointers() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Tuple *obj, *obj2;
 
-    obj =  (Tuple*)util_new_object(om);
-    obj2 = (Tuple*)util_new_object(om);
+    obj =  as<Tuple>(util_new_object(om));
+    obj2 = as<Tuple>(util_new_object(om));
 
     obj->field[0] = obj2;
     obj->field[1] = obj2;
@@ -282,17 +276,17 @@ public:
 
     Root r(roots, obj);
 
-    om.collect_young(*gc_data);
+    om.collect_young(state, gc_data);
 
-    obj = (Tuple*)roots->front()->get();
+    obj = as<Tuple>(roots->front()->get());
 
-    obj2 = (Tuple*)obj->field[0];
+    obj2 = as<Tuple>(obj->field[0]);
     TS_ASSERT_EQUALS(obj2, obj->field[1]);
     TS_ASSERT_EQUALS(obj2, obj->field[2]);
   }
 
   void test_collect_young_copies_byte_bodies() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
 
     ByteArray* obj;
 
@@ -301,30 +295,14 @@ public:
 
     Root r(roots, obj);
 
-    om.collect_young(*gc_data);
+    om.collect_young(state, gc_data);
 
-    obj = (ByteArray*)roots->front()->get();
+    obj = as<ByteArray>(roots->front()->get());
     TS_ASSERT_EQUALS(obj->raw_bytes()[0], static_cast<char>(47));
   }
 
-  void test_collect_young_copies_chararray_bodies() {
-    ObjectMemory& om = *state->om;
-
-    CharArray* obj;
-
-    obj = CharArray::create(state, 3);
-    obj->raw_bytes()[0] = 48;
-
-    Root r(roots, obj);
-
-    om.collect_young(*gc_data);
-
-    obj = (CharArray*)roots->front()->get();
-    TS_ASSERT_EQUALS(obj->raw_bytes()[0], static_cast<char>(48));
-  }
-
   void test_collect_mature() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Object* mature;
 
     om.debug_marksweep(true);
@@ -334,41 +312,50 @@ public:
     mature = util_new_object(om,20);
 
     TS_ASSERT(mature->mature_object_p());
+    unsigned int mark = om.mark();
+    TS_ASSERT(!mature->marked_p(mark));
+    Root r(roots, mature);
 
-    TS_ASSERT(!mature->marked_p(om.mark()));
+    om.collect_mature(state, gc_data);
+    om.wait_for_mature_marker(state);
+    // marker thread cleans up gc_data
+    gc_data = NULL;
 
-    om.collect_mature(*gc_data);
-
-    // TS_ASSERT(!mature->marked_p());
+    TS_ASSERT(mature->marked_p(mark));
   }
 
   void test_collect_mature_marks_young_objects() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Tuple* young;
     Object* mature;
 
-    om.large_object_threshold = 50 * 8 * sizeof(void *) / 32;
+    om.large_object_threshold = sizeof(void *) * 50 * 8 / 32;
 
     young =  util_new_object(om);
     mature = util_new_object(om,20);
 
     young->field[0] = mature; // dangerous, but ok in tests
 
+    unsigned int mark = om.mark();
+    TS_ASSERT(!young->marked_p(mark));
     Root r(roots, young);
 
-    om.collect_mature(*gc_data);
-    TS_ASSERT_EQUALS(young->marked_p(om.mark()), 0U);
+    om.collect_mature(state, gc_data);
+    om.wait_for_mature_marker(state);
+    gc_data = NULL;
+
+    TS_ASSERT(young->marked_p(mark));
   }
 
   /* Could segfault on failure due to infinite loop. */
   void test_collect_mature_stops_at_already_marked_objects() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Tuple *young, *mature;
 
     om.large_object_threshold = 50;
 
-    young =  (Tuple*)util_new_object(om);
-    mature = (Tuple*)util_new_object(om,20);
+    young =  as<Tuple>(util_new_object(om));
+    mature = as<Tuple>(util_new_object(om,20));
 
     young->field[0] = mature;
     mature->field[0] = young;
@@ -378,22 +365,23 @@ public:
 
     Root r(roots, young);
 
-    om.collect_mature(*gc_data);
+    om.collect_mature(state, gc_data);
+    om.wait_for_mature_marker(state);
+    gc_data = NULL;
 
-    young = (Tuple*)roots->front()->get();
-    mature = (Tuple*)young->field[0];
+    mature = as<Tuple>(young->field[0]);
 
     TS_ASSERT_EQUALS(mature->field[0], young);
   }
 
   void test_collect_young_stops_at_already_marked_objects() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Tuple *obj, *obj2;
 
-    obj =  (Tuple*)util_new_object(om);
-    obj2 = (Tuple*)util_new_object(om);
+    obj =  as<Tuple>(util_new_object(om));
+    obj2 = as<Tuple>(util_new_object(om));
 
-    obj2->field[1] = Qtrue;
+    obj2->field[1] = cTrue;
     obj->field[0] = obj2;
     obj2->field[0] = obj;
 
@@ -402,17 +390,17 @@ public:
 
     Root r(roots, obj);
 
-    om.collect_young(*gc_data);
+    om.collect_young(state, gc_data);
 
-    obj = (Tuple*)roots->front()->get();
-    obj2 = (Tuple*)obj->field[0];
+    obj = as<Tuple>(roots->front()->get());
+    obj2 = as<Tuple>(obj->field[0]);
 
     TS_ASSERT_EQUALS(obj2->field[0], obj);
-    TS_ASSERT_EQUALS(obj2->field[1], Qtrue);
+    TS_ASSERT_EQUALS(obj2->field[1], cTrue);
   }
 
   void test_valid_object_p() {
-    ObjectMemory& om = *state->om;
+    ObjectMemory& om = *state->memory();
     Object* obj;
 
     obj = util_new_object(om);
@@ -424,14 +412,16 @@ public:
 
   void test_xmalloc_causes_gc() {
     // Knows that the threshold is 10M
-    state->interrupts.check = false;
+    state->shared().check_gc_p();
+
     int bytes = 1024 * 1024;
     int total = 110 * bytes;
     while(total >= 0) {
       XFREE(XMALLOC(bytes));
       total -= bytes;
     }
-    TS_ASSERT_EQUALS(state->interrupts.check, true);
+
+    TS_ASSERT_EQUALS(state->shared().check_gc_p(), true);
   }
 
 };

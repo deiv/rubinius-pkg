@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   class Tuple
 
@@ -87,7 +89,7 @@ module Rubinius
     def dup
       Rubinius.primitive :tuple_dup
 
-      obj = self.class.new(self.size)
+      obj = Rubinius::Type.object_class(self).new(self.size)
 
       Rubinius.invoke_primitive :object_copy_object, obj, self
 
@@ -98,7 +100,7 @@ module Rubinius
       obj
     end
 
-    def delete(start,length,object)
+    def delete(start, length, object)
       Rubinius.primitive :tuple_delete_inplace
 
       start = Rubinius::Type.coerce_to start, Fixnum, :to_i

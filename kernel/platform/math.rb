@@ -1,9 +1,13 @@
+# -*- encoding: us-ascii -*-
+
 ##
 # Platform specific behavior for Math.
 
+module Rubinius
 module FFI::Platform::Math
   extend FFI::Library
 
+  attach_function :fabs,  [:double], :double
   attach_function :atan2, [:double, :double], :double
   attach_function :cos,   [:double], :double
   attach_function :sin,   [:double], :double
@@ -38,4 +42,4 @@ module FFI::Platform::Math
     log10(x) / log10(2.0)
   end
 end
-
+end

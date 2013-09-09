@@ -1,3 +1,6 @@
+# -*- encoding: us-ascii -*-
+
+module Rubinius
 module FFI::Platform::POSIX
   #--
   # Internal class for accessing timevals
@@ -5,6 +8,7 @@ module FFI::Platform::POSIX
   class TimeVal < FFI::Struct
     config 'rbx.platform.timeval', :tv_sec, :tv_usec
   end
+end
 end
 
 class File < IO
@@ -21,6 +25,10 @@ class File < IO
 
     # O_ACCMODE is /undocumented/ for fcntl() on some platforms
     ACCMODE  = Rubinius::Config['rbx.platform.fcntl.O_ACCMODE']
+
+    F_GETFD  = Rubinius::Config['rbx.platform.fcntl.F_GETFD']
+    F_SETFD  = Rubinius::Config['rbx.platform.fcntl.F_SETFD']
+    FD_CLOEXEC = Rubinius::Config['rbx.platform.fcntl.FD_CLOEXEC']
 
     RDONLY   = Rubinius::Config['rbx.platform.file.O_RDONLY']
     WRONLY   = Rubinius::Config['rbx.platform.file.O_WRONLY']
@@ -53,6 +61,8 @@ class File < IO
     FNM_CASEFOLD = 0x08
   end
 
+  FFI = Rubinius::FFI
+
   SEPARATOR = FFI::Platform::File::SEPARATOR
   Separator = FFI::Platform::File::SEPARATOR
   ALT_SEPARATOR = FFI::Platform::File::ALT_SEPARATOR
@@ -60,33 +70,6 @@ class File < IO
   POSIX = FFI::Platform::POSIX
 
   attr_reader :path
-
-  def initialize(path_or_fd, mode = "r", perm = 0666)
-    if path_or_fd.kind_of? Integer
-      super(path_or_fd, mode)
-      @path = nil
-    else
-      path = Rubinius::Type.coerce_to_path path_or_fd
-
-      fd = IO.sysopen(path, mode, perm)
-      if fd < 0
-        begin
-          Errno.handle path
-        rescue Errno::EMFILE
-          # true means force to run, don't ignore it.
-          GC.run(true)
-
-          fd = IO.sysopen(path, mode, perm)
-          Errno.handle if fd < 0
-        end
-      end
-
-      @path = path
-      super(fd)
-    end
-  end
-
-  private :initialize
 
   # The mode_t type is 2 bytes (ushort). Instead of getting whatever
   # value happens to be in the least significant 16 bits, just set
@@ -120,18 +103,18 @@ class File < IO
 
     slash = "/"
 
-    ext_not_present = ext.equal?(undefined)
+    ext_not_present = undefined.equal?(ext)
 
-    if pos = path.find_string_reverse(slash, path.size)
+    if pos = path.find_string_reverse(slash, path.bytesize)
       # special case. If the string ends with a /, ignore it.
-      if pos == path.size - 1
+      if pos == path.bytesize - 1
 
         # Find the first non-/ from the right
         data = path.data
         found = false
         pos.downto(0) do |i|
-          if data[i] != ?/
-            path = path.substring(0, i+1)
+          if data[i] != 47  # ?/
+            path = path.byteslice(0, i+1)
             found = true
             break
           end
@@ -141,14 +124,14 @@ class File < IO
         return slash unless found
 
         # Now that we've trimmed the /'s at the end, search again
-        pos = path.find_string_reverse(slash, path.size)
+        pos = path.find_string_reverse(slash, path.bytesize)
         if ext_not_present and !pos
           # No /'s found and ext not present, return path.
           return path
         end
       end
 
-      path = path.substring(pos + 1, path.size - pos) if pos
+      path = path.byteslice(pos + 1, path.bytesize - pos) if pos
     end
 
     return path if ext_not_present
@@ -158,13 +141,13 @@ class File < IO
     ext = StringValue(ext)
 
     if ext == ".*"
-      if pos = path.rindex(?.)
-        return path.substring(0, pos)
+      if pos = path.find_string_reverse(".", path.bytesize)
+        return path.byteslice(0, pos)
       end
-    elsif pos = path.rindex(ext)
+    elsif pos = path.find_string_reverse(ext, path.bytesize)
       # Check that ext is the last thing in the string
-      if pos == path.size - ext.size
-        return path.substring(0, pos)
+      if pos == path.bytesize - ext.size
+        return path.byteslice(0, pos)
       end
     end
 
@@ -197,7 +180,8 @@ class File < IO
     mode = clamp_short mode
 
     paths.each do |path|
-      POSIX.chmod Rubinius::Type.coerce_to_path(path), mode
+      n = POSIX.chmod Rubinius::Type.coerce_to_path(path), mode
+      Errno.handle if n == -1
     end
     paths.size
   end
@@ -208,10 +192,13 @@ class File < IO
   # the link, not the file referenced by the link).
   # Often not available.
   def self.lchmod(mode, *paths)
+    raise NotImplementedError, "lchmod not implemented on this platform" unless Rubinius::HAVE_LCHMOD
+
     mode = Rubinius::Type.coerce_to(mode, Integer, :to_int)
 
     paths.each do |path|
-      POSIX.lchmod Rubinius::Type.coerce_to_path(path), mode
+      n = POSIX.lchmod Rubinius::Type.coerce_to_path(path), mode
+      Errno.handle if n == -1
     end
 
     paths.size
@@ -242,7 +229,8 @@ class File < IO
     end
 
     paths.each do |path|
-      POSIX.chown Rubinius::Type.coerce_to_path(path), owner, group
+      n = POSIX.chown Rubinius::Type.coerce_to_path(path), owner, group
+      Errno.handle if n == -1
     end
 
     paths.size
@@ -250,7 +238,9 @@ class File < IO
 
   def chmod(mode)
     mode = Rubinius::Type.coerce_to(mode, Integer, :to_int)
-    POSIX.fchmod @descriptor, clamp_short(mode)
+    n = POSIX.fchmod @descriptor, clamp_short(mode)
+    Errno.handle if n == -1
+    n
   end
 
   def chown(owner, group)
@@ -266,7 +256,9 @@ class File < IO
       group = -1
     end
 
-    POSIX.fchown @descriptor, owner, group
+    n = POSIX.fchown @descriptor, owner, group
+    Errno.handle if n == -1
+    n
   end
 
   ##
@@ -276,6 +268,8 @@ class File < IO
   # by the link). Often not available. Returns number
   # of files in the argument list.
   def self.lchown(owner, group, *paths)
+    raise NotImplementedError, "lchown not implemented on this platform" unless Rubinius::HAVE_LCHOWN
+
     if owner
       owner = Rubinius::Type.coerce_to(owner, Integer, :to_int)
     else
@@ -289,7 +283,8 @@ class File < IO
     end
 
     paths.each do |path|
-      POSIX.lchown Rubinius::Type.coerce_to_path(path), owner, group
+      n = POSIX.lchown Rubinius::Type.coerce_to_path(path), owner, group
+      Errno.handle if n == -1
     end
 
     paths.size
@@ -313,21 +308,21 @@ class File < IO
     io = Rubinius::Type.try_convert io_or_path, IO, :to_io
 
     if io.is_a? IO
-      Stat.from_fd(io.fileno).directory?
+      Stat.fstat(io.fileno).directory?
     else
       st = Stat.stat io_or_path
       st ? st.directory? : false
     end
   end
 
-  def self.last_nonslash(path,start=nil)
+  def self.last_nonslash(path, start=nil)
     # Find the first non-/ from the right
     data = path.data
     idx = nil
     start ||= (path.size - 1)
 
     start.downto(0) do |i|
-      if data[i] != ?/
+      if data[i] != 47  # ?/
         return i
       end
     end
@@ -357,7 +352,7 @@ class File < IO
     if pos = path.find_string_reverse(slash, chunk_size)
       return "/" if pos == 0
 
-      path = path.substring(0, pos)
+      path = path.byteslice(0, pos)
 
       return "/" if path == "/"
 
@@ -369,7 +364,7 @@ class File < IO
       # edge case, only /'s, return /
       return "/" unless idx
 
-      return path.substring(0, idx - 1)
+      return path.byteslice(0, idx - 1)
     end
 
     return "."
@@ -394,87 +389,14 @@ class File < IO
   ##
   # Return true if the named file exists.
   def self.exist?(path)
-    POSIX.stat(Rubinius::Type.coerce_to_path(path), Stat::EXISTS_STRUCT.pointer) == 0
+    st = Stat.stat(path)
+    st ? true : false
   end
 
-  ##
-  # Converts a pathname to an absolute pathname. Relative
-  # paths are referenced from the current working directory
-  # of the process unless dir_string is given, in which case
-  # it will be used as the starting point. The given pathname
-  # may start with a ``~’’, which expands to the process owner‘s
-  # home directory (the environment variable HOME must be set
-  # correctly). "~user" expands to the named user‘s home directory.
-  #
-  #  File.expand_path("~oracle/bin")           #=> "/home/oracle/bin"
-  #  File.expand_path("../../bin", "/tmp/x")   #=> "/bin"
-  def self.expand_path(path, dir=nil)
-    path = Rubinius::Type.coerce_to_path(path)
-
-    first = path[0]
-    if first == ?~
-      case path[1]
-      when ?/
-        path = ENV["HOME"] + path.substring(1, path.size - 1)
-      when nil
-        unless home = ENV["HOME"]
-          raise ArgumentError, "couldn't find HOME environment variable when expanding '~'"
-        end
-
-        if home.empty?
-          raise ArgumentError, "HOME environment variable is empty expanding '~'"
-        end
-
-        return home
-      else
-        unless length = path.index("/", 1)
-          length = path.size
-        end
-
-        name = path.substring 1, length - 1
-        unless dir = Rubinius.get_user_home(name)
-          raise ArgumentError, "user #{name} does not exist"
-        end
-
-        path = dir + path.substring(length, path.size - length)
-      end
-    elsif first != ?/
-      if dir
-        dir = File.expand_path dir
-      else
-        dir = Dir.pwd
-      end
-
-      path = "#{dir}/#{path}"
-    end
-
-    items = []
-    start = 0
-    size = path.size
-
-    while index = path.index("/", start) or (start < size and index = size)
-      length = index - start
-
-      if length > 0
-        item = path.substring start, length
-
-        if item == ".."
-          items.pop
-        elsif item != "."
-          items << item
-        end
-      end
-
-      start = index + 1
-    end
-
-    return "/" if items.empty?
-
-    str = ""
-    items.each { |x| str.append "/#{x}" }
-
-    return str
-  end
+  # Pull a constant for Dir local to File so that we don't have to depend
+  # on the global Dir constant working. This sounds silly, I know, but it's a
+  # little bit of defensive coding so Rubinius can run things like fakefs better.
+  PrivateDir = ::Dir
 
   ##
   # Returns the extension (the portion of file name in
@@ -486,7 +408,7 @@ class File < IO
   #  File.extname(".profile")        #=> ""
   def self.extname(path)
     path = Rubinius::Type.coerce_to_path(path)
-    path_size = path.size
+    path_size = path.bytesize
 
     dot_idx = path.find_string_reverse(".", path_size)
 
@@ -507,7 +429,7 @@ class File < IO
     # last component ends with a .
     return "" if dot_idx == path_size - 1
 
-    return path.substring(dot_idx, path_size - dot_idx)
+    return path.byteslice(dot_idx, path_size - dot_idx)
   end
 
   ##
@@ -523,11 +445,11 @@ class File < IO
   # similar to shell filename globbing. It may contain the
   # following metacharacters:
   #
-  # *:	Matches any file. Can be restricted by other values in the glob. * will match all files; c* will match all files beginning with c; *c will match all files ending with c; and c will match all files that have c in them (including at the beginning or end). Equivalent to / .* /x in regexp.
-  # **:	Matches directories recursively or files expansively.
-  # ?:	Matches any one character. Equivalent to /.{1}/ in regexp.
-  # [set]:	Matches any one character in set. Behaves exactly like character sets in Regexp, including set negation ([^a-z]).
-  # <code></code>:	Escapes the next metacharacter.
+  # *:  Matches any file. Can be restricted by other values in the glob. * will match all files; c* will match all files beginning with c; *c will match all files ending with c; and c will match all files that have c in them (including at the beginning or end). Equivalent to / .* /x in regexp.
+  # **:  Matches directories recursively or files expansively.
+  # ?:  Matches any one character. Equivalent to /.{1}/ in regexp.
+  # [set]:  Matches any one character in set. Behaves exactly like character sets in Regexp, including set negation ([^a-z]).
+  # <code></code>:  Escapes the next metacharacter.
   # flags is a bitwise OR of the FNM_xxx parameters. The same glob pattern and flags are used by Dir::glob.
   #
   #  File.fnmatch('cat',       'cat')        #=> true  : match entire string
@@ -621,9 +543,14 @@ class File < IO
   #   open("d", "w") {}
   #   p File.identical?("a", "d")      #=> false
   def self.identical?(orig, copy)
-    st_o = stat(Rubinius::Type.coerce_to_path(orig))
-    st_c = stat(Rubinius::Type.coerce_to_path(copy))
+    orig = Rubinius::Type.coerce_to_path(orig)
+    st_o = File::Stat.stat(orig)
+    copy = Rubinius::Type.coerce_to_path(copy)
+    st_c = File::Stat.stat(copy)
 
+    return false if st_o.nil? || st_c.nil?
+
+    return false unless st_o.dev == st_c.dev
     return false unless st_o.ino == st_c.ino
     return false unless st_o.ftype == st_c.ftype
     return false unless POSIX.access(orig, Constants::R_OK)
@@ -778,7 +705,7 @@ class File < IO
     io = Rubinius::Type.try_convert io_or_path, IO, :to_io
 
     if io.is_a? IO
-      Stat.from_fd(io.fileno).size
+      Stat.fstat(io.fileno).size
     else
       stat(io_or_path).size
     end
@@ -793,7 +720,7 @@ class File < IO
     io = Rubinius::Type.try_convert io_or_path, IO, :to_io
 
     if io.is_a? IO
-      s = Stat.from_fd(io.fileno).size
+      s = Stat.fstat(io.fileno).size
     else
       st = Stat.stat io_or_path
       s = st.size if st
@@ -849,7 +776,7 @@ class File < IO
   ##
   # Copies a file from to to. If to is a directory, copies from to to/from.
   def self.syscopy(from, to)
-    out = File.directory?(to) ? to + File.basename(from) : to
+    out = directory?(to) ? to + basename(from) : to
 
     open(out, 'w') do |f|
       f.write read(from).read
@@ -874,9 +801,7 @@ class File < IO
 
     length = Rubinius::Type.coerce_to length, Integer, :to_int
 
-    n = POSIX.truncate(path, length)
-    Errno.handle if n == -1
-    n
+    prim_truncate(path, length)
   end
 
   ##
@@ -1035,7 +960,7 @@ class File < IO
   end
 
   def stat
-    Stat.from_fd @descriptor
+    Stat.fstat @descriptor
   end
 
   def truncate(length)
@@ -1046,9 +971,7 @@ class File < IO
 
     flush
     reset_buffering
-    n = POSIX.ftruncate(@descriptor, length)
-    Errno.handle if n == -1
-    n
+    prim_ftruncate(length)
   end
 
   def inspect
@@ -1063,332 +986,7 @@ class IO
   include File::Constants
 end
 
+File::Stat = Rubinius::Stat
 class File::Stat
-  class Struct < FFI::Struct
-    config "rbx.platform.stat", :st_dev, :st_ino, :st_mode, :st_nlink,
-           :st_uid, :st_gid, :st_rdev, :st_size, :st_blksize, :st_blocks,
-           :st_atime, :st_mtime, :st_ctime
-  end
-
-  EXISTS_STRUCT = Struct.new
-
-  include Comparable
-
-  S_IRUSR  = Rubinius::Config['rbx.platform.file.S_IRUSR']
-  S_IWUSR  = Rubinius::Config['rbx.platform.file.S_IWUSR']
-  S_IXUSR  = Rubinius::Config['rbx.platform.file.S_IXUSR']
-  S_IRGRP  = Rubinius::Config['rbx.platform.file.S_IRGRP']
-  S_IWGRP  = Rubinius::Config['rbx.platform.file.S_IWGRP']
-  S_IXGRP  = Rubinius::Config['rbx.platform.file.S_IXGRP']
-  S_IROTH  = Rubinius::Config['rbx.platform.file.S_IROTH']
-  S_IWOTH  = Rubinius::Config['rbx.platform.file.S_IWOTH']
-  S_IXOTH  = Rubinius::Config['rbx.platform.file.S_IXOTH']
-
-  S_IFMT   = Rubinius::Config['rbx.platform.file.S_IFMT']
-  S_IFIFO  = Rubinius::Config['rbx.platform.file.S_IFIFO']
-  S_IFCHR  = Rubinius::Config['rbx.platform.file.S_IFCHR']
-  S_IFDIR  = Rubinius::Config['rbx.platform.file.S_IFDIR']
-  S_IFBLK  = Rubinius::Config['rbx.platform.file.S_IFBLK']
-  S_IFREG  = Rubinius::Config['rbx.platform.file.S_IFREG']
-  S_IFLNK  = Rubinius::Config['rbx.platform.file.S_IFLNK']
-  S_IFSOCK = Rubinius::Config['rbx.platform.file.S_IFSOCK']
-  S_IFWHT  = Rubinius::Config['rbx.platform.file.S_IFWHT']
-  S_ISUID  = Rubinius::Config['rbx.platform.file.S_ISUID']
-  S_ISGID  = Rubinius::Config['rbx.platform.file.S_ISGID']
-  S_ISVTX  = Rubinius::Config['rbx.platform.file.S_ISVTX']
-
-  POSIX    = FFI::Platform::POSIX
-
-  attr_reader :path
-
-  def self.create(path)
-    path = Rubinius::Type.coerce_to_path path
-    stat = allocate
-    Rubinius.privately { stat.setup path, Struct.new }
-  end
-
-  def self.stat(path)
-    stat = create path
-
-    result = POSIX.stat stat.path, stat.pointer
-    return nil unless result == 0
-
-    stat
-  end
-
-  # --
-  # Stat.lstat raises whereas Stat.stat does not because most things
-  # that use Stat.stat do not expect exceptions but most things that
-  # uses Stat.lstat do.
-  # ++
-  def self.lstat(path)
-    stat = create path
-
-    result = POSIX.lstat stat.path, stat.pointer
-    Errno.handle path unless result == 0
-
-    stat
-  end
-
-  ##
-  # File::Stat#from_fd is used to support IO#stat which does not necessarily
-  # have a path.
-
-  def self.from_fd(descriptor)
-    stat = allocate
-    struct = Struct.new
-
-    result = POSIX.fstat descriptor, struct.pointer
-    Errno.handle "file descriptor #{descriptor}" unless result == 0
-
-    Rubinius.privately { stat.setup nil, struct }
-  end
-
-  def initialize(path)
-    @path = Rubinius::Type.coerce_to_path path
-    @stat = Struct.new
-    result = POSIX.stat @path, @stat.pointer
-    Errno.handle path unless result == 0
-  end
-
-  private :initialize
-
-  def setup(path, struct)
-    @path = path
-    @stat = struct
-    self
-  end
-
-  private :setup
-
-  def pointer
-    @stat.pointer
-  end
-
-  def atime
-    Time.at @stat[:st_atime]
-  end
-
-  def blksize
-    @stat[:st_blksize]
-  end
-
-  def blocks
-    @stat[:st_blocks]
-  end
-
-  def blockdev?
-    @stat[:st_mode] & S_IFMT == S_IFBLK
-  end
-
-  def chardev?
-    @stat[:st_mode] & S_IFMT == S_IFCHR
-  end
-
-  def ctime
-    Time.at @stat[:st_ctime]
-  end
-
-  def dev
-    @stat[:st_dev]
-  end
-
-  def dev_major
-    major = POSIX.major @stat[:st_dev]
-    major < 0 ? nil : major
-  end
-
-  def dev_minor
-    minor = POSIX.major @stat[:st_dev]
-    minor < 0 ? nil : minor
-  end
-
-  def directory?
-    @stat[:st_mode] & S_IFMT == S_IFDIR
-  end
-
-  def executable?
-    return true if superuser?
-    return @stat[:st_mode] & S_IXUSR != 0 if owned?
-    return @stat[:st_mode] & S_IXGRP != 0 if grpowned?
-    return @stat[:st_mode] & S_IXOTH != 0
-  end
-
-  def executable_real?
-    return true if rsuperuser?
-    return @stat[:st_mode] & S_IXUSR != 0 if rowned?
-    return @stat[:st_mode] & S_IXGRP != 0 if rgrpowned?
-    return @stat[:st_mode] & S_IXOTH != 0
-  end
-
-  def file?
-    @stat[:st_mode] & S_IFMT == S_IFREG
-  end
-
-  def ftype
-    if file?
-      "file"
-    elsif directory?
-      "directory"
-    elsif chardev?
-      "characterSpecial"
-    elsif blockdev?
-      "blockSpecial"
-    elsif pipe?
-      "fifo"
-    elsif socket?
-      "socket"
-    elsif symlink?
-      "link"
-    else
-      "unknown"
-    end
-  end
-
-  def gid
-    @stat[:st_gid]
-  end
-
-  def grpowned?
-    @stat[:st_gid] == POSIX.getegid
-  end
-
-  def ino
-    @stat[:st_ino]
-  end
-
-  def inspect
-    "#<File::Stat dev=0x#{self.dev.to_s(16)}, ino=#{self.ino}, " \
-    "mode=#{sprintf("%07d", self.mode.to_s(8).to_i)}, nlink=#{self.nlink}, " \
-    "uid=#{self.uid}, gid=#{self.gid}, rdev=0x#{self.rdev.to_s(16)}, " \
-    "size=#{self.size}, blksize=#{self.blksize}, blocks=#{self.blocks}, " \
-    "atime=#{self.atime}, mtime=#{self.mtime}, ctime=#{self.ctime}>"
-  end
-
-  def nlink
-    @stat[:st_nlink]
-  end
-
-  def mtime
-    Time.at @stat[:st_mtime]
-  end
-
-  def mode
-    @stat[:st_mode]
-  end
-
-  def owned?
-    @stat[:st_uid] == POSIX.geteuid
-  end
-
-  def path
-    @path
-  end
-
-  def pipe?
-    @stat[:st_mode] & S_IFMT == S_IFIFO
-  end
-
-  def rdev
-    @stat[:st_rdev]
-  end
-
-  def rdev_major
-    major = POSIX.major @stat[:st_rdev]
-    major < 0 ? nil : major
-  end
-
-  def rdev_minor
-    minor = POSIX.minor @stat[:st_rdev]
-    minor < 0 ? nil : minor
-  end
-
-  def readable?
-    return true if superuser?
-    return @stat[:st_mode] & S_IRUSR != 0 if owned?
-    return @stat[:st_mode] & S_IRGRP != 0 if grpowned?
-    return @stat[:st_mode] & S_IROTH != 0
-  end
-
-  def readable_real?
-    return true if rsuperuser?
-    return @stat[:st_mode] & S_IRUSR != 0 if rowned?
-    return @stat[:st_mode] & S_IRGRP != 0 if rgrpowned?
-    return @stat[:st_mode] & S_IROTH != 0
-  end
-
-  def setgid?
-    @stat[:st_mode] & S_ISGID != 0
-  end
-
-  def setuid?
-    @stat[:st_mode] & S_ISUID != 0
-  end
-
-  def sticky?
-    @stat[:st_mode] & S_ISVTX != 0
-  end
-
-  def size
-    @stat[:st_size]
-  end
-
-  def size?
-    size == 0 ? nil : size
-  end
-
-  def socket?
-    @stat[:st_mode] & S_IFMT == S_IFSOCK
-  end
-
-  def symlink?
-    @stat[:st_mode] & S_IFMT == S_IFLNK
-  end
-
-  def uid
-    @stat[:st_uid]
-  end
-
-  def writable?
-    return true if superuser?
-    return @stat[:st_mode] & S_IWUSR != 0 if owned?
-    return @stat[:st_mode] & S_IWGRP != 0 if grpowned?
-    return @stat[:st_mode] & S_IWOTH != 0
-  end
-
-  def writable_real?
-    return true if rsuperuser?
-    return @stat[:st_mode] & S_IWUSR != 0 if rowned?
-    return @stat[:st_mode] & S_IWGRP != 0 if rgrpowned?
-    return @stat[:st_mode] & S_IWOTH != 0
-  end
-
-  def zero?
-    @stat[:st_size] == 0
-  end
-
-  def <=>(other)
-    return nil unless other.is_a?(File::Stat)
-    self.mtime <=> other.mtime
-  end
-
-  def rgrpowned?
-    @stat[:st_gid] == POSIX.getgid
-  end
-  private :rgrpowned?
-
-  def rowned?
-    @stat[:st_uid] == POSIX.getuid
-  end
-  private :rowned?
-
-  def rsuperuser?
-    POSIX.getuid == 0
-  end
-  private :rsuperuser?
-
-  def superuser?
-    POSIX.geteuid == 0
-  end
-  private :superuser?
-end     # File::Stat
+  @module_name = :"File::Stat"
+end

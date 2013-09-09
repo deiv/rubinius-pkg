@@ -1,4 +1,8 @@
+# -*- encoding: us-ascii -*-
+
 module Math
+  FFI = Rubinius::FFI
+
   # Constants
   PI = 3.14159_26535_89793_23846
   E  = 2.71828_18284_59045_23536
@@ -30,24 +34,6 @@ module Math
     FFI::Platform::Math.tan Rubinius::Type.coerce_to_float(x)
   end
 
-  def acos(x)
-    x = Rubinius::Type.coerce_to_float(x)
-
-    raise DomainError, 'acos' unless x.abs <= 1.0
-
-    FFI::Platform::POSIX.errno = 0
-
-    ret = FFI::Platform::Math.acos x
-    Errno.handle
-    ret
-  end
-
-  def asin(x)
-    x = Rubinius::Type.coerce_to_float(x)
-    raise DomainError, 'asin' unless x.abs <= 1.0
-    FFI::Platform::Math.asin x
-  end
-
   def atan(x)
     FFI::Platform::Math.atan Rubinius::Type.coerce_to_float(x)
   end
@@ -62,12 +48,6 @@ module Math
 
   def tanh(x)
     FFI::Platform::Math.tanh Rubinius::Type.coerce_to_float(x)
-  end
-
-  def acosh(x)
-    x = Rubinius::Type.coerce_to_float(x)
-    raise DomainError, 'acosh' unless x >= 1.0
-    FFI::Platform::Math.acosh x
   end
 
   def asinh(x)
@@ -115,24 +95,6 @@ module Math
     FFI::Platform::Math.exp Rubinius::Type.coerce_to_float(x)
   end
 
-  def log2(x)
-    x = Rubinius::Type.coerce_to_float(x)
-    raise DomainError, 'log2' unless x >= 0.0
-    FFI::Platform::Math.log2 x
-  end
-
-  def log10(x)
-    x = Rubinius::Type.coerce_to_float(x)
-    raise DomainError, 'log10' unless x >= 0.0
-    FFI::Platform::Math.log10 x
-  end
-
-  def sqrt(x)
-    x = Rubinius::Type.coerce_to_float(x)
-    raise DomainError, 'sqrt' unless x >= 0.0
-    FFI::Platform::Math.sqrt x
-  end
-
   def frexp(x)
     x = Rubinius::Type.coerce_to_float(x)
     FFI::MemoryPointer.new :int do |exp|
@@ -142,6 +104,10 @@ module Math
   end
 
   def ldexp(x, n)
+    if n.kind_of? Float and n.nan?
+      raise RangeError, "NaN cannot be converted to an Integer"
+    end
+
     n = Rubinius::Type.coerce_to(n, Integer, :to_int)
 
     FFI::Platform::Math.ldexp Rubinius::Type.coerce_to_float(x), n
