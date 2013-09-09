@@ -1,4 +1,4 @@
-class Struct::Passwd < FFI::Struct
+class Struct::Passwd < Rubinius::FFI::Struct
   @@@
   struct do |s|
     s.include "sys/types.h"
@@ -9,6 +9,7 @@ class Struct::Passwd < FFI::Struct
     s.field :pw_passwd, :string
     s.field :pw_uid, :uid_t
     s.field :pw_gid, :gid_t
+    s.field :pw_gecos, :string
     s.field :pw_dir, :string
     s.field :pw_shell, :string
   end
@@ -18,11 +19,12 @@ class Struct::Passwd < FFI::Struct
   def passwd; self[:pw_passwd]; end
   def uid; self[:pw_uid]; end
   def gid; self[:pw_gid]; end
+  def gecos; self[:pw_gecos]; end
   def dir; self[:pw_dir]; end
   def shell; self[:pw_shell]; end
 end
 
-class Struct::Group < FFI::Struct
+class Struct::Group < Rubinius::FFI::Struct
   @@@
   struct do |s|
     s.include "sys/types.h"
@@ -30,15 +32,38 @@ class Struct::Group < FFI::Struct
 
     s.name "struct group"
     s.field :gr_name, :string
+    s.field :gr_passwd, :string
     s.field :gr_gid, :gid_t
+    s.field :gr_mem, :pointer
   end
   @@@
 
+  FFI = Rubinius::FFI
+
   def name; self[:gr_name]; end
   def gid; self[:gr_gid]; end
+  def passwd; self[:gr_passwd]; end
+  def mem
+    ptr = self[:gr_mem].read_pointer
+
+    ary = []
+    i = 1
+
+    while not ptr.null? do
+      ary << ptr.read_string
+      ptr = (self[:gr_mem] + i * FFI::Pointer.size).read_pointer
+      i += 1
+    end
+
+    ary
+  end
 end
 
 module Etc
+  FFI = Rubinius::FFI
+
+  const_set(:Passwd, Struct::Passwd)
+  const_set(:Group, Struct::Group)
 
   def self.getlogin
     getpwuid.name
@@ -82,16 +107,20 @@ module Etc
   end
 
   def self.passwd
-    setpwent
+    Rubinius.synchronize(self) do
+      begin
+        setpwent
 
-    loop do
-      pw = getpwent
-      return if pw.nil?
+        loop do
+          pw = getpwent
+          return if pw.nil?
 
-      yield pw
+          yield pw
+        end
+      ensure
+        endpwent
+      end
     end
-  ensure
-    endpwent
   end
 
   def self.getgrnam(name)
@@ -132,15 +161,22 @@ module Etc
   end
 
   def self.group
-    setgrent
+    Rubinius.synchronize(self) do
+      begin
+        raise "parallel group iteration" if @parallel_iteration
+        @parallel_iteration = true
+        setgrent
 
-    loop do
-      gr = getgrent
-      return if gr.nil?
+        loop do
+          gr = getgrent
+          return if gr.nil?
 
-      yield gr
+          yield gr
+        end
+      ensure
+        endgrent
+        @parallel_iteration = false
+      end
     end
-  ensure
-    endgrent
   end
 end

@@ -66,9 +66,12 @@ describe "The unpacking splat operator (*)" do
     [1, 2, *splatted_array].should == [1, 2, 3, 4, 5]
   end
 
-  it "when applied to a value with no other items in the containing array, coerces the passed value to an array and returns it unchanged" do
-    splatted_array = [3, 4, 5]
-    [*splatted_array].should equal(splatted_array)
+  ruby_bug "#5124", "1.9.3.194" do
+    it "returns a new array containing the same values when applied to an array inside an empty array" do
+      splatted_array = [3, 4, 5]
+      [*splatted_array].should == splatted_array
+      [*splatted_array].should_not equal(splatted_array)
+    end
   end
 
   it "unpacks the start and count arguments in an array slice assignment" do
@@ -111,4 +114,10 @@ describe "The packing splat operator (*)" do
 
 end
 
-language_version __FILE__, "array"
+ruby_version_is "1.8"..."1.9" do
+  require File.expand_path("../versions/array_1.8", __FILE__)
+end
+
+ruby_version_is "1.9" do
+  require File.expand_path("../versions/array_1.9", __FILE__)
+end

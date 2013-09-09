@@ -5,18 +5,16 @@ module RbConfig
     raise "Looks like you loaded the Rubinius rbconfig, but this is not Rubinius."
   end
 
-  prefix = File.dirname(File.dirname(__FILE__))
-
   CONFIG = {}
 
-  CONFIG["prefix"]             = prefix
+  CONFIG["prefix"]             = Rubinius::PREFIX_PATH
   CONFIG["install_prefix"]     = ''
   CONFIG["DLEXT"]              = Rubinius::LIBSUFFIX[1..-1]
   CONFIG["EXEEXT"]             = ""
   CONFIG["ruby_install_name"]  = RUBY_ENGINE.dup
   CONFIG["RUBY_INSTALL_NAME"]  = RUBY_ENGINE.dup
   CONFIG["exec_prefix"]        = "$(prefix)"
-  CONFIG["bindir"]             = Rubinius::BUILD_CONFIG[:bindir]
+  CONFIG["bindir"]             = Rubinius::BIN_PATH
   CONFIG["sbindir"]            = "$(exec_prefix)/sbin"
   CONFIG["libexecdir"]         = "$(exec_prefix)/libexec"
   CONFIG["datarootdir"]        = "$(prefix)/share"
@@ -41,33 +39,21 @@ module RbConfig
   CONFIG["TEENY"]              = teeny
   CONFIG["ruby_version"]       = "$(MAJOR).$(MINOR)"
   CONFIG["RUBY_SO_NAME"]       = "rubinius-#{Rubinius::VERSION}"
-
-  case
-  when Rubinius.ruby18?
-    CONFIG["rubyhdrdir"]         = "#{Rubinius::HDR18_PATH}"
-  when Rubinius.ruby19?
-    CONFIG["rubyhdrdir"]         = "#{Rubinius::HDR19_PATH}"
-  when Rubinius.ruby20?
-    CONFIG["rubyhdrdir"]         = "#{Rubinius::HDR20_PATH}"
-  else
-    raise Exception, "no C-API header directory defined"
-  end
-
+  CONFIG["rubyhdrdir"]         = "#{Rubinius::HDR_PATH}"
   CONFIG["LIBS"]               = ""
 
-  rubinius_version             = 'rbx-' + Rubinius::LIB_VERSION
-  # arch identification
-  CONFIG["arch"]               = "#{Rubinius::CPU}-#{Rubinius::OS}"
-  CONFIG["sitearch"]           = '$(arch)'
-  # paths
-  CONFIG["rubylibdir"]         = "$(libdir)/rubinius/#{rubinius_version}"
-  CONFIG["archdir"]            = '$(rubylibdir)/$(arch)'
-  CONFIG["sitedir"]            = Rubinius::SITE_PATH
-  CONFIG["sitelibdir"]         = "$(sitedir)/#{rubinius_version}"
-  CONFIG["sitearchdir"]        = "$(sitelibdir)/$(arch)"
-  CONFIG["vendordir"]          = Rubinius::VENDOR_PATH
-  CONFIG["vendorlibdir"]       = "$(vendordir)/#{rubinius_version}"
-  CONFIG["vendorarchdir"]      = '$(vendorlibdir)/$(arch)'
+  sitedir                      = Rubinius::HDR_PATH
+  sitelibdir                   = sitedir
+  arch                         = "#{Rubinius::CPU}-#{Rubinius::OS}"
+
+  CONFIG["sitedir"]            = sitedir
+  CONFIG["sitelibdir"]         = sitelibdir
+  CONFIG["arch"]               = arch
+  CONFIG["sitearch"]           = arch
+  CONFIG["rubylibdir"]         = sitelibdir
+  CONFIG["archdir"]            = "#{sitelibdir}/#{arch}"
+  CONFIG["sitearchdir"]        = "#{sitelibdir}/#{arch}"
+  CONFIG["rubyarchhdrdir"]     = "#{sitelibdir}"
   CONFIG["topdir"]             = File.dirname(__FILE__)
   # some of these only relevant to cross-compiling
   cpu                          = Rubinius::CPU
@@ -88,6 +74,7 @@ module RbConfig
   CONFIG["build_alias"]        = ""
   CONFIG["host_alias"]         = ""
   CONFIG["target_alias"]       = ""
+  CONFIG["warnflags"]          = ""
   # command line utilities
   CONFIG["SHELL"]              = "/bin/sh"
   CONFIG["ECHO_C"]             = ""
@@ -123,22 +110,46 @@ module RbConfig
   # since we hardcode using gcc, and this flag is only
   # used by mkmf to compile extensions, be sure PIC is in
   # there
-  CONFIG["CFLAGS"]             = "-ggdb3 -fPIC"
+  CONFIG["CFLAGS"]             = "-g"
+  CONFIG["CXXFLAGS"]           = "-g"
+  CONFIG["LDFLAGS"]            = ""
   if ENV['DEV']
-    CONFIG["CFLAGS"] << " -O0"
+    CONFIG["CFLAGS"] << " -O0 "
+    CONFIG["CXXFLAGS"] << " -O0 "
   else
     CONFIG["CFLAGS"] << " -O2"
+    CONFIG["CXXFLAGS"] << " -O2"
   end
+
+  if sys = Rubinius::BUILD_CONFIG[:system_cflags]
+    CONFIG["CFLAGS"] << " #{sys}" unless sys.empty?
+  end
+
   if user = Rubinius::BUILD_CONFIG[:user_cflags]
     CONFIG["CFLAGS"] << " #{user}" unless user.empty?
   end
 
-  CONFIG["LDFLAGS"]            = ""
+  if sys = Rubinius::BUILD_CONFIG[:system_cxxflags]
+    CONFIG["CXXFLAGS"] << " #{sys}" unless sys.empty?
+  end
+
+  if user = Rubinius::BUILD_CONFIG[:user_cxxflags]
+    CONFIG["CXXFLAGS"] << " #{user}" unless user.empty?
+  end
+
+  if sys = Rubinius::BUILD_CONFIG[:system_ldflags]
+    CONFIG["LDFLAGS"] << " #{sys}" unless sys.empty?
+  end
+
   if user = Rubinius::BUILD_CONFIG[:user_ldflags]
     CONFIG["LDFLAGS"] << " #{user}" unless user.empty?
   end
 
   CONFIG["CPPFLAGS"]           = ""
+  if sys = Rubinius::BUILD_CONFIG[:system_cppflags]
+    CONFIG["CPPFLAGS"] << " #{sys}" unless sys.empty?
+  end
+
   if user = Rubinius::BUILD_CONFIG[:user_cppflags]
     CONFIG["CPPFLAGS"] << " #{user}" unless user.empty?
   end
@@ -182,8 +193,12 @@ module RbConfig
   CONFIG["ALLOCA"]             = ""
   CONFIG["LIBEXT"]             = "a"
   CONFIG["LINK_SO"]            = ""
-  CONFIG["LIBPATHFLAG"]        = " -L%s"
-  CONFIG["RPATHFLAG"]          = ""
+  # On Linux it needs to pass down the -R flags into the linker so it will
+  # properly link files not located in paths in LD_LIBRARY_PATH. On other
+  # platforms this is not necessary and it is linked properly even for
+  # paths outside LD_LIBRARY_PATH.
+  CONFIG["LIBPATHFLAG"]        = Rubinius.linux? ? " -L%1$-s"     : " -L%s"
+  CONFIG["RPATHFLAG"]          = Rubinius.linux? ? " -Wl,-R%1$-s" : ""
   CONFIG["LIBPATHENV"]         = "DYLD_LIBRARY_PATH"
   CONFIG["TRY_LINK"]           = ""
   CONFIG["EXTSTATIC"]          = ""
@@ -196,6 +211,7 @@ module RbConfig
   CONFIG["PACKAGE_BUGREPORT"]  = ""
   CONFIG["LDSHARED"]           = Rubinius::LDSHARED
   CONFIG["LIBRUBY_LDSHARED"]   = Rubinius::LDSHARED
+  CONFIG["LDSHAREDXX"]         = Rubinius::LDSHAREDXX
 
   # absolute path to ruby executable (pulled directly from MRI's mkconfig.rb)
   def RbConfig.ruby
@@ -203,7 +219,7 @@ module RbConfig
       RbConfig::CONFIG["bindir"],
       RbConfig::CONFIG["ruby_install_name"] + RbConfig::CONFIG["EXEEXT"]
     )
-  end  
+  end
 
   # Adapted from MRI's' rbconfig.rb
   MAKEFILE_CONFIG = {}

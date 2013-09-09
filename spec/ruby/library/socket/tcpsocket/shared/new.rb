@@ -6,12 +6,20 @@ describe :tcpsocket_new, :shared => true do
     SocketSpecs::SpecTCPServer.start
   end
 
+  after :all do
+    SocketSpecs::SpecTCPServer.cleanup
+  end
+
   before :each do
     @hostname = SocketSpecs::SpecTCPServer.get.hostname
   end
 
   it "requires a hostname and a port as arguments" do
     lambda { TCPSocket.send(@method) }.should raise_error(ArgumentError)
+  end
+
+  it "throws a type error if the port is not a fixnum or string" do
+    lambda { TCPSocket.send(@method, @hostname, {}) }.should raise_error(TypeError)
   end
 
   it "refuses the connection when there is no server to connect to" do

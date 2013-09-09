@@ -16,7 +16,7 @@ describe :dir_open, :shared => true do
   end
 
   it "returns the value of the block if a block is given" do
-    Dir.open(DirSpecs.mock_dir) {|dir| :value }.should == :value
+    Dir.send(@method, DirSpecs.mock_dir) {|dir| :value }.should == :value
   end
 
   it "closes the Dir instance when the block exits if given a block" do
@@ -50,6 +50,11 @@ describe :dir_open, :shared => true do
       p = mock('path')
       p.should_receive(:to_path).and_return(DirSpecs.mock_dir)
       Dir.send(@method, p) { true }
+    end
+
+    it "accepts an options Hash" do
+      dir = Dir.send(@method, DirSpecs.mock_dir, :encoding => "utf-8") {|dir| dir }
+      dir.should be_kind_of(Dir)
     end
   end
 end

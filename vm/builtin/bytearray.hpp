@@ -2,14 +2,12 @@
 #define RBX_BUILTIN_BYTEARRAY_HPP
 
 #include "builtin/object.hpp"
-#include "type_info.hpp"
-
-#include <ctype.h>
 
 namespace rubinius {
   class ByteArray : public Object {
   public:
     const static object_type type = ByteArrayType;
+    static uintptr_t bytes_offset;
 
   private:
     native_int full_size_;
@@ -21,22 +19,23 @@ namespace rubinius {
     static void init(STATE);
     static ByteArray* create(STATE, native_int bytes);
     static ByteArray* create_pinned(STATE, native_int bytes);
+    static ByteArray* create_dirty(STATE, native_int bytes);
 
     template <typename Any>
       static ByteArray* from_body(Any obj) {
-        ByteArray* ba = reinterpret_cast<ByteArray*>(obj);
-        return ba - 1; // move back up to the pointer to the header
+        uintptr_t ptr = reinterpret_cast<uintptr_t>(obj);
+        return reinterpret_cast<ByteArray*>(ptr - bytes_offset);
       }
 
     // Rubinius.primitive :bytearray_allocate
     static ByteArray* allocate(STATE, Fixnum* bytes);
 
-    // Rubinius.primitive :bytearray_size
+    // Rubinius.primitive+ :bytearray_size
     Fixnum* size(STATE);
 
     // Return the number of bytes this ByteArray contains
-    native_int size() {
-      return full_size_ - sizeof(ByteArray);
+    native_int size() const {
+      return full_size_ - bytes_offset;
     }
 
     uint8_t* raw_bytes() {
@@ -57,6 +56,21 @@ namespace rubinius {
 
     // Rubinius.primitive :bytearray_compare_bytes
     Fixnum* compare_bytes(STATE, ByteArray* other, Fixnum* a, Fixnum* b);
+
+    /* ::locate searches for +pattern+ in the ByteArray. Returns the
+     * number of characters from the front of the ByteArray to the end
+     * of the pattern if a match is found. Returns cNil if a match is
+     * not found. Starts searching at index +start+.
+     */
+
+    // Rubinius.primitive :bytearray_locate
+    Object* locate(STATE, String* pattern, Fixnum* start, Fixnum* max);
+
+    // Rubinius.primitive :bytearray_prepend
+    ByteArray* prepend(STATE, String* other);
+
+    // Rubinius.primitive :bytearray_reverse
+    ByteArray* reverse(STATE, Fixnum* start, Fixnum* total);
 
     class Info : public TypeInfo {
     public:

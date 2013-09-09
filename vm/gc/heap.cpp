@@ -1,7 +1,8 @@
 #include <stdlib.h>
 #include <string.h>
+#include "config.h"
 #include "gc/heap.hpp"
-#include "instruments/stats.hpp"
+#include "util/gc_alloc.hpp"
 
 namespace rubinius {
 
@@ -12,7 +13,7 @@ namespace rubinius {
     : size_(bytes)
     , owner_(true)
   {
-    start_ = Address(malloc(size_));
+    start_ = Address(memory::gc_alloc(size_));
     last_ = start_ + bytes - 1;
 
     int red_zone = bytes / 1024;
@@ -45,7 +46,7 @@ namespace rubinius {
    */
   Heap::~Heap() {
     if(owner_) {
-      free(start_);
+      memory::gc_free(start_, size_);
     }
   }
 
@@ -58,8 +59,13 @@ namespace rubinius {
   void Heap::reset() {
     current_ = start_;
     scan_ = start_;
+#ifdef RBX_GC_DEBUG
+// To heavy when doing GC stress and not necessary
+#ifndef RBX_GC_STRESS
+    memset(start_, 0xff, size_);
+#endif
+#endif
   }
-
 
   /**
    * Moves +orig+ Object into this Heap, and sets a forwarding pointer to the
@@ -67,18 +73,11 @@ namespace rubinius {
    *
    * @returns the new location of +orig+.
    */
-  Object* Heap::move_object(STATE, Object* orig) {
+  Object* Heap::move_object(VM* state, Object* orig) {
     size_t bytes = orig->size_in_bytes(state);
     Object* tmp = allocate(bytes).as<Object>();
 
     memcpy(tmp, orig, bytes);
-
-    // If the header is inflated, repoint it.
-    if(tmp->inflated_header_p()) {
-      orig->deflate_header();
-      tmp->inflated_header()->set_object(tmp);
-    }
-
     orig->set_forward(tmp);
 
     return tmp;

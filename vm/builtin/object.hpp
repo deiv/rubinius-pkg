@@ -4,11 +4,10 @@
 #include <vector>
 
 #include "vm.hpp"
-#include "vm/oop.hpp"
-#include "vm/type_info.hpp"
-
+#include "oop.hpp"
+#include "type_info.hpp"
 #include "executor.hpp"
-
+#include "objectmemory.hpp"
 
 namespace rubinius {
 
@@ -23,7 +22,7 @@ namespace rubinius {
   template <class T> \
   void name(T state, type* obj) { \
     name ## _ = obj; \
-    if(zone() == MatureObjectZone) this->write_barrier(state, obj); \
+    this->write_barrier(state, obj); \
   }
 
 /**
@@ -33,8 +32,7 @@ namespace rubinius {
  *  instance variable foo_. A const version is also generated.
  */
 #define attr_reader(name, type) \
-  type* name() { return name ## _; } \
-  const type* name() const { return name ## _; }
+  type* name() const { return name ## _; }
 
 /**
  *  Ruby-like accessor creation for a slot.
@@ -46,20 +44,13 @@ namespace rubinius {
   attr_writer(name, type)
 
   /* Forwards */
-  class MetaClass;
   class Fixnum;
   class Integer;
   class String;
   class Module;
   class Executable;
   class Array;
-  class Message;
-  class TypeInfo;
-
   class Object;
-
-  typedef std::vector<Object*> ObjectArray;
-
 
   /**
    *  Object is the basic Ruby object.
@@ -101,15 +92,16 @@ namespace rubinius {
 
     /** Provides access to the GC write barrier from any object. */
     void        write_barrier(STATE, void* obj);
-    void        inline_write_barrier_passed(STATE, void* obj);
+    void        write_barrier(VM*, void* obj);
 
     /** Special-case write_barrier() for Fixnums. */
     void        write_barrier(STATE, Fixnum* obj);
     /** Special-case write_barrier() for Symbols. */
     void        write_barrier(STATE, Symbol* obj);
 
-    void        write_barrier(gc::WriteBarrier* wb, void* obj);
+    void        write_barrier(ObjectMemory* om, void* obj);
 
+    void        setup_allocation_site(STATE, CallFrame* call_frame = NULL);
 
   public:   /* Type information, field access, copy support &c. */
 
@@ -137,7 +129,7 @@ namespace rubinius {
      * by Kernel#clone.
      */
     // Rubinius.primitive :object_copy_singleton_class
-    Object* copy_singleton_class(STATE, Object* other);
+    Object* copy_singleton_class(STATE, GCToken gct, Object* other, CallFrame* calling_environment);
 
     /** True if this Object* is actually a Fixnum, false otherwise. */
     bool fixnum_p() const;
@@ -167,8 +159,11 @@ namespace rubinius {
 
   public:   /* Method dispatch stuff */
 
-    /** Class object in which to look for the MethodTable for this Object. */
-    Class*      lookup_begin(STATE);
+    /** Actual class for this object. Also handles immediates */
+    Class*       direct_class(STATE) const;
+
+    /** Module where to start looking for the MethodTable for this Object. */
+    Module*      lookup_begin(STATE) const;
 
     /**
      *  Directly send a method to this Object.
@@ -177,16 +172,23 @@ namespace rubinius {
      *  Object, passing the given number of arguments through varargs.
      */
     Object* send(STATE, CallFrame* caller, Symbol* name, Array* args,
-        Object* block = Qnil, bool allow_private = true);
+        Object* block = cNil, bool allow_private = true);
     Object* send(STATE, CallFrame* caller, Symbol* name, bool allow_private = true);
 
+    Object* send_prim(STATE, CallFrame* call_frame, Executable* exec, Module* mod, Arguments& args,
+        Symbol* min_visibility);
+
     /**
-     *  Perform a send from Ruby.
-     *
-     *  Uses Task::send_message_slowly().
+     *  Ruby #send/#__send__
      */
     // Rubinius.primitive? :object_send
-    Object* send_prim(STATE, CallFrame* call_frame, Executable* exec, Module* mod, Arguments& args);
+    Object* private_send_prim(STATE, CallFrame* call_frame, Executable* exec, Module* mod, Arguments& args);
+
+    /**
+     *  Ruby #public_send
+     */
+    // Rubinius.primitive? :object_public_send
+    Object* public_send_prim(STATE, CallFrame* call_frame, Executable* exec, Module* mod, Arguments& args);
 
 
   public:   /* Ruby interface */
@@ -201,7 +203,7 @@ namespace rubinius {
      *  Returns true if and only if this and the other object are
      *  the SAME object, false otherwise.
      */
-    // Rubinius.primitive :object_equal
+    // Rubinius.primitive+ :object_equal
     Object*   equal(STATE, Object* other);
 
     /** Sets the frozen flag. Rubinius does NOT currently support freezing. */
@@ -209,7 +211,7 @@ namespace rubinius {
     Object*   freeze(STATE);
 
     /** Returns true if this Object's frozen flag set, false otherwise. */
-    // Rubinius.primitive :object_frozen_p
+    // Rubinius.primitive+ :object_frozen_p
     Object*   frozen_p(STATE);
 
     /**
@@ -247,15 +249,24 @@ namespace rubinius {
     hashval   hash(STATE);
 
     /** Returns the hash value as an Integer. @see hash(). */
-    // Rubinius.primitive :object_hash
+    // Rubinius.primitive+ :object_hash
     Integer*  hash_prim(STATE);
 
     /** Returns an Integer ID for this object. Created as needed. */
-    // Rubinius.primitive :object_id
+    // Rubinius.primitive+ :object_id
     Integer*  id(STATE);
 
     /** Indicates if this object has been assigned an object id. */
     bool has_id(STATE);
+
+    /** Reset the object id */
+    void reset_id(STATE);
+
+    // Rubinius.primitive+ :object_infect
+    Object* infect_prim(STATE, Object* obj, Object* other) {
+      other->infect(state, obj);
+      return obj;
+    }
 
     /**
      * Taints other if this is tainted.
@@ -268,7 +279,7 @@ namespace rubinius {
      *  Returns true if given Module is this Object's class,
      *  superclass or an included Module, false otherwise.
      */
-    // Rubinius.primitive :object_kind_of
+    // Rubinius.primitive+ :object_kind_of
     Object*   kind_of_prim(STATE, Module* klass);
 
     /**
@@ -277,11 +288,15 @@ namespace rubinius {
      *  Returns true if given Module is this Object's class,
      *  false otherwise.
      */
-    // Rubinius.primitive :object_instance_of
+    // Rubinius.primitive+ :object_instance_of
     Object*   instance_of_prim(STATE, Module* klass);
 
-    /** Return object's MetaClass object. Created as needed. */
+    /** Return object's MetaClass object. Created as needed.
+     *  Also fixes up the parent hierarchy if needed */
     Class* singleton_class(STATE);
+
+    /** Return object's MetaClass object. Created as needed. */
+    Class* singleton_class_instance(STATE);
 
     /**
      *  Ruby #instance_variable_set
@@ -316,7 +331,7 @@ namespace rubinius {
     /**
      *  Returns true if this object's tainted flag is set.
      */
-    // Rubinius.primitive :object_tainted_p
+    // Rubinius.primitive+ :object_tainted_p
     Object*   tainted_p(STATE);
 
     /**
@@ -328,7 +343,7 @@ namespace rubinius {
     /**
      * Returns true if this object's untrusted flag is set.
      */
-    // Rubinius.primitive :object_untrusted_p
+    // Rubinius.primitive+ :object_untrusted_p
     Object* untrusted_p(STATE);
 
     /**
@@ -345,6 +360,15 @@ namespace rubinius {
 
     /**
      *  Returns an #inspect-like representation of an Object for
+     *  use in C++ code.
+     *
+     *  If address is true, uses the actual address of the object.
+     *  Otherwise, uses the object's id().
+     */
+    std::string to_string(STATE, bool address = false);
+
+    /**
+     *  Returns an #inspect-like representation of an Object for
      *  use in C++ code. Not called from Ruby code.
      *
      *  If address is true, uses the actual address of the object.
@@ -354,18 +378,18 @@ namespace rubinius {
 
     /**
      *
-     * Returns Qtrue if this responds to method +meth+
+     * Returns cTrue if this responds to method +meth+
      */
-    // Rubinius.primitive :object_respond_to
+    // Rubinius.primitive+ :object_respond_to
+    Object* respond_to(STATE, Symbol* name, Object* priv, CallFrame* calling_environment);
+
     Object* respond_to(STATE, Symbol* name, Object* priv);
 
-    // Rubinius.primitive :object_respond_to_public
-    Object* respond_to_public(STATE, Object* obj);
-
-    // Rubinius.primitive :object_is_fixnum
-    Object* is_fixnum() {
-      return FIXNUM_P(this) ? Qtrue : Qfalse;
-    }
+    /**
+     * Checks if object is frozen and raises RuntimeError if it is.
+     * Similar to CRuby rb_check_frozen
+     */
+    void check_frozen(STATE);
 
   public:   /* accessors */
 
@@ -390,17 +414,15 @@ namespace rubinius {
 
       virtual void auto_mark(Object* obj, ObjectMark& mark) {}
     };
-
   };
-
 
 /* Object inlines -- Alphabetic, unlike class definition. */
 
   inline bool Object::fixnum_p() const {
-    return FIXNUM_P(this);
+    return __FIXNUM_P__(this);
   }
 
-  inline Class* Object::lookup_begin(STATE) {
+  inline Class* Object::direct_class(STATE) const {
     if(reference_p()) {
       return klass_;
     }
@@ -408,8 +430,12 @@ namespace rubinius {
     return state->globals().special_classes[((uintptr_t)this) & SPECIAL_CLASS_MASK].get();
   }
 
+  inline Module* Object::lookup_begin(STATE) const {
+    return reinterpret_cast<Module*>(direct_class(state));
+  }
+
   inline bool Object::symbol_p() const {
-    return SYMBOL_P(this);
+    return __SYMBOL_P__(this);
   }
 
   inline void Object::write_barrier(STATE, Fixnum* obj) {
@@ -422,11 +448,12 @@ namespace rubinius {
 
   inline void Object::write_barrier(STATE, void* ptr) {
     Object* obj = reinterpret_cast<Object*>(ptr);
-    if(!REFERENCE_P(obj) ||
-        state->young_object_p(this) ||
-        !state->young_object_p(obj)) return;
+    state->memory()->write_barrier(this, obj);
+  }
 
-    inline_write_barrier_passed(state, ptr);
+  inline void Object::write_barrier(VM* vm, void* ptr) {
+    Object* obj = reinterpret_cast<Object*>(ptr);
+    vm->om->write_barrier(this, obj);
   }
 
   // Used in filtering APIs

@@ -123,8 +123,8 @@ typedef VALUE stack_type;
       int line_count;
       bool has_shebang;
 
-      char *ruby_sourcefile;
-      int ruby_sourceline;
+      char *sourcefile;
+      int sourceline;
 
       rb_encoding *enc;
       rb_encoding *utf8;
@@ -154,6 +154,7 @@ typedef VALUE stack_type;
 #define lex_gets            PARSER_VAR(lex_gets)
 #define line_buffer         PARSER_VAR(line_buffer)
 #define line_count          PARSER_VAR(line_count)
+#define has_shebang         PARSER_VAR(has_shebang)
 #define lex_io              PARSER_VAR(lex_io)
 #define lex_io_buf          PARSER_VAR(lex_io_buf)
 #define lex_io_index        PARSER_VAR(lex_io_index)
@@ -188,8 +189,8 @@ typedef VALUE stack_type;
 #define processor           PARSER_VAR(processor)
 #define references          PARSER_VAR(references)
 #define start_lines         PARSER_VAR(start_lines)
-#define ruby_sourcefile     PARSER_VAR(ruby_sourcefile)
-#define ruby_sourceline     PARSER_VAR(ruby_sourceline)
+#define sourcefile          PARSER_VAR(sourcefile)
+#define sourceline          PARSER_VAR(sourceline)
 
 #define node_newnode(t, a, b, c)  \
     parser_node_newnode((rb_parser_state*)parser_state, t, a, b, c)
@@ -217,7 +218,6 @@ typedef VALUE stack_type;
     char* parser_id2name(ID);
 
 #undef ID2SYM
-#undef SYMBOL_FLAG
 
 /* ID_SCOPE_SHIFT must be at least 4 because at 3 the values will overlap
  * the values of the tokens, causing the parser to mistake the symbol for
@@ -236,9 +236,9 @@ typedef VALUE stack_type;
 #define ID_INTERNAL     ID_JUNK
 
 #ifdef RUBINIUS
+#undef SYMBOL_FLAG
 #define ID2SYM(id)  (VALUE)((long)(id >> ID_SCOPE_SHIFT))
 #else
-#define SYMBOL_FLAG     0xe
 #define ID2SYM(id)  ((VALUE)(((long)(id >> ID_SCOPE_SHIFT))<<8|SYMBOL_FLAG))
 #endif
 

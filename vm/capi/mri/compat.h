@@ -67,14 +67,6 @@
 #define rb_str_ptr_readonly(str) RSTRING_PTR(str)
 #endif
 
-#ifndef rb_str_flush
-#define rb_str_flush(str)
-#endif
-
-#ifndef rb_str_update
-#define rb_str_update(str)
-#endif
-
 #ifndef rb_str_len
 #define rb_str_len(str) RSTRING_LEN(str)
 #endif
@@ -110,7 +102,7 @@ rb_hash_lookup(hash, key)
 {
   VALUE val;
 
-  if (!st_lookup(RHASH(hash)->tbl, key, &val)) {
+  if(!st_lookup(RHASH(hash)->tbl, key, &val)) {
     return Qnil; /* without Hash#default */
   }
   return val;
@@ -141,7 +133,7 @@ static VALUE
 rb_hash_clear(hash)
     VALUE hash;
 {
-  if (RHASH(hash)->tbl->num_entries > 0) {
+  if(RHASH(hash)->tbl->num_entries > 0) {
     rb_hash_foreach(hash, __rb_hash_clear_clear_i, 0);
   }
 

@@ -18,7 +18,7 @@ namespace rubinius {
     /* WARNING. Do not use this version if +num+ has the chance of being
      * greater than FIXNUM_MAX or less than FIXNUM_MIN. */
     static Fixnum* from(native_int num) {
-      return (Fixnum*)APPLY_FIXNUM_TAG(num);
+      return reinterpret_cast<Fixnum*>(APPLY_FIXNUM_TAG(num));
     }
 
     native_int to_native() const {
@@ -34,9 +34,9 @@ namespace rubinius {
 
     bool positive_p() const;
 
-    // Rubinius.primitive :fixnum_s_eqq
+    // Rubinius.primitive+ :fixnum_s_eqq
     static Object* is_fixnum(STATE, Object* obj) {
-      return obj->fixnum_p() ? Qtrue : Qfalse;
+      return RBOOL(obj->fixnum_p());
     }
 
     // Rubinius.primitive! :fixnum_add
@@ -45,7 +45,7 @@ namespace rubinius {
       if(r > FIXNUM_MAX || r < FIXNUM_MIN) {
         return Bignum::from(state, r);
       } else {
-        return Fixnum::from(r);
+        return from(r);
       }
     }
 
@@ -61,7 +61,7 @@ namespace rubinius {
       if(r > FIXNUM_MAX || r < FIXNUM_MIN) {
         return Bignum::from(state, r);
       } else {
-        return Fixnum::from(r);
+        return from(r);
       }
     }
 
@@ -86,6 +86,9 @@ namespace rubinius {
     // Rubinius.primitive! :fixnum_div
     Integer* div(STATE, Bignum* other);
 
+    // Rubinius.primitive! :fixnum_div
+    Float* div(STATE, Float* other);
+
     // Rubinius.primitive! :fixnum_mod
     Integer* mod(STATE, Fixnum* other);
 
@@ -104,7 +107,7 @@ namespace rubinius {
     // Rubinius.primitive! :fixnum_divmod
     Array* divmod(STATE, Float* other);
 
-    // Rubinius.primitive :fixnum_neg
+    // Rubinius.primitive+ :fixnum_neg
     Integer* neg(STATE);
 
     // Rubinius.primitive! :fixnum_pow
@@ -114,7 +117,7 @@ namespace rubinius {
     Object* pow(STATE, Bignum *exponent);
 
     // Rubinius.primitive! :fixnum_pow
-    Float* pow(STATE, Float *exponent);
+    Object* pow(STATE, Float *exponent);
 
     // Rubinius.primitive! :fixnum_equal
     Object* equal(STATE, Fixnum* other);
@@ -136,7 +139,7 @@ namespace rubinius {
 
     // Rubinius.primitive! :fixnum_gt
     Object* gt(STATE, Fixnum* other) {
-      return to_native() > other->to_native() ? Qtrue : Qfalse;
+      return RBOOL(to_native() > other->to_native());
     }
 
     // Rubinius.primitive! :fixnum_gt
@@ -156,7 +159,7 @@ namespace rubinius {
 
     // Rubinius.primitive! :fixnum_lt
     Object* lt(STATE, Fixnum* other) {
-      return to_native() < other->to_native() ? Qtrue : Qfalse;
+      return RBOOL(to_native() < other->to_native());
     }
 
     // Rubinius.primitive! :fixnum_lt
@@ -180,7 +183,7 @@ namespace rubinius {
     // Rubinius.primitive :fixnum_right_shift
     Integer* right_shift(STATE, Fixnum* bits);
 
-    // Rubinius.primitive :fixnum_size
+    // Rubinius.primitive+ :fixnum_size
     Integer* size(STATE);
 
     // Rubinius.primitive! :fixnum_and
@@ -210,7 +213,7 @@ namespace rubinius {
     // Rubinius.primitive! :fixnum_xor
     Integer* bit_xor(STATE, Float* other);
 
-    // Rubinius.primitive :fixnum_invert
+    // Rubinius.primitive+ :fixnum_invert
     Integer* invert(STATE);
 
     // Rubinius.primitive :fixnum_to_f
@@ -236,7 +239,7 @@ namespace rubinius {
       key = (key + (key << 2)) + (key << 4); // key * 21
       key = key ^ (key >> 28);
       key = key + (key << 31);
-      return Fixnum::from(key & FIXNUM_MAX);
+      return from(key & FIXNUM_MAX);
 #else
       // See http://burtleburtle.net/bob/hash/integer.html
       uint32_t a = (uint32_t)this;
@@ -246,7 +249,7 @@ namespace rubinius {
       a = (a+0xd3a2646c) ^ (a<<9);
       a = (a+0xfd7046c5) + (a<<3);
       a = (a^0xb55a4f09) ^ (a>>16);
-      return Fixnum::from(a & FIXNUM_MAX);
+      return from(a & FIXNUM_MAX);
 #endif
     }
 

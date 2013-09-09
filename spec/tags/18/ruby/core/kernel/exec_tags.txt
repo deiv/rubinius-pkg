@@ -1,1 +1,2 @@
-incomplete:Kernel.exec needs to be reviewed for spec completeness
+fails:Kernel#exec with a single argument subjects the specified command to shell expansion
+fails:Kernel.exec with a single argument subjects the specified command to shell expansion

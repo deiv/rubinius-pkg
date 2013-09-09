@@ -6,8 +6,9 @@
 
 #include "call_frame.hpp"
 #include "stack_variables.hpp"
-#include "builtin/staticscope.hpp"
+#include "builtin/constantscope.hpp"
 #include "builtin/module.hpp"
+#include "version.h"
 
 #include "instruments/tooling.hpp"
 
@@ -17,73 +18,73 @@ namespace rubinius {
 namespace jit {
 
   void BlockBuilder::setup() {
-    std::vector<const Type*> ftypes;
-    ftypes.push_back(ls_->ptr_type("VM"));
-    ftypes.push_back(ls_->ptr_type("CallFrame"));
-    ftypes.push_back(ls_->ptr_type("BlockEnvironment"));
-    ftypes.push_back(ls_->ptr_type("Arguments"));
-    ftypes.push_back(ls_->ptr_type("BlockInvocation"));
+    std::vector<Type*> ftypes;
+    ftypes.push_back(ctx_->ptr_type("State"));
+    ftypes.push_back(ctx_->ptr_type("CallFrame"));
+    ftypes.push_back(ctx_->ptr_type("BlockEnvironment"));
+    ftypes.push_back(ctx_->ptr_type("Arguments"));
+    ftypes.push_back(ctx_->ptr_type("BlockInvocation"));
 
-    FunctionType* ft = FunctionType::get(ls_->ptr_type("Object"), ftypes, false);
+    FunctionType* ft = FunctionType::get(ctx_->ptr_type("Object"), ftypes, false);
 
-    std::stringstream ss;
+    std::ostringstream ss;
     ss << std::string("_X_")
-       << ls_->enclosure_name(info_.method())
+       << ctx_->llvm_state()->enclosure_name(info_.method())
        << "#"
-       << ls_->symbol_cstr(info_.method()->name())
-       << "$block@" << ls_->add_jitted_method();
+       << ctx_->llvm_state()->symbol_debug_str(info_.method()->name())
+       << "$block@" << ctx_->llvm_state()->add_jitted_method();
 
     llvm::Function* func = Function::Create(ft, GlobalValue::ExternalLinkage,
-                            ss.str().c_str(), ls_->module());
+                            ss.str(), ctx_->module());
 
     Function::arg_iterator ai = func->arg_begin();
-    llvm::Value* vm =   ai++; vm->setName("state");
+    llvm::Value* state = ai++; state->setName("state");
     llvm::Value* prev = ai++; prev->setName("previous");
     block_env = ai++; block_env->setName("env");
     llvm::Value* args = ai++; args->setName("args");
     block_inv = ai++; block_inv->setName("invocation");
 
-    BasicBlock* block = BasicBlock::Create(ls_->ctx(), "entry", func);
+    BasicBlock* block = BasicBlock::Create(ctx_->llvm_context(), "entry", func);
     b().SetInsertPoint(block);
 
-    info_.context().set_function(func);
+    ctx_->set_function(func);
 
-    info_.set_vm(vm);
+    info_.set_state(state);
     info_.set_args(args);
     info_.set_previous(prev);
     info_.set_entry(block);
 
     alloc_frame("block_body");
 
-    initialize_frame(vmm_->stack_size);
+    initialize_frame(machine_code_->stack_size);
 
-    nil_stack(vmm_->stack_size, constant(Qnil, obj_type));
+    nil_stack(machine_code_->stack_size, constant(cNil, obj_type));
 
     setup_block_scope();
 
-    if(ls_->config().version >= 19) {
+    if(!LANGUAGE_18_ENABLED) {
       import_args_19_style();
     }
 
-    if(ls_->include_profiling()) {
-      Value* test = b().CreateLoad(ls_->profiling(), "profiling");
+    if(ctx_->llvm_state()->include_profiling()) {
+      Value* test = b().CreateLoad(ctx_->profiling(), "profiling");
 
-      BasicBlock* setup_profiling = BasicBlock::Create(ls_->ctx(), "setup_profiling", func);
-      BasicBlock* cont = BasicBlock::Create(ls_->ctx(), "continue", func);
+      BasicBlock* setup_profiling = BasicBlock::Create(ctx_->llvm_context(), "setup_profiling", func);
+      BasicBlock* cont = BasicBlock::Create(ctx_->llvm_context(), "continue", func);
 
       b().CreateCondBr(test, setup_profiling, cont);
 
       b().SetInsertPoint(setup_profiling);
 
-      Signature sig(ls_, ls_->VoidTy);
-      sig << "VM";
-      sig << llvm::PointerType::getUnqual(ls_->Int8Ty);
+      Signature sig(ctx_, ctx_->VoidTy);
+      sig << "State";
+      sig << llvm::PointerType::getUnqual(ctx_->Int8Ty);
       sig << "BlockEnvironment";
       sig << "Module";
-      sig << "CompiledMethod";
+      sig << "CompiledCode";
 
       Value* call_args[] = {
-        vm,
+        state,
         method_entry_,
         block_env,
         module_,
@@ -103,19 +104,19 @@ namespace jit {
 
   void BlockBuilder::setup_block_scope() {
     b().CreateStore(ConstantExpr::getNullValue(llvm::PointerType::getUnqual(vars_type)),
-        get_field(vars, offset::vars_on_heap));
+        get_field(vars, offset::StackVariables::on_heap));
     Value* self = b().CreateLoad(
-        get_field(block_inv, offset::blockinv_self),
+        get_field(block_inv, offset::BlockInvocation::self),
         "invocation.self");
 
-    b().CreateStore(self, get_field(vars, offset::vars_self));
+    b().CreateStore(self, get_field(vars, offset::StackVariables::self));
 
     Value* inv_mod = b().CreateLoad(
-        get_field(block_inv, offset::blockinv_module),
+        get_field(block_inv, offset::BlockInvocation::module),
         "invocation.module");
 
     Value* creation_mod = b().CreateLoad(
-        get_field(block_env, offset::blockenv_module),
+        get_field(block_env, offset::BlockEnvironment::module),
         "env.module");
 
     Value* mod = b().CreateSelect(
@@ -125,57 +126,56 @@ namespace jit {
 
     module_ = mod;
 
-    b().CreateStore(mod, get_field(vars, offset::vars_module));
+    b().CreateStore(mod, get_field(vars, offset::StackVariables::module));
 
-    Value* blk = b().CreateLoad(get_field(top_scope, offset::varscope_block),
+    Value* blk = b().CreateLoad(get_field(top_scope, offset::VariableScope::block),
         "args.block");
-    b().CreateStore(blk, get_field(vars, offset::vars_block));
+    b().CreateStore(blk, get_field(vars, offset::StackVariables::block));
 
 
     // We don't use top_scope here because of nested blocks. Parent MUST be
     // the scope the block was created in, not the top scope for depth
     // variables to work.
     Value* be_scope = b().CreateLoad(
-        get_field(block_env, offset::blockenv_scope),
+        get_field(block_env, offset::BlockEnvironment::scope),
         "env.scope");
 
-    b().CreateStore(be_scope, get_field(vars, offset::vars_parent));
-    b().CreateStore(constant(Qnil, obj_type), get_field(vars, offset::vars_last_match));
+    b().CreateStore(be_scope, get_field(vars, offset::StackVariables::parent));
+    b().CreateStore(constant(cNil, obj_type), get_field(vars, offset::StackVariables::last_match));
 
     nil_locals();
   }
 
   void BlockBuilder::initialize_frame(int stack_size) {
-    Value* cm_gep = get_field(call_frame, offset::CallFrame::cm);
+    Value* code_gep = get_field(call_frame, offset::CallFrame::compiled_code);
 
-    method = b().CreateLoad(get_field(block_env, offset::blockenv_code),
+    method = b().CreateLoad(get_field(block_env, offset::BlockEnvironment::code),
                             "env.code");
 
     // previous
     b().CreateStore(info_.previous(), get_field(call_frame, offset::CallFrame::previous));
 
-    // static_scope
-    Value* ss = b().CreateLoad(get_field(block_inv, offset::blockinv_static_scope),
-                               "invocation.static_scope");
+    // constant_scope
+    Value* cs = b().CreateLoad(get_field(block_inv, offset::BlockInvocation::constant_scope),
+                               "invocation.constant_scope");
 
-    b().CreateStore(ss, get_field(call_frame, offset::CallFrame::static_scope));
+    b().CreateStore(cs, get_field(call_frame, offset::CallFrame::constant_scope));
 
     // arguments
     b().CreateStore(info_.args(), get_field(call_frame, offset::CallFrame::arguments));
 
     // msg
-    b().CreateStore(Constant::getNullValue(ls_->Int8PtrTy),
+    b().CreateStore(Constant::getNullValue(ctx_->Int8PtrTy),
         get_field(call_frame, offset::CallFrame::dispatch_data));
 
-    // cm
-    b().CreateStore(method, cm_gep);
+    // compiled_code
+    b().CreateStore(method, code_gep);
 
     // flags
-    inv_flags_ = b().CreateLoad(get_field(block_inv, offset::blockinv_flags),
+    inv_flags_ = b().CreateLoad(get_field(block_inv, offset::BlockInvocation::flags),
         "invocation.flags");
 
-    int block_flags = CallFrame::cCustomStaticScope |
-      CallFrame::cMultipleScopes |
+    int block_flags = CallFrame::cMultipleScopes |
       CallFrame::cBlock |
       CallFrame::cJITed;
 
@@ -195,20 +195,20 @@ namespace jit {
 
     // top_scope
     top_scope = b().CreateLoad(
-        get_field(block_env, offset::blockenv_top_scope),
+        get_field(block_env, offset::BlockEnvironment::top_scope),
         "env.top_scope");
 
     b().CreateStore(top_scope, get_field(call_frame, offset::CallFrame::top_scope));
 
     // jit_data
     b().CreateStore(
-        constant(info_.context().runtime_data_holder(), ls_->Int8PtrTy),
+        constant(ctx_->runtime_data_holder(), ctx_->Int8PtrTy),
         get_field(call_frame, offset::CallFrame::jit_data));
 
   }
 
   void BlockBuilder::import_args_19_style() {
-    if(vmm_->required_args > 1) {
+    if(machine_code_->required_args > 1) {
       Value* lambda_check =
         b().CreateICmpEQ(
           b().CreateAnd(
@@ -216,19 +216,19 @@ namespace jit {
             ConstantInt::get(inv_flags_->getType(), CallFrame::cIsLambda)),
           ConstantInt::get(inv_flags_->getType(), 0));
 
-      BasicBlock* destruct = BasicBlock::Create(ls_->ctx(), "destructure", info_.function());
-      BasicBlock* cont = BasicBlock::Create(ls_->ctx(), "arg_loop_body", info_.function());
+      BasicBlock* destruct = BasicBlock::Create(ctx_->llvm_context(), "destructure", info_.function());
+      BasicBlock* cont = BasicBlock::Create(ctx_->llvm_context(), "arg_loop_body", info_.function());
 
       b().CreateCondBr(lambda_check, destruct, cont);
 
       b().SetInsertPoint(destruct);
 
-      Signature sig(ls_, "Object");
-      sig << "VM";
+      Signature sig(ctx_, "Object");
+      sig << "State";
       sig << "CallFrame";
       sig << "Arguments";
 
-      Value* call_args[] = { info_.vm(), info_.call_frame(), info_.args() };
+      Value* call_args[] = { info_.state(), info_.call_frame(), info_.args() };
 
       Value* val = sig.call("rbx_destructure_args", call_args, 3, "", b());
 
@@ -245,29 +245,29 @@ namespace jit {
 
     Value* loop_i = info_.counter();
     Value* arg_ary = b().CreateLoad(
-                       b().CreateConstGEP2_32(info_.args(), 0, offset::args_ary),
+                       b().CreateConstGEP2_32(info_.args(), 0, offset::Arguments::arguments),
                        "arg_ary");
 
     // The variables used in the 4 phases.
-    int P = vmm_->post_args;
+    int P = machine_code_->post_args;
     Value* Pv = cint(P);
 
-    int R = vmm_->required_args;
+    int R = machine_code_->required_args;
 
     int M = R - P;
     Value* Mv = cint(M);
 
     Value* T = b().CreateLoad(
-                 b().CreateConstGEP2_32(info_.args(), 0, offset::args_total),
+                 b().CreateConstGEP2_32(info_.args(), 0, offset::Arguments::total),
                  "args.total");
 
-    int DT = vmm_->total_args;
+    int DT = machine_code_->total_args;
     Value* DTv = cint(DT);
 
     int O = DT - R;
     Value* Ov = cint(O);
 
-    int HS = vmm_->splat_position > 0 ? 1 : 0;
+    int HS = machine_code_->splat_position > 0 ? 1 : 0;
 
     Value* CT = HS ? T
                    : b().CreateSelect(b().CreateICmpSLT(T, DTv), T, DTv);
@@ -308,7 +308,7 @@ namespace jit {
 
       Value* idx2[] = {
         cint(0),
-        cint(offset::vars_tuple),
+        cint(offset::StackVariables::locals),
         loop_val
       };
 
@@ -316,7 +316,7 @@ namespace jit {
       b().CreateStore(
           b().CreateLoad(
             b().CreateGEP(arg_ary, loop_val)),
-          b().CreateGEP(vars, idx2, idx2+3));
+          b().CreateGEP(vars, idx2));
 
       // *loop_i = loop_val + 1
       b().CreateStore(
@@ -367,7 +367,7 @@ namespace jit {
 
       Value* idx2[] = {
         cint(0),
-        cint(offset::vars_tuple),
+        cint(offset::StackVariables::locals),
         local_val
       };
 
@@ -375,7 +375,7 @@ namespace jit {
       b().CreateStore(
           b().CreateLoad(
             b().CreateGEP(arg_ary, loop_val)),
-          b().CreateGEP(vars, idx2, idx2+3));
+          b().CreateGEP(vars, idx2));
 
       // *loop_i = loop_val + 1
       b().CreateStore(
@@ -424,7 +424,7 @@ namespace jit {
 
       Value* idx2[] = {
         cint(0),
-        cint(offset::vars_tuple),
+        cint(offset::StackVariables::locals),
         loop_val
       };
 
@@ -432,7 +432,7 @@ namespace jit {
       b().CreateStore(
           b().CreateLoad(
             b().CreateGEP(arg_ary, loop_val)),
-          b().CreateGEP(vars, idx2, idx2+3));
+          b().CreateGEP(vars, idx2));
 
       // *loop_i = loop_val + 1
       b().CreateStore(
@@ -445,36 +445,36 @@ namespace jit {
     }
 
     // Phase 4 - splat
-    if(vmm_->splat_position >= 0) {
-      Signature sig(ls_, "Object");
-      sig << "VM";
+    if(machine_code_->splat_position >= 0) {
+      Signature sig(ctx_, "Object");
+      sig << "State";
       sig << "Arguments";
-      sig << ls_->Int32Ty;
-      sig << ls_->Int32Ty;
+      sig << ctx_->Int32Ty;
+      sig << ctx_->Int32Ty;
 
       Value* call_args[] = {
-        info_.vm(),
+        info_.state(),
         info_.args(),
         cint(M + O),
         cint(DT)
       };
 
       Function* func = sig.function("rbx_construct_splat");
-      func->setOnlyReadsMemory(true);
-      func->setDoesNotThrow(true);
+      func->setOnlyReadsMemory();
+      func->setDoesNotThrow();
 
       CallInst* splat_val = sig.call("rbx_construct_splat", call_args, 4, "splat_val", b());
 
-      splat_val->setOnlyReadsMemory(true);
-      splat_val->setDoesNotThrow(true);
+      splat_val->setOnlyReadsMemory();
+      splat_val->setDoesNotThrow();
 
       Value* idx3[] = {
         cint(0),
-        cint(offset::vars_tuple),
-        cint(vmm_->splat_position)
+        cint(offset::StackVariables::locals),
+        cint(machine_code_->splat_position)
       };
 
-      Value* pos = b().CreateGEP(vars, idx3, idx3+3, "splat_pos");
+      Value* pos = b().CreateGEP(vars, idx3, "splat_pos");
       b().CreateStore(splat_val, pos);
     }
   }

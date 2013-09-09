@@ -18,6 +18,13 @@ static VALUE object_spec_OBJ_TAINTED(VALUE self, VALUE obj) {
 }
 #endif
 
+#ifdef HAVE_OBJ_INFECT
+static VALUE object_spec_OBJ_INFECT(VALUE self, VALUE host, VALUE source) {
+  OBJ_INFECT(host, source);
+  return Qnil;
+}
+#endif
+
 #ifdef HAVE_RB_ANY_TO_S
 static VALUE object_spec_rb_any_to_s(VALUE self, VALUE obj) {
   return rb_any_to_s(obj);
@@ -27,6 +34,12 @@ static VALUE object_spec_rb_any_to_s(VALUE self, VALUE obj) {
 #ifdef HAVE_RB_ATTR_GET
 static VALUE so_attr_get(VALUE self, VALUE obj, VALUE attr) {
   return rb_attr_get(obj, SYM2ID(attr));
+}
+#endif
+
+#ifdef HAVE_RB_OBJ_INSTANCE_VARIABLES
+static VALUE object_spec_rb_obj_instance_variables(VALUE self, VALUE obj) {
+  return rb_obj_instance_variables(obj);
 }
 #endif
 
@@ -102,7 +115,7 @@ static VALUE so_rb_obj_dup(VALUE self, VALUE klass) {
 static VALUE so_rb_obj_call_init(VALUE self, VALUE object,
                                  VALUE nargs, VALUE args) {
   int c_nargs = FIX2INT(nargs);
-  VALUE c_args[c_nargs];
+  VALUE *c_args = alloca(sizeof(VALUE) * c_nargs);
   int i;
 
   for (i = 0; i < c_nargs; i++)
@@ -176,6 +189,13 @@ static VALUE so_obj_respond_to(VALUE self, VALUE obj, VALUE sym, VALUE priv) {
 }
 #endif
 
+#ifdef HAVE_RB_METHOD_BOUNDP
+static VALUE object_spec_rb_method_boundp(VALUE self, VALUE obj, VALUE method, VALUE exclude_private) {
+  ID id = SYM2ID(method);
+  return rb_method_boundp(obj, id, exclude_private == Qtrue ? 1 : 0) ? Qtrue : Qfalse;
+}
+#endif
+
 #ifdef HAVE_RB_SPECIAL_CONST_P
 static VALUE object_spec_rb_special_const_p(VALUE self, VALUE value) {
   return rb_special_const_p(value);
@@ -232,6 +252,50 @@ static VALUE so_is_type_class(VALUE self, VALUE obj) {
 
 static VALUE so_is_type_data(VALUE self, VALUE obj) {
   if(TYPE(obj) == T_DATA) {
+    return Qtrue;
+  }
+  return Qfalse;
+}
+#endif
+
+#ifdef HAVE_RB_TYPE_P
+static VALUE so_is_rb_type_p_nil(VALUE self, VALUE obj) {
+  if(rb_type_p(obj, T_NIL)) {
+    return Qtrue;
+  }
+  return Qfalse;
+}
+
+static VALUE so_is_rb_type_p_object(VALUE self, VALUE obj) {
+  if(rb_type_p(obj, T_OBJECT)) {
+    return Qtrue;
+  }
+  return Qfalse;
+}
+
+static VALUE so_is_rb_type_p_array(VALUE self, VALUE obj) {
+  if(rb_type_p(obj, T_ARRAY)) {
+    return Qtrue;
+  }
+  return Qfalse;
+}
+
+static VALUE so_is_rb_type_p_module(VALUE self, VALUE obj) {
+  if(rb_type_p(obj, T_MODULE)) {
+    return Qtrue;
+  }
+  return Qfalse;
+}
+
+static VALUE so_is_rb_type_p_class(VALUE self, VALUE obj) {
+  if(rb_type_p(obj, T_CLASS)) {
+    return Qtrue;
+  }
+  return Qfalse;
+}
+
+static VALUE so_is_rb_type_p_data(VALUE self, VALUE obj) {
+  if(rb_type_p(obj, T_DATA)) {
     return Qtrue;
   }
   return Qfalse;
@@ -342,12 +406,20 @@ void Init_object_spec() {
   rb_define_method(cls, "OBJ_TAINTED", object_spec_OBJ_TAINTED, 1);
 #endif
 
+#ifdef HAVE_OBJ_INFECT
+  rb_define_method(cls, "OBJ_INFECT", object_spec_OBJ_INFECT, 2);
+#endif
+
 #ifdef HAVE_RB_ANY_TO_S
   rb_define_method(cls, "rb_any_to_s", object_spec_rb_any_to_s, 1);
 #endif
 
 #ifdef HAVE_RB_ATTR_GET
   rb_define_method(cls, "rb_attr_get", so_attr_get, 2);
+#endif
+
+#ifdef HAVE_RB_OBJ_INSTANCE_VARIABLES
+  rb_define_method(cls, "rb_obj_instance_variables", object_spec_rb_obj_instance_variables, 1);
 #endif
 
 #ifdef HAVE_RB_CHECK_ARRAY_TYPE
@@ -434,6 +506,10 @@ void Init_object_spec() {
   rb_define_method(cls, "rb_respond_to", so_respond_to, 2);
 #endif
 
+#ifdef HAVE_RB_METHOD_BOUNDP
+  rb_define_method(cls, "rb_method_boundp", object_spec_rb_method_boundp, 3);
+#endif
+
 #ifdef HAVE_RB_OBJ_RESPOND_TO
   rb_define_method(cls, "rb_obj_respond_to", so_obj_respond_to, 3);
 #endif
@@ -460,6 +536,15 @@ void Init_object_spec() {
   rb_define_method(cls, "rb_is_type_module", so_is_type_module, 1);
   rb_define_method(cls, "rb_is_type_class", so_is_type_class, 1);
   rb_define_method(cls, "rb_is_type_data", so_is_type_data, 1);
+#endif
+
+#ifdef HAVE_RB_TYPE_P
+  rb_define_method(cls, "rb_is_rb_type_p_nil", so_is_rb_type_p_nil, 1);
+  rb_define_method(cls, "rb_is_rb_type_p_object", so_is_rb_type_p_object, 1);
+  rb_define_method(cls, "rb_is_rb_type_p_array", so_is_rb_type_p_array, 1);
+  rb_define_method(cls, "rb_is_rb_type_p_module", so_is_rb_type_p_module, 1);
+  rb_define_method(cls, "rb_is_rb_type_p_class", so_is_rb_type_p_class, 1);
+  rb_define_method(cls, "rb_is_rb_type_p_data", so_is_rb_type_p_data, 1);
 #endif
 
 #ifdef HAVE_BUILTIN_TYPE

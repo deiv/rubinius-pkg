@@ -31,6 +31,12 @@ describe "Array#rindex" do
     [1, 1, 3, 2, 1, 3].rindex(4).should == nil
   end
 
+  it "returns correct index even after delete_at" do
+    array = ["fish", "bird", "lion", "cat"]
+    array.delete_at(0)
+    array.rindex("lion").should == 1
+  end
+
   it "properly handles empty recursive arrays" do
     empty = ArraySpecs.empty_recursive_array
     empty.rindex(empty).should == 0
@@ -48,7 +54,7 @@ describe "Array#rindex" do
       [4, 2, 1, 5, 1, 3].rindex { |x| x < 2 }.should == 4
     end
 
-    it "ignore the block if there is an argument" do
+    it "ignores the block if there is an argument" do
       [4, 2, 1, 5, 1, 3].rindex(5) { |x| x < 2 }.should == 3
     end
 
@@ -63,7 +69,7 @@ describe "Array#rindex" do
     describe "given no argument and no block" do
       it "produces an Enumerator" do
         enum = [4, 2, 1, 5, 1, 3].rindex
-        enum.should be_kind_of(enumerator_class)
+        enum.should be_an_instance_of(enumerator_class)
         enum.each { |x| x < 2 }.should == 4
       end
     end

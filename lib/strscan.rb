@@ -9,9 +9,9 @@ class StringScanner
   def pos=(n)
     n = Integer(n)
 
-    n += @string.size if n < 0
+    n += @string.bytesize if n < 0
 
-    if n < 0 or n > @string.size
+    if n < 0 or n > @string.bytesize
       raise RangeError, "index out of range (#{n})"
     end
 
@@ -27,7 +27,7 @@ class StringScanner
   end
 
   def bol?
-    @pos == 0 or @string[pos-1] == ?\n
+    @pos == 0 or @string.getbyte(pos-1) == 10
   end
 
   alias_method :beginning_of_line?, :bol?
@@ -46,7 +46,7 @@ class StringScanner
   end
 
   def concat(str)
-    @string << str
+    @string << StringValue(str)
     self
   end
   alias_method :<<, :concat
@@ -57,7 +57,7 @@ class StringScanner
   end
 
   def eos?
-    @pos >= @string.size
+    @pos >= @string.bytesize
   end
 
   def exist?(pattern)
@@ -94,10 +94,10 @@ class StringScanner
       if eos?
         str = "#<StringScanner fin>"
       else
-        if string.size - pos > 5
+        if string.bytesize - pos > 5
           rest = "#{string[pos..pos+4]}..."
         else
-          rest = string[pos..string.size]
+          rest = string[pos..string.bytesize]
         end
 
         if pos > 0
@@ -107,9 +107,9 @@ class StringScanner
             prev = string[0...pos]
           end
 
-          str = "#<StringScanner #{pos}/#{string.size} #{prev.inspect} @ #{rest.inspect}>"
+          str = "#<StringScanner #{pos}/#{string.bytesize} #{prev.inspect} @ #{rest.inspect}>"
         else
-          str = "#<StringScanner #{pos}/#{string.size} @ #{rest.inspect}>"
+          str = "#<StringScanner #{pos}/#{string.bytesize} @ #{rest.inspect}>"
         end
       end
 
@@ -133,7 +133,7 @@ class StringScanner
   end
 
   def matched_size
-    @match.to_s.size if @match
+    @match.to_s.bytesize if @match
   end
 
   def matchedsize
@@ -146,7 +146,7 @@ class StringScanner
   end
 
   def pre_match
-    @string.substring(0, match.begin(0)) if @match
+    @string.byteslice(0, match.full.at(0)) if @match
   end
 
   def reset_state
@@ -161,7 +161,7 @@ class StringScanner
   end
 
   def rest
-    @string.substring(@pos, rest_size)
+    @string.byteslice(@pos, @string.bytesize - @pos)
   end
 
   def rest?
@@ -169,7 +169,7 @@ class StringScanner
   end
 
   def rest_size
-    @string.size - @pos
+    @string.bytesize - @pos
   end
 
   def restsize
@@ -223,7 +223,7 @@ class StringScanner
 
   def terminate
     @match = nil
-    @pos = string.size
+    @pos = string.bytesize
     self
   end
 
@@ -270,7 +270,7 @@ class StringScanner
 
     return nil unless @match
 
-    fin = @match.end(0)
+    fin = @match.full.at(1)
 
     @prev_pos = @pos
 
@@ -280,7 +280,7 @@ class StringScanner
 
     return width unless getstr
 
-    @string.substring(@prev_pos, width)
+    @string.byteslice(@prev_pos, width)
   end
   private :_scan
 end

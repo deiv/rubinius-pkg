@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   module AST
     class ArrayLiteral < Node
@@ -19,7 +21,19 @@ module Rubinius
       end
 
       def defined(g)
+        not_found = g.new_label
+        done = g.new_label
+        @body.each do |x|
+          x.defined(g)
+          g.gif not_found
+        end
         g.push_literal "expression"
+        g.goto done
+        not_found.set!
+        g.push_nil
+        g.goto done
+
+        done.set!
       end
 
       def to_sexp
@@ -233,9 +247,12 @@ module Rubinius
 
         g.push_cpath_top
         g.find_const :Range
+        g.send :allocate, 0, true
+        g.dup
         @start.bytecode(g)
         @finish.bytecode(g)
-        g.send :new, 2
+        g.send :initialize, 2, true
+        g.pop
       end
 
       def defined(g)
@@ -259,11 +276,13 @@ module Rubinius
 
         g.push_cpath_top
         g.find_const :Range
+        g.send :allocate, 0, true
+        g.dup
         @start.bytecode(g)
         @finish.bytecode(g)
         g.push :true
-
-        g.send :new, 3
+        g.send :initialize, 3, true
+        g.pop
       end
 
       def to_sexp
@@ -427,7 +446,7 @@ module Rubinius
       end
 
       def defined(g)
-        if Rubinius.ruby19?
+        unless Rubinius.ruby18?
           g.push_literal "expression"
           g.string_dup
           return

@@ -26,6 +26,11 @@
     <!--[if IE]><link href="/stylesheets/blueprint/ie.css" media="screen" rel="stylesheet" type="text/css" /><![endif]-->
     <!--[if IE]><link href="/stylesheets/ie.css"           media="screen" rel="stylesheet" type="text/css" /><![endif]-->
     <link href="/stylesheets/pygments.css" media="screen" rel="stylesheet" />
+
+    <link href="/favicon.ico"                 rel="shortcut icon"    type="image/vnd.microsoft.icon" />
+    <link href="/images/apple-touch-icon.png" rel="apple-touch-icon" type="image/png" />
+    <link href="/images/apple-touch-icon.png" rel="apple-touch-icon" type="image/png" sizes="72x72"   />
+    <link href="/images/apple-touch-icon.png" rel="apple-touch-icon" type="image/png" sizes="114x114" />
   </head>
 
   <body>
@@ -82,6 +87,12 @@
     <li><a href="/doc/fr/how-to/write-documentation/"
       
       >fr</a></li>
+    
+    
+    
+    <li><a href="/doc/it/how-to/write-documentation/"
+      
+      >it</a></li>
     
     
     
@@ -176,7 +187,7 @@ next_url: how-to/translate-documentation
 <p><em>title</em> указывает заголовок документа, который отображается в начале страницы.</p>
 
 <p><em>previous</em> и <em>previous_url</em> представляют из себя название и ссылку на
-предыдущий документ. Точно также, <em>next</em> и<em>next_url</em> соответствуют ссылке
+предыдущий документ. Точно также, <em>next</em> и_next_url_ соответствуют ссылке
 и названию следующего документа. Все это используется для повышения удобства
 просмотра документацию и сокращению размера работ необходимых для изменения
 порядка следования документов.</p>
@@ -198,9 +209,9 @@ next_url: how-to/translate-documentation
   <li>Установите атрибуты для связки нового файла с существующим. Это подразумевает
 редактирование <em>previous</em> и <em>next</em> атрибутов в уже существующих файлах.</li>
   <li>Для просмотра изменений во время работы над ними, запустите
-<code>rbx -S jekyll --server --auto</code></li>
+<code>rbx -S jekyll serve --watch</code></li>
   <li>Отредактируйте новый файл с помощью синтаксиса Markdown.</li>
-  <li>В <code>web/</code> директории, выполните <code>rbx -S jekyll</code>.</li>
+  <li>В <code>web/</code> директории, выполните <code>rbx -S jekyll build</code>.</li>
   <li>Закомитьте все изменения в <code>web/</code> директории.</li>
 </ol>
 

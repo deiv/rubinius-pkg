@@ -66,30 +66,16 @@ describe "RbConfig::CONFIG" do
   entries = {
     "RUBY_SO_NAME"      => "rubinius-#{Rubinius::VERSION}",
     "ruby_install_name" => "rbx",
+    "rubyhdrdir"        => Rubinius::HDR_PATH
   }
 
   it_has_entries 'RbConfig::CONFIG', entries
-
-  ruby_version_is "1.8"..."1.9" do
-    it_has_entries 'RbConfig::CONFIG', "ruby_version" => "1.8"
-    it_has_entries 'RbConfig::CONFIG', "rubyhdrdir" => Rubinius::HDR18_PATH
-  end
-
-  ruby_version_is "1.9"..."2.0" do
-    it_has_entries 'RbConfig::CONFIG', "ruby_version" => "1.9"
-    it_has_entries 'RbConfig::CONFIG', "rubyhdrdir" => Rubinius::HDR19_PATH
-  end
-
-  ruby_version_is "2.0" do
-    it_has_entries 'RbConfig::CONFIG', "ruby_version" => "2.0"
-    it_has_entries 'RbConfig::CONFIG', "rubyhdrdir" => Rubinius::HDR19_PATH
-  end
 end
 
 describe "RbConfig::MAKEFILE_CONFIG" do
-  sitedir    = Rubinius::SITE_PATH
-  vendordir  = Rubinius::VENDOR_PATH
-  rbxversion = 'rbx-' + Rubinius::LIB_VERSION
+  sitedir    = Rubinius::HDR_PATH
+  sitelibdir = Rubinius::HDR_PATH
+  arch       = "#{Rubinius::CPU}-#{Rubinius::OS}"
 
   entries = {
     "exec_prefix"        => "$(prefix)",
@@ -112,14 +98,10 @@ describe "RbConfig::MAKEFILE_CONFIG" do
     "localedir"          => "$(datarootdir)/locale",
     "mandir"             => "$(datarootdir)/man",
     "ruby_version"       => "$(MAJOR).$(MINOR)",
-    "rubylibdir"         => "$(libdir)/rubinius/#{rbxversion}",
-    "archdir"            => "$(rubylibdir)/$(arch)",
-    "sitedir"            => sitedir,
-    "sitelibdir"         => "$(sitedir)/#{rbxversion}",
-    "sitearchdir"        => "$(sitelibdir)/$(arch)",
-    "vendordir"          => vendordir,
-    "vendorlibdir"       => "$(vendordir)/#{rbxversion}",
-    "vendorarchdir"      => "$(vendorlibdir)/$(arch)",
+    "rubylibdir"         => sitelibdir,
+    "archdir"            => "#{sitelibdir}/#{arch}",
+    "sitearchdir"        => "#{sitelibdir}/#{arch}",
+    "sitedir"            => "#{sitedir}",
   }
 
   it_has_entries 'RbConfig::MAKEFILE_CONFIG', entries
@@ -136,6 +118,12 @@ describe "RbConfig#ruby" do
   ruby_version_is "1.9" do
     before :each do
       @version_switch = "-X19"
+    end
+  end
+
+  ruby_version_is "2.0" do
+    before :each do
+      @version_switch = "-X20"
     end
   end
 

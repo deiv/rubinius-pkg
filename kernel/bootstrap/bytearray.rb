@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   class ByteArray
     def self.allocate
@@ -12,12 +14,11 @@ module Rubinius
     def self.new(cnt)
       obj = allocate_sized cnt
       Rubinius.asm(obj) do |obj|
-        push_block
         run obj
-        send_with_block :initialize, 0, true
+        send :initialize, 0, true
       end
 
-      return obj
+      obj
     end
 
     def fetch_bytes(start, count)
@@ -50,9 +51,8 @@ module Rubinius
       raise PrimitiveFailure, "ByteArray#size primitive failed"
     end
 
-    def dup(cls=nil)
-      cls ||= self.class
-      obj = cls.new(self.size)
+    def dup
+      obj = Rubinius::Type.object_class(self).allocate_sized(self.size)
 
       Rubinius.invoke_primitive :object_copy_object, obj, self
 
@@ -61,6 +61,33 @@ module Rubinius
       end
 
       return obj
+    end
+
+    ##
+    # Searches for +pattern+ in the ByteArray. Returns the number
+    # of characters from the front of the ByteArray to the end
+    # of the pattern if a match is found. Returns Qnil if a match
+    # is not found. Starts searching at index +start+.
+    def locate(pattern, start, max)
+      Rubinius.primitive :bytearray_locate
+      raise PrimitiveFailure, "ByteArray#locate primitive failed"
+    end
+
+    # Return a new ByteArray by taking the bytes from +string+ and +self+
+    # together.
+    def prepend(string)
+      Rubinius.primitive :bytearray_prepend
+
+      if string.kind_of? String
+        raise PrimitiveFailure, "ByteArray#prepend failed"
+      else
+        prepend(StringValue(string))
+      end
+    end
+
+    def reverse(start, total)
+      Rubinius.primitive :bytearray_reverse
+      raise PrimitiveFailure, "ByteArray#reverse primitive failed"
     end
   end
 end

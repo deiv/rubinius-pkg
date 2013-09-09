@@ -1,3 +1,4 @@
+# -*- encoding: utf-8 -*-
 require File.expand_path('../../../spec_helper', __FILE__)
 require File.expand_path('../fixtures/common', __FILE__)
 
@@ -16,6 +17,16 @@ describe "File.expand_path" do
     end
   end
 
+  with_feature :encoding do
+    before :each do
+      @external = Encoding.default_external
+    end
+
+    after :each do
+      Encoding.default_external = @external
+    end
+  end
+
   it "converts a pathname to an absolute pathname" do
     File.expand_path('').should == @base
     File.expand_path('a').should == File.join(@base, 'a')
@@ -23,7 +34,7 @@ describe "File.expand_path" do
   end
 
   not_compliant_on :ironruby do
-    it "converts a pathname to an absolute pathname, Ruby-Talk:18512 " do
+    it "converts a pathname to an absolute pathname, Ruby-Talk:18512" do
       # See Ruby-Talk:18512
       File.expand_path('.a').should == File.join(@base, '.a')
       File.expand_path('..a').should == File.join(@base, '..a')
@@ -54,6 +65,12 @@ describe "File.expand_path" do
         File.expand_path('~', '/tmp/gumby/ddd').should == home
         File.expand_path('~/a', '/tmp/gumby/ddd').should == File.join(home, 'a')
       end
+
+      it "does not return a frozen string" do
+        File.expand_path('~').frozen?.should == false
+        File.expand_path('~', '/tmp/gumby/ddd').frozen?.should == false
+        File.expand_path('~/a', '/tmp/gumby/ddd').frozen?.should == false
+      end
     end
     platform_is :windows do
       it "converts a pathname to an absolute pathname, using ~ (home) as base" do
@@ -61,12 +78,18 @@ describe "File.expand_path" do
         File.expand_path('~', '/tmp/gumby/ddd').should == home.tr("\\", '/')
         File.expand_path('~/a', '/tmp/gumby/ddd').should == File.join(home.tr("\\", '/'), 'a')
       end
+
+      it "does not return a frozen string" do
+        File.expand_path('~').frozen?.should == false
+        File.expand_path('~', '/tmp/gumby/ddd').frozen?.should == false
+        File.expand_path('~/a', '/tmp/gumby/ddd').frozen?.should == false
+      end
     end
   end
 
   platform_is_not :windows do
     # FIXME: these are insane!
-    it "expand path with " do
+    it "expand path with" do
       File.expand_path("../../bin", "/tmp/x").should == "/bin"
       File.expand_path("../../bin", "/tmp").should == "/bin"
       File.expand_path("../../bin", "/").should == "/bin"
@@ -145,12 +168,28 @@ describe "File.expand_path" do
     end
   end
 
-  ruby_version_is "1.9" do
-    it "produces a String in the default external encoding" do
-      old_external = Encoding.default_external
-      Encoding.default_external = Encoding::SHIFT_JIS
-      File.expand_path("./a").encoding.should == Encoding::SHIFT_JIS
-      Encoding.default_external = old_external
+  with_feature :encoding do
+    ruby_version_is ""..."2.0" do
+      it "produces a String in the default external encoding" do
+        Encoding.default_external = Encoding::SHIFT_JIS
+        File.expand_path("./a").encoding.should equal(Encoding::SHIFT_JIS)
+      end
+    end
+
+    ruby_version_is "2.0" do
+      it "returns a String in the same encoding as the argument" do
+        path = "./a".force_encoding Encoding::CP1251
+        File.expand_path(path).encoding.should equal(Encoding::CP1251)
+      end
+    end
+
+    it "expands a path with multi-byte characters" do
+      File.expand_path("Ångström").should == "#{@base}/Ångström"
+    end
+
+    it "raises an Encoding::CompatibilityError if the external encoding is not compatible" do
+      Encoding.default_external = Encoding::UTF_16BE
+      lambda { File.expand_path("./a") }.should raise_error(Encoding::CompatibilityError)
     end
   end
 
@@ -187,6 +226,11 @@ platform_is_not :windows do
     it "raises an ArgumentError when passed '~' if HOME is nil" do
       ENV.delete "HOME"
       lambda { File.expand_path("~") }.should raise_error(ArgumentError)
+    end
+
+    it "raises an ArgumentError when passed '~/' if HOME is nil" do
+      ENV.delete "HOME"
+      lambda { File.expand_path("~/") }.should raise_error(ArgumentError)
     end
 
     ruby_version_is ""..."1.8.7" do

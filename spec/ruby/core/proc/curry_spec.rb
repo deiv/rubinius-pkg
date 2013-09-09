@@ -60,6 +60,26 @@ ruby_version_is "1.9" do
       l = lambda { |*a| }
       l.curry.arity.should == -1
     end
+    
+    it "produces Procs that raise ArgumentError for #binding" do
+      lambda do
+        @proc_add.curry.binding
+      end.should raise_error(ArgumentError)
+    end
+    
+    it "produces Procs that return [[:rest]] for #parameters" do
+      @proc_add.curry.parameters.should == [[:rest]]
+    end
+    
+    it "produces Procs that return nil for #source_location" do
+      @proc_add.curry.source_location.should == nil
+    end
+
+    it "produces Procs that can be passed as the block for instance_exec" do
+      curried = @proc_add.curry.call(1, 2)
+
+      instance_exec(3, &curried).should == 6
+    end
   end
 
   describe "Proc#curry with arity argument" do

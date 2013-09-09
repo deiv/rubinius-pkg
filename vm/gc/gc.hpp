@@ -14,19 +14,11 @@ namespace rubinius {
   class GlobalCache;
   class StackVariables;
   class ManagedThread;
+  class LLVMState;
 
   namespace capi {
     class Handles;
   }
-
-  typedef std::vector<Object*> ObjectArray;
-
-  class ObjectVisitor {
-  public:
-    virtual ~ObjectVisitor() { }
-    virtual Object* call(Object*) = 0;
-  };
-
 
   /**
    * Holds all the root pointers from which garbage collections will commence.
@@ -38,23 +30,41 @@ namespace rubinius {
   class GCData {
     Roots& roots_;
     capi::Handles* handles_;
-    capi::Handles* cached_handles_;
+    std::list<capi::Handle*>* cached_handles_;
     GlobalCache* global_cache_;
     std::list<ManagedThread*>* threads_;
-    std::list<capi::Handle**>* global_handle_locations_;
+    std::list<capi::GlobalHandle*>* global_handle_locations_;
+    GCTokenImpl* gc_token_;
+#ifdef ENABLE_LLVM
+    LLVMState* llvm_state_;
+#endif
+    size_t young_bytes_allocated_;
+    size_t mature_bytes_allocated_;
+    size_t code_bytes_allocated_;
+    size_t symbol_bytes_allocated_;
 
   public:
-    GCData(STATE);
+    GCData(VM*, GCToken gct);
+    GCData(VM*);
+
     GCData(Roots& r,
-           capi::Handles* handles = NULL, capi::Handles* cached_handles = NULL,
+           capi::Handles* handles = NULL, std::list<capi::Handle*>* cached_handles = NULL,
            GlobalCache *cache = NULL, std::list<ManagedThread*>* ths = NULL,
-           std::list<capi::Handle**>* global_handle_locations = NULL)
+           std::list<capi::GlobalHandle*>* global_handle_locations = NULL)
       : roots_(r)
       , handles_(handles)
       , cached_handles_(cached_handles)
       , global_cache_(cache)
       , threads_(ths)
       , global_handle_locations_(global_handle_locations)
+      , gc_token_(NULL)
+#ifdef ENABLE_LLVM
+      , llvm_state_(0)
+#endif
+      , young_bytes_allocated_(0)
+      , mature_bytes_allocated_(0)
+      , code_bytes_allocated_(0)
+      , symbol_bytes_allocated_(0)
     {}
 
     Roots& roots() {
@@ -69,7 +79,7 @@ namespace rubinius {
       return handles_;
     }
 
-    capi::Handles* cached_handles() {
+    std::list<capi::Handle*>* cached_handles() {
       return cached_handles_;
     }
 
@@ -77,9 +87,59 @@ namespace rubinius {
       return global_cache_;
     }
 
-    std::list<capi::Handle**>* global_handle_locations() {
+    std::list<capi::GlobalHandle*>* global_handle_locations() {
       return global_handle_locations_;
     }
+
+    GCTokenImpl* gc_token() {
+      return gc_token_;
+    }
+
+#ifdef ENABLE_LLVM
+    LLVMState* llvm_state() {
+      return llvm_state_;
+    }
+#endif
+
+    size_t young_bytes_allocated() const {
+      return young_bytes_allocated_;
+    }
+
+    size_t mature_bytes_allocated() const {
+      return mature_bytes_allocated_;
+    }
+
+    size_t code_bytes_allocated() const {
+      return code_bytes_allocated_;
+    }
+
+    size_t symbol_bytes_allocated() const {
+      return symbol_bytes_allocated_;
+    }
+
+    size_t jit_bytes_allocated() const;
+  };
+
+  class AddressDisplacement {
+    intptr_t offset_;
+    intptr_t lower_bound_;
+    intptr_t upper_bound_;
+
+  public:
+    AddressDisplacement(intptr_t o, intptr_t l, intptr_t u)
+      : offset_(o)
+      , lower_bound_(l)
+      , upper_bound_(u)
+    {}
+
+    template <typename T>
+      T displace(T ptr) const {
+        intptr_t addr = (intptr_t)ptr;
+        if(addr < lower_bound_) return ptr;
+        if(addr >= upper_bound_) return ptr;
+
+        return (T)((char*)ptr + offset_);
+      }
   };
 
 
@@ -114,11 +174,14 @@ namespace rubinius {
      * encountered during garbage collection.
      */
     virtual Object* saw_object(Object*) = 0;
+    virtual void scanned_object(Object*) = 0;
     // Scans the specified Object for references to other Objects.
     void scan_object(Object* obj);
     void delete_object(Object* obj);
-    void walk_call_frame(CallFrame* top_call_frame);
+    void walk_call_frame(CallFrame* top_call_frame, AddressDisplacement* offset=0);
+    void verify_call_frame(CallFrame* top_call_frame, AddressDisplacement* offset=0);
     void saw_variable_scope(CallFrame* call_frame, StackVariables* scope);
+    void verify_variable_scope(CallFrame* call_frame, StackVariables* scope);
 
     /**
      * Marks the specified Object +obj+ as live.
@@ -130,11 +193,16 @@ namespace rubinius {
       return obj;
     }
 
+    void scan_fibers(GCData* data, bool marked_only = true);
     void clean_weakrefs(bool check_forwards=false);
+    void clean_locked_objects(ManagedThread* thr, bool young_only);
+
     // Scans the thread for object references
     void scan(ManagedThread* thr, bool young_only);
-    void scan(VariableRootBuffers& buffers, bool young_only);
+    void scan(VariableRootBuffers& buffers, bool young_only, AddressDisplacement* offset=0);
     void scan(RootBuffers& rb, bool young_only);
+
+    void verify(GCData* data);
 
     VM* state();
 
@@ -156,6 +224,10 @@ namespace rubinius {
     }
 
     void reset_stats() {
+    }
+
+    ObjectArray* weak_refs_set() {
+      return weak_refs_;
     }
 
     friend class ObjectMark;

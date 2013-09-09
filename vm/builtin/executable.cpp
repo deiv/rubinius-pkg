@@ -1,23 +1,18 @@
-#include "vm.hpp"
-#include "vm/object_utils.hpp"
-
-#include "gc/gc.hpp"
-
+#include "arguments.hpp"
 #include "builtin/class.hpp"
 #include "builtin/executable.hpp"
 #include "builtin/symbol.hpp"
-
-#include "arguments.hpp"
-#include "dispatch.hpp"
 #include "call_frame.hpp"
+#include "dispatch.hpp"
 #include "objectmemory.hpp"
+#include "object_utils.hpp"
+#include "ontology.hpp"
 
 namespace rubinius {
 
   void Executable::init(STATE) {
-    GO(executable).set(state->new_class("Executable", G(object), G(rubinius)));
+    GO(executable).set(ontology::new_class(state, "Executable", G(object), G(rubinius)));
     G(executable)->set_object_type(state, ExecutableType);
-    G(executable)->name(state, state->symbol("Rubinius::Executable"));
   }
 
   Executable* Executable::allocate(STATE, Object* self) {
@@ -26,6 +21,7 @@ namespace rubinius {
     executable->serial(state, Fixnum::from(0));
     executable->inliners_ = 0;
     executable->prim_index_ = -1;
+    executable->custom_call_site_ = false;
 
     executable->set_executor(Executable::default_executor);
 
@@ -50,12 +46,11 @@ namespace rubinius {
   Object* Executable::invoke(STATE, Symbol* name, Module* mod, Object* recv, Array* ary,
                              Object* block, CallFrame* call_frame)
   {
-    Dispatch disp(name, mod, this);
     Arguments args(name, recv, 0, 0);
     args.use_array(ary);
     args.set_block(block);
 
-    return execute(state, call_frame, disp.method, disp.module, args);
+    return execute(state, call_frame, this, mod, args);
   }
 
   Object* Executable::default_executor(STATE, CallFrame* call_frame, Executable* exec, Module* mod,
@@ -63,23 +58,23 @@ namespace rubinius {
     args.unshift2(state, args.recv(), args.name());
     args.set_recv(exec);
 
-    Dispatch dis(state->symbol("call"));
+    Dispatch dis(G(sym_call));
     return dis.send(state, call_frame, args);
   }
 
-  void Executable::add_inliner(ObjectMemory* om, CompiledMethod* cm) {
-    if(!inliners_ || inliners_ == (Inliners*)Qnil) inliners_ = new Inliners;
-    inliners_->inliners().push_back(cm);
+  void Executable::add_inliner(ObjectMemory* om, CompiledCode* code) {
+    if(!inliners_ || inliners_ == (Inliners*)cNil) inliners_ = new Inliners(om);
+    inliners_->inliners().push_back(code);
 
-    om->write_barrier(this, cm);
+    om->write_barrier(this, code);
   }
 
   void Executable::clear_inliners(STATE) {
-    if(!inliners_ || inliners_ == (Inliners*)Qnil) return;
-    for(std::list<CompiledMethod*>::const_iterator i = inliners_->inliners().begin();
+    if(!inliners_ || inliners_ == (Inliners*)cNil) return;
+    for(std::vector<CompiledCode*>::const_iterator i = inliners_->inliners().begin();
         i != inliners_->inliners().end();
         ++i) {
-      (*i)->backend_method()->deoptimize(state, *i, 0);
+      (*i)->machine_code()->deoptimize(state, *i, 0);
     }
 
     inliners_->inliners().clear();
@@ -91,44 +86,32 @@ namespace rubinius {
   }
 
   void Executable::Info::mark_inliners(Object* obj, ObjectMark& mark) {
-    Executable* exc = (Executable*)obj;
-    if(!exc->inliners_ || exc->inliners_ == (Inliners*)Qnil) return;
+    Executable* exc = static_cast<Executable*>(obj);
+    if(!exc->inliners_ || exc->inliners_ == (Inliners*)cNil) return;
 
-    if(exc->inliners_) {
-      Inliners* inl = exc->inliners_;
+    Inliners* inl = exc->inliners_;
+    inl->set_mark();
 
-      // std::cout << "Marking inliners: " << inl->inliners().size() << "\n";
+    // std::cout << "Marking inliners: " << inl->inliners().size() << "\n";
 
-      for(std::list<CompiledMethod*>::iterator i = inl->inliners().begin();
-          i != inl->inliners().end();
-          ++i) {
-        CompiledMethod* cm = *i;
+    for(std::vector<CompiledCode*>::iterator i = inl->inliners().begin();
+        i != inl->inliners().end();
+        ++i) {
+      CompiledCode* code = *i;
 
-        Object* tmp = mark.call(cm);
-        if(tmp) {
-          assert(kind_of<CompiledMethod>(tmp));
-          *i = (CompiledMethod*)tmp;
-          mark.just_set(obj, tmp);
-        }
+      Object* tmp = mark.call(code);
+      if(tmp && tmp != code) {
+        *i = static_cast<CompiledCode*>(tmp);
+        mark.just_set(obj, tmp);
       }
     }
   }
 
-  void Executable::Info::visit(Object* obj, ObjectVisitor& visit) {
-    auto_visit(obj, visit);
-    visit_inliners(obj, visit);
+  Inliners::Inliners(ObjectMemory* om) {
+    om->add_code_resource(this);
   }
 
-  void Executable::Info::visit_inliners(Object* obj, ObjectVisitor& visit) {
-    Executable* exc = (Executable*)obj;
-    if(!exc->inliners_ || exc->inliners_ == (Inliners*)Qnil) return;
-
-    if(exc->inliners_) {
-      for(std::list<CompiledMethod*>::iterator i = exc->inliners_->inliners().begin();
-          i != exc->inliners_->inliners().end();
-          ++i) {
-        visit.call(*i);
-      }
-    }
+  void Inliners::cleanup(STATE, CodeManager* cm) {
+    inliners_.clear();
   }
 }

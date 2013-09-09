@@ -1,10 +1,18 @@
-#include "vm/config.h"
+#include "builtin/array.hpp"
+#include "builtin/class.hpp"
+#include "builtin/exception.hpp"
+#include "builtin/fixnum.hpp"
+#include "builtin/float.hpp"
+#include "builtin/ffi_pointer.hpp"
+#include "builtin/nativefunction.hpp"
+#include "builtin/string.hpp"
+#include "builtin/symbol.hpp"
+#include "ffi_util.hpp"
+#include "object_utils.hpp"
+#include "objectmemory.hpp"
+#include "ontology.hpp"
+#include "windows_compat.h"
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <unistd.h>
-#include <sys/stat.h>
 #ifdef RBX_WINDOWS
 #include <winsock2.h>
 #else
@@ -12,31 +20,10 @@
 #include <arpa/inet.h>
 #endif
 
-#include "vm.hpp"
-#include "oop.hpp"
-#include "vm/object_utils.hpp"
-#include "objectmemory.hpp"
-
-#include "builtin/array.hpp"
-#include "builtin/class.hpp"
-#include "builtin/fixnum.hpp"
-#include "builtin/float.hpp"
-#include "builtin/ffi_pointer.hpp"
-#include "builtin/nativefunction.hpp"
-#include "builtin/string.hpp"
-#include "builtin/symbol.hpp"
-
-#include "ffi_util.hpp"
-#include "arguments.hpp"
-#include "dispatch.hpp"
-
-#include "windows_compat.h"
-
 namespace rubinius {
 
   void Pointer::init(STATE) {
-    Module* ffi = as<Module>(G(object)->get_const(state, "FFI"));
-    GO(ffi_pointer).set(state->new_class_under("Pointer", ffi));
+    GO(ffi_pointer).set(ontology::new_class_under(state, "Pointer", G(ffi)));
     G(ffi_pointer)->set_object_type(state, PointerType);
 
     G(ffi_pointer)->set_const(state, "CURRENT_PROCESS",
@@ -65,7 +52,7 @@ namespace rubinius {
   #endif
 #endif
 
-    ffi->set_const(state, "LIB_SUFFIXES", suffix);
+    G(ffi)->set_const(state, "LIB_SUFFIXES", suffix);
 
     // Legacy. Fix the kernel to not need this.
     String* main_suffix;
@@ -83,7 +70,7 @@ namespace rubinius {
   }
 
   Pointer* Pointer::create(STATE, void* ptr) {
-    Pointer* obj = state->new_struct<Pointer>(G(ffi_pointer));
+    Pointer* obj = state->new_object<Pointer>(G(ffi_pointer));
     obj->pointer = ptr;
     obj->autorelease = false;
     obj->set_finalizer = false;
@@ -91,7 +78,7 @@ namespace rubinius {
   }
 
   Pointer* Pointer::allocate(STATE, Object* self) {
-    Pointer* obj = state->new_struct<Pointer>(as<Class>(self));
+    Pointer* obj = state->new_object<Pointer>(as<Class>(self));
     obj->pointer = 0;
     obj->autorelease = false;
     obj->set_finalizer = false;
@@ -99,7 +86,7 @@ namespace rubinius {
   }
 
   Pointer* Pointer::allocate_memory(STATE, Object* self, Fixnum* size) {
-    Pointer* obj = state->new_struct<Pointer>(as<Class>(self));
+    Pointer* obj = state->vm()->new_object<Pointer>(as<Class>(self));
     obj->pointer = malloc(size->to_native());;
     obj->autorelease = false;
     obj->set_finalizer = false;
@@ -107,7 +94,7 @@ namespace rubinius {
   }
 
   Integer* Pointer::get_address(STATE) {
-    return Integer::from(state, (intptr_t)pointer);
+    return Integer::from(state, (uintptr_t)pointer);
   }
 
   Integer* Pointer::set_address(STATE, Integer* ptr) {
@@ -123,7 +110,7 @@ namespace rubinius {
     autorelease = val->true_p() ? true : false;
 
     if(autorelease && !set_finalizer) {
-      state->om->needs_finalization(this,
+      state->memory()->needs_finalization(this,
           (FinalizerFunction)&Pointer::finalize);
       set_finalizer = true;
     }
@@ -131,49 +118,84 @@ namespace rubinius {
     return val;
   }
 
+  Object* Pointer::free(STATE) {
+    if(pointer) ::free(pointer);
+    autorelease = false;
+    pointer = NULL;
+    return cNil;
+  }
+
   void Pointer::finalize(STATE, Pointer* ptr) {
     if(ptr->autorelease && ptr->pointer) {
       ::free(ptr->pointer);
     }
+    ptr->pointer = NULL;
   }
 
   String* Pointer::read_string(STATE, Fixnum* len) {
-    // HM. This is pretty dangerous. Should we figure out how to
-    // protect this?
     return String::create(state, (char*)pointer, len->to_native());
   }
 
   String* Pointer::read_string_to_null(STATE) {
-    // Danger!
-    // This operation might be too dangerous! You can read into any
-    // memory using it!
     return String::create(state, (char*)pointer);
   }
 
   Pointer* Pointer::write_string(STATE, String* str, Fixnum* len) {
+    if(!pointer) Exception::argument_error(state, "invalid pointer to write string");
+
     native_int n = len->to_native();
-    if(str->size() < n) n = str->size();
+    if(str->byte_size() < n) n = str->byte_size();
     memcpy(pointer, (void*)str->byte_address(), n);
     return this;
   }
 
+  Integer* Pointer::write_char(STATE, Integer* val) {
+    if(!pointer) Exception::argument_error(state, "invalid pointer to write char");
+
+    unsigned char s = val->to_native();
+    *(unsigned char*)pointer = s;
+    return val;
+  }
+
+  Integer* Pointer::read_char(STATE, Object* sign) {
+    if(!pointer) Exception::argument_error(state, "invalid pointer to read char");
+
+    if(CBOOL(sign)) {
+      return Integer::from(state, *(char*)pointer);
+    } else {
+      return Integer::from(state, *(unsigned char*)pointer);
+    }
+  }
+
   Integer* Pointer::write_short(STATE, Integer* val) {
+    if(!pointer) Exception::argument_error(state, "invalid pointer to write short");
+
     unsigned short s = val->to_native();
     *(unsigned short*)pointer = s;
     return val;
   }
 
-  Integer* Pointer::read_short(STATE) {
-    return Integer::from(state, *(short*)pointer);
+  Integer* Pointer::read_short(STATE, Object* sign) {
+    if(!pointer) Exception::argument_error(state, "invalid pointer to read short");
+
+    if(CBOOL(sign)) {
+      return Integer::from(state, *(short*)pointer);
+    } else {
+      return Integer::from(state, *(unsigned short*)pointer);
+    }
   }
 
   Integer* Pointer::write_int(STATE, Integer* val) {
+    if(!pointer) Exception::argument_error(state, "invalid pointer to write int");
+
     *(int*)pointer = val->to_native();
     return val;
   }
 
   Integer* Pointer::read_int(STATE, Object* sign) {
-    if(RTEST(sign)) {
+    if(!pointer) Exception::argument_error(state, "invalid pointer to read int");
+
+    if(CBOOL(sign)) {
       return Integer::from(state, *(int*)pointer);
     } else {
       return Integer::from(state, *(unsigned int*)pointer);
@@ -181,46 +203,82 @@ namespace rubinius {
   }
 
   Integer* Pointer::write_long(STATE, Integer* val) {
+    if(!pointer) Exception::argument_error(state, "invalid pointer to write long");
+
     *(long*)pointer = val->to_native();
     return val;
   }
 
-  Integer* Pointer::read_long(STATE) {
-    return Integer::from(state, *(long*)pointer);
+  Integer* Pointer::read_long(STATE, Object* sign) {
+    if(!pointer) Exception::argument_error(state, "invalid pointer to read long");
+
+    if(CBOOL(sign)) {
+      return Integer::from(state, *(long*)pointer);
+    } else {
+      return Integer::from(state, *(unsigned long*)pointer);
+    }
   }
 
   Integer* Pointer::write_long_long(STATE, Integer* val) {
+    if(!pointer) Exception::argument_error(state, "invalid pointer to write long long");
+
     *(long long*)pointer = val->to_long_long();
     return val;
   }
 
-  Integer* Pointer::read_long_long(STATE) {
-    return Integer::from(state, *(long long*)pointer);
+  Integer* Pointer::read_long_long(STATE, Object* sign) {
+    if(!pointer) Exception::argument_error(state, "invalid pointer to read long long");
+
+    if(CBOOL(sign)) {
+      return Integer::from(state, *(long long*)pointer);
+    } else {
+      return Integer::from(state, *(unsigned long long*)pointer);
+    }
   }
 
   Float* Pointer::write_float(STATE, Float* flt) {
+    if(!pointer) Exception::argument_error(state, "invalid pointer to write float");
+
     *(float*)pointer = (float)flt->val;
     return flt;
   }
 
   Float* Pointer::read_float(STATE) {
+    if(!pointer) Exception::argument_error(state, "invalid pointer to read float");
+
     return Float::create(state, (double)(*(float*)pointer));
   }
-  
+
   Float* Pointer::write_double(STATE, Float* flt) {
+    if(!pointer) Exception::argument_error(state, "invalid pointer to write double");
+
     *(double*)pointer = flt->val;
     return flt;
   }
-  
+
   Float* Pointer::read_double(STATE) {
+    if(!pointer) Exception::argument_error(state, "invalid pointer to read double");
+
     return Float::create(state, *(double*)pointer);
   }
 
+  Pointer* Pointer::write_pointer(STATE, Pointer* ptr) {
+    if(!pointer) Exception::argument_error(state, "invalid pointer to write pointer");
+
+    *(void**)pointer = ptr->pointer;
+    return ptr;
+  }
+
   Pointer* Pointer::read_pointer(STATE) {
+    if(!pointer) Exception::argument_error(state, "invalid pointer to read pointer");
+
     return Pointer::create(state, *(void**)pointer);
   }
 
   Object* Pointer::network_order(STATE, Fixnum* offset, Fixnum* intsize) {
+
+    if(!pointer) Exception::argument_error(state, "invalid pointer to network order value");
+
     native_int size = intsize->to_native();
 
     char* pos = ((char*)pointer) + offset->to_native();
@@ -250,6 +308,8 @@ namespace rubinius {
 
   Object* Pointer::get_field(STATE, int offset, int type) {
     Object* ret;
+    if(!pointer) Exception::argument_error(state, "invalid pointer to get field from");
+
     char* ptr = (char*)pointer;
 
     ptr += offset;
@@ -264,7 +324,7 @@ namespace rubinius {
       ret = Fixnum::from((unsigned int)(READ(unsigned char)));
       break;
     case RBX_FFI_TYPE_BOOL:
-      ret = (READ(unsigned char)) ? Qtrue : Qfalse;
+      ret = RBOOL(READ(unsigned char));
       break;
     case RBX_FFI_TYPE_SHORT:
       ret = Fixnum::from((int)(READ(short)));
@@ -296,13 +356,10 @@ namespace rubinius {
     case RBX_FFI_TYPE_ULONG_LONG:
       ret = Integer::from(state, READ(unsigned long long));
       break;
-    case RBX_FFI_TYPE_OBJECT:
-      ret = READ(Object*);
-      break;
     case RBX_FFI_TYPE_PTR: {
       void *lptr = READ(void*);
       if(!lptr) {
-        ret = Qnil;
+        ret = cNil;
       } else {
         ret = Pointer::create(state, lptr);
       }
@@ -311,7 +368,7 @@ namespace rubinius {
     case RBX_FFI_TYPE_STRING: {
       char* result = READ(char*);
       if(result == NULL) {
-        ret = Qnil;
+        ret = cNil;
       } else {
         ret = String::create(state, result);
       }
@@ -325,7 +382,7 @@ namespace rubinius {
       result = READ(char*);
 
       if(result == NULL) {
-        s = p = Qnil;
+        s = p = cNil;
       } else {
         s = String::create(state, result);
         p = Pointer::create(state, result);
@@ -339,7 +396,7 @@ namespace rubinius {
     }
     default:
     case RBX_FFI_TYPE_VOID:
-      ret = Qnil;
+      ret = cNil;
       break;
     }
 
@@ -352,11 +409,14 @@ namespace rubinius {
   }
 
   void Pointer::set_field(STATE, int offset, int type, Object* val) {
+
+    if(!pointer) Exception::argument_error(state, "invalid pointer to set field of");
+
     char* ptr = (char*)pointer;
 
     ptr += offset;
 
-#define WRITE(type, val) *((type*)ptr) = (type)val
+#define WRITE(type, val) *(reinterpret_cast<type*>(ptr)) = (type)val
 
     switch(type) {
     case RBX_FFI_TYPE_CHAR:
@@ -368,7 +428,7 @@ namespace rubinius {
       WRITE(unsigned char, as<Fixnum>(val)->to_native());
       break;
     case RBX_FFI_TYPE_BOOL:
-      WRITE(unsigned char, RTEST(val) ? 1 : 0);
+      WRITE(unsigned char, CBOOL(val) ? 1 : 0);
       break;
     case RBX_FFI_TYPE_SHORT:
       type_assert(state, val, FixnumType, "converting to short");
@@ -379,7 +439,7 @@ namespace rubinius {
       WRITE(unsigned short, as<Fixnum>(val)->to_native());
       break;
     case RBX_FFI_TYPE_INT:
-      if(FIXNUM_P(val)) {
+      if(val->fixnum_p()) {
         WRITE(int, as<Fixnum>(val)->to_int());
       } else {
         type_assert(state, val, BignumType, "converting to int");
@@ -387,7 +447,7 @@ namespace rubinius {
       }
       break;
     case RBX_FFI_TYPE_UINT:
-      if(FIXNUM_P(val)) {
+      if(val->fixnum_p()) {
         WRITE(unsigned int, as<Fixnum>(val)->to_uint());
       } else {
         type_assert(state, val, BignumType, "converting to unsigned int");
@@ -395,7 +455,7 @@ namespace rubinius {
       }
       break;
     case RBX_FFI_TYPE_LONG:
-      if(FIXNUM_P(val)) {
+      if(val->fixnum_p()) {
         WRITE(long, as<Fixnum>(val)->to_long());
       } else {
         type_assert(state, val, BignumType, "converting to long");
@@ -403,7 +463,7 @@ namespace rubinius {
       }
       break;
     case RBX_FFI_TYPE_ULONG:
-      if(FIXNUM_P(val)) {
+      if(val->fixnum_p()) {
         WRITE(unsigned long, as<Fixnum>(val)->to_ulong());
       } else {
         type_assert(state, val, BignumType, "converting to unsigned long");
@@ -423,7 +483,7 @@ namespace rubinius {
       break;
     }
     case RBX_FFI_TYPE_LONG_LONG:
-      if(FIXNUM_P(val)) {
+      if(val->fixnum_p()) {
         WRITE(long long, as<Fixnum>(val)->to_long_long());
       } else {
         type_assert(state, val, BignumType, "converting to long long");
@@ -431,18 +491,15 @@ namespace rubinius {
       }
       break;
     case RBX_FFI_TYPE_ULONG_LONG:
-      if(FIXNUM_P(val)) {
+      if(val->fixnum_p()) {
         WRITE(unsigned long long, as<Fixnum>(val)->to_ulong_long());
       } else {
         type_assert(state, val, BignumType, "converting to unsigned long long");
         WRITE(unsigned long long, as<Bignum>(val)->to_ulong_long());
       }
       break;
-    case RBX_FFI_TYPE_OBJECT:
-      WRITE(Object*, val);
-      break;
     case RBX_FFI_TYPE_PTR:
-      if(NIL_P(val)) {
+      if(val->nil_p()) {
         WRITE(void*, NULL);
       } else {
         Pointer *mp = as<Pointer>(val);
@@ -452,11 +509,11 @@ namespace rubinius {
       break;
     case RBX_FFI_TYPE_STRING: {
       const char* result;
-      if(NIL_P(val)) {
+      if(val->nil_p()) {
         result = NULL;
       } else {
         String* str = as<String>(val);
-        /* TODO this is probably not correct. Saving away an 
+        /* TODO this is probably not correct. Saving away an
          * internal pointer to the string means that when the string
          * moves, the data will point at the wrong place. Probably need to
          * copy the string data instead */
@@ -466,11 +523,10 @@ namespace rubinius {
       break;
     }
     default:
-      sassert(0);
+      rubinius::bug("Unknown FFI type");
     }
   }
 
   void Pointer::Info::mark(Object* obj, ObjectMark& mark) {
-    // @todo implement
   }
 }

@@ -9,7 +9,7 @@ describe "Socket#getaddrinfo" do
   end
 
   before :each do
-    BasicSocket.do_not_reverse_lookup = false
+    BasicSocket.do_not_reverse_lookup = true
   end
 
   after :each do
@@ -21,7 +21,6 @@ describe "Socket#getaddrinfo" do
   end
 
   it "gets the address information" do
-    BasicSocket.do_not_reverse_lookup = true
     expected = []
     # The check for AP_INET6's class is needed because ipaddr.rb adds
     # fake AP_INET6 even in case when IPv6 is not really supported.
@@ -60,6 +59,58 @@ describe "Socket#getaddrinfo" do
     end
   end
 
+  it "accepts an empty family" do
+    res = Socket.getaddrinfo('127.0.0.1', 9160,
+                             nil,
+                             Socket::SOCK_STREAM,
+                             Socket::IPPROTO_TCP,
+                             Socket::AI_PASSIVE)
+
+    expected = [["AF_INET", 9160, "127.0.0.1", "127.0.0.1", Socket::AF_INET, Socket::SOCK_STREAM, Socket::IPPROTO_TCP]]
+    res.each do |a|
+      expected.should include(a)
+    end
+  end
+
+  it "accepts an empty socket type" do
+    res = Socket.getaddrinfo('127.0.0.1', 9160,
+                             Socket::AF_INET,
+                             nil,
+                             Socket::IPPROTO_TCP,
+                             Socket::AI_PASSIVE)
+
+    expected = [["AF_INET", 9160, "127.0.0.1", "127.0.0.1", Socket::AF_INET, Socket::SOCK_STREAM, Socket::IPPROTO_TCP]]
+    res.each do |a|
+      expected.should include(a)
+    end
+  end
+
+  it "accepts an empty protocol" do
+    res = Socket.getaddrinfo('127.0.0.1', 9160,
+                             Socket::AF_INET,
+                             Socket::SOCK_STREAM,
+                             nil,
+                             Socket::AI_PASSIVE)
+
+    expected = [["AF_INET", 9160, "127.0.0.1", "127.0.0.1", Socket::AF_INET, Socket::SOCK_STREAM, Socket::IPPROTO_TCP]]
+    res.each do |a|
+      expected.should include(a)
+    end
+  end
+
+  it "accepts empty flags" do
+    res = Socket.getaddrinfo('127.0.0.1', 9160,
+                             Socket::AF_INET,
+                             Socket::SOCK_STREAM,
+                             Socket::IPPROTO_TCP,
+                             nil)
+
+    expected = [["AF_INET", 9160, "127.0.0.1", "127.0.0.1", Socket::AF_INET, Socket::SOCK_STREAM, Socket::IPPROTO_TCP]]
+    res.each do |a|
+      expected.should include(a)
+    end
+  end
+
    # #getaddrinfo will return a INADDR_ANY address (0.0.0.0
    # or "::") if it's a passive socket. In the case of non-passive
    # sockets (AI_PASSIVE not set) it should return the loopback
@@ -72,12 +123,14 @@ describe "Socket#getaddrinfo" do
                                Socket::IPPROTO_TCP,
                                Socket::AI_PASSIVE)
 
-     expected = [["AF_INET", 80, "0.0.0.0", "0.0.0.0", Socket::AF_INET, Socket::SOCK_STREAM, Socket::IPPROTO_TCP]]
-     res.should == expected
+     expected = [["AF_INET", 80, "0.0.0.0", "0.0.0.0", Socket::AF_INET, Socket::SOCK_STREAM, Socket::IPPROTO_TCP],
+                 ["AF_INET", 80, "", "0.0.0.0", Socket::AF_INET, Socket::SOCK_STREAM, Socket::IPPROTO_TCP]]
+     res.each do |a|
+       expected.should include(a)
+     end
    end
 
    it "accepts empty addresses for IPv4 non-passive sockets" do
-    BasicSocket.do_not_reverse_lookup = true
      res = Socket::getaddrinfo(nil, "http",
                                Socket::AF_INET,
                                Socket::SOCK_STREAM,
@@ -90,7 +143,6 @@ describe "Socket#getaddrinfo" do
 
 
    it "accepts empty addresses for IPv6 passive sockets" do
-     BasicSocket.do_not_reverse_lookup = true
      res = Socket::getaddrinfo(nil, "http",
                                Socket::AF_INET6,
                                Socket::SOCK_STREAM,
@@ -105,7 +157,6 @@ describe "Socket#getaddrinfo" do
    end
 
    it "accepts empty addresses for IPv6 non-passive sockets" do
-     BasicSocket.do_not_reverse_lookup = true
      res = Socket::getaddrinfo(nil, "http",
                                Socket::AF_INET6,
                                Socket::SOCK_STREAM,

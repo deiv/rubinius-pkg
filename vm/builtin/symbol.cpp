@@ -1,22 +1,23 @@
 #include "builtin/array.hpp"
 #include "builtin/class.hpp"
+#include "builtin/encoding.hpp"
+#include "builtin/exception.hpp"
 #include "builtin/fixnum.hpp"
 #include "builtin/string.hpp"
 #include "builtin/symbol.hpp"
 #include "builtin/tuple.hpp"
-
-#include "vm.hpp"
-#include "vm/object_utils.hpp"
+#include "object_utils.hpp"
 #include "objectmemory.hpp"
+#include "ontology.hpp"
 
-#include <iostream>
+#include <sstream>
 
 #define StartSize 16
 #define Increments 32
 
 namespace rubinius {
   void Symbol::init(STATE) {
-    GO(symbol).set(state->new_class("Symbol"));
+    GO(symbol).set(ontology::new_class(state, "Symbol"));
     G(symbol)->set_object_type(state, Symbol::type);
   }
 
@@ -33,32 +34,50 @@ namespace rubinius {
   }
 
   String* Symbol::to_str(STATE) {
-    return state->shared.symbols.lookup_string(state, this);
+    String* str = state->shared().symbols.lookup_string(state, this);
+    if(!str) {
+      std::ostringstream msg;
+      msg << "Invalid symbol 0x" << std::hex << reinterpret_cast<uintptr_t>(this);
+      Exception::range_error(state, msg.str().c_str());
+    }
+    return str;
   }
 
-  const char* Symbol::c_str(STATE) const {
-    return state->shared.symbols.lookup_cstring(state, this);
+  std::string& Symbol::cpp_str(STATE) {
+    return state->shared().symbols.lookup_cppstring(this);
+  }
+
+  std::string Symbol::debug_str(SharedState& shared) {
+    return shared.symbols.lookup_debug_string(this);
+  }
+
+  std::string Symbol::debug_str(STATE) {
+    return debug_str(state->shared());
   }
 
   Array* Symbol::all_symbols(STATE) {
-    return state->shared.symbols.all_as_array(state);
+    return state->shared().symbols.all_as_array(state);
   }
 
   Object* Symbol::is_ivar_p(STATE) {
-    return state->shared.symbols.kind(state, this) == SymbolTable::IVar ? Qtrue : Qfalse;
+    return RBOOL(state->shared().symbols.kind(state, this) == SymbolTable::IVar);
   }
 
   Object* Symbol::is_cvar_p(STATE) {
-    return state->shared.symbols.kind(state, this) == SymbolTable::CVar ? Qtrue : Qfalse;
+    return RBOOL(state->shared().symbols.kind(state, this) == SymbolTable::CVar);
   }
 
   Object* Symbol::is_constant_p(STATE) {
-    return state->shared.symbols.kind(state, this) == SymbolTable::Constant ? Qtrue : Qfalse;
+    return RBOOL(state->shared().symbols.kind(state, this) == SymbolTable::Constant);
+  }
+
+  Encoding* Symbol::encoding(STATE) {
+    return Encoding::from_index(state, state->shared().symbols.lookup_encoding(this));
   }
 
   void Symbol::Info::show(STATE, Object* self, int level) {
     Symbol* sym = try_as<Symbol>(self);
-    std::cout << ":" << sym->c_str(state) << std::endl;
+    std::cout << ":" << sym->debug_str(state) << std::endl;
   }
 
   void Symbol::Info::show_simple(STATE, Object* self, int level) {

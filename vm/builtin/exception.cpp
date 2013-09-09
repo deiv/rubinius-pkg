@@ -1,30 +1,22 @@
-#include <sstream>
-
 #include "builtin/class.hpp"
+#include "builtin/encoding.hpp"
 #include "builtin/exception.hpp"
+#include "builtin/location.hpp"
 #include "builtin/lookuptable.hpp"
 #include "builtin/fixnum.hpp"
 #include "builtin/symbol.hpp"
 #include "builtin/string.hpp"
-#include "builtin/system.hpp"
-
-#include "vm.hpp"
-#include "vm/object_utils.hpp"
-#include "exception.hpp"
-#include "type_info.hpp"
-
-#include "builtin/location.hpp"
-#include "builtin/array.hpp"
-
 #include "call_frame.hpp"
-
 #include "configuration.hpp"
+#include "object_utils.hpp"
+#include "ontology.hpp"
+#include "version.h"
 
-#include <iostream>
+#include <sstream>
 
 namespace rubinius {
   void Exception::init(STATE) {
-    GO(exception).set(state->new_class("Exception", G(object)));
+    GO(exception).set(ontology::new_class(state, "Exception", G(object)));
     G(exception)->set_object_type(state, ExceptionType);
   }
 
@@ -33,11 +25,11 @@ namespace rubinius {
   }
 
   void Exception::print_locations(STATE) {
-    for(size_t i = 0; i < locations_->size(); i++) {
+    for(native_int i = 0; i < locations_->size(); i++) {
       if(Location* loc = try_as<Location>(locations_->get(state, i))) {
-        if(CompiledMethod* meth = try_as<CompiledMethod>(loc->method())) {
+        if(CompiledCode* meth = try_as<CompiledCode>(loc->method())) {
           if(Symbol* file_sym = try_as<Symbol>(meth->file())) {
-            std::cout << file_sym->c_str(state) << ":"
+            std::cout << file_sym->debug_str(state) << ":"
                       << meth->line(state, loc->ip()->to_native())
                       << "\n";
             continue;
@@ -87,22 +79,22 @@ namespace rubinius {
   void Exception::internal_error(STATE, CallFrame* call_frame, const char* reason) {
     Exception* exc = Exception::make_exception(state, G(exc_vm_internal), reason);
     exc->locations(state, Location::from_call_stack(state, call_frame));
-    state->thread_state()->raise_exception(exc);
+    state->raise_exception(exc);
   }
 
-  void Exception::bytecode_error(STATE, CallFrame* call_frame, 
-                                 CompiledMethod* cm, int ip, const char* reason)
+  void Exception::bytecode_error(STATE, CallFrame* call_frame,
+                                 CompiledCode* code, int ip, const char* reason)
   {
     Exception* exc = Exception::make_exception(state, G(exc_vm_bad_bytecode), reason);
-    exc->set_ivar(state, state->symbol("@compiled_method"), cm);
+    exc->set_ivar(state, state->symbol("@compiled_code"), code);
     exc->set_ivar(state, state->symbol("@ip"), Fixnum::from(ip));
     exc->locations(state, Location::from_call_stack(state, call_frame));
-    state->thread_state()->raise_exception(exc);
+    state->raise_exception(exc);
   }
 
   void Exception::frozen_error(STATE, CallFrame* call_frame) {
     Class* klass;
-    if(LANGUAGE_18_ENABLED(state)) {
+    if(LANGUAGE_18_ENABLED) {
       klass = G(exc_type);
     } else {
       klass = G(exc_rte);
@@ -111,7 +103,37 @@ namespace rubinius {
     Exception* exc = Exception::make_exception(state, klass,
                         "unable to modify frozen object");
     exc->locations(state, Location::from_call_stack(state, call_frame));
-    state->thread_state()->raise_exception(exc);
+    state->raise_exception(exc);
+  }
+
+  Exception* Exception::make_encoding_compatibility_error(STATE, Object* a, Object* b) {
+    Encoding* enc_a = Encoding::get_object_encoding(state, a);
+    Encoding* enc_b = Encoding::get_object_encoding(state, b);
+
+    std::ostringstream msg;
+    msg << "undefined conversion ";
+
+    if(String* str = try_as<String>(a)) {
+      msg << "for '" << str->c_str(state) << "' ";
+    }
+
+    msg << "from " << enc_a->name()->c_str(state);
+    msg << " to " << enc_b->name()->c_str(state);
+
+    return make_exception(state, get_encoding_compatibility_error(state),
+                          msg.str().c_str());
+  }
+
+  void Exception::encoding_compatibility_error(STATE, Object* a, Object* b,
+                                               CallFrame* call_frame)
+  {
+    Exception* exc = Exception::make_encoding_compatibility_error(state, a, b);
+    exc->locations(state, Location::from_call_stack(state, call_frame));
+    state->raise_exception(exc);
+  }
+
+  void Exception::encoding_compatibility_error(STATE, Object* a, Object* b) {
+    RubyException::raise(make_encoding_compatibility_error(state, a, b));
   }
 
   void Exception::argument_error(STATE, int expected, int given) {
@@ -133,12 +155,12 @@ namespace rubinius {
 
     std::ostringstream msg;
 
-    TypeInfo* wanted = state->find_type(type);
+    TypeInfo* wanted = state->vm()->find_type(type);
 
     if(!object->reference_p()) {
       msg << "Tried to use non-reference value " << object;
     } else {
-      TypeInfo* was = state->find_type(object->type_id());
+      TypeInfo* was = state->vm()->find_type(object->type_id());
       msg << "Tried to use object of type " <<
         was->type_name << " (" << was->type << ")";
     }
@@ -167,7 +189,7 @@ namespace rubinius {
   void Exception::type_error(STATE, const char* reason, CallFrame* call_frame) {
     Exception* exc = Exception::make_exception(state, G(exc_type), reason);
     exc->locations(state, Location::from_call_stack(state, call_frame));
-    state->thread_state()->raise_exception(exc);
+    state->raise_exception(exc);
   }
 
   void Exception::float_domain_error(STATE, const char* reason) {
@@ -203,16 +225,18 @@ namespace rubinius {
   }
 
   void Exception::memory_error(STATE) {
-    RubyException::raise(make_exception(state, get_errno_error(state, Fixnum::from(errno)), strerror(errno)));
+    char buf[RBX_STRERROR_BUFSIZE];
+    char* err = RBX_STRERROR(errno, buf, RBX_STRERROR_BUFSIZE);
+    RubyException::raise(make_exception(state, get_errno_error(state, Fixnum::from(errno)), err));
   }
 
   void Exception::object_bounds_exceeded_error(STATE, Object* obj, int index) {
-    TypeInfo* info = state->find_type(obj->type_id()); // HACK use object
+    TypeInfo* info = state->vm()->find_type(obj->type_id()); // HACK use object
     std::ostringstream msg;
 
     msg << "Bounds of object exceeded:" << std::endl;
     msg << "      type: " << info->type_name << ", bytes: " <<
-           obj->body_in_bytes(state) << ", accessed: " << index << std::endl;
+           obj->body_in_bytes(state->vm()) << ", accessed: " << index << std::endl;
 
     RubyException::raise(make_exception(state, get_object_bounds_exceeded_error(state),
                                         msg.str().c_str()));
@@ -247,7 +271,7 @@ namespace rubinius {
   /* exception_errno_error primitive */
   Object* Exception::errno_error(STATE, Object* reason, Fixnum* ern) {
     Class* exc_class = get_errno_error(state, ern);
-    if(exc_class->nil_p()) return Qnil;
+    if(exc_class->nil_p()) return cNil;
 
     return make_errno_exception(state, exc_class, reason);
   }
@@ -272,11 +296,32 @@ namespace rubinius {
         msg << reason;
         if(entity) msg << " - " << entity;
 
-        message = String::create(state, msg.str().c_str());
+        message = String::create(state, msg.str().c_str(), msg.str().size());
       }
 
       exc = make_errno_exception(state, exc_class, message);
     }
+
+    RubyException::raise(exc);
+  }
+
+  void Exception::errno_eagain_error(STATE, const char* reason) {
+    Exception* exc;
+    Class* exc_class;
+
+    if(LANGUAGE_18_ENABLED) {
+      exc_class = get_errno_error(state, Fixnum::from(EAGAIN));
+    } else {
+      exc_class = as<Class>(G(io)->get_const(state, "EAGAINWaitReadable"));
+    }
+
+    String* message = nil<String>();
+
+    if(reason) {
+      message = String::create(state, reason);
+    }
+
+    exc = make_errno_exception(state, exc_class, message);
 
     RubyException::raise(exc);
   }
@@ -314,11 +359,7 @@ namespace rubinius {
   }
 
   bool Exception::errno_error_p(STATE, Exception* exc) {
-    if(Class* cls = try_as<Class>(G(object)->get_const(state, "SystemCallError"))) {
-      return exc->kind_of_p(state, cls);
-    }
-
-    return false;
+    return exc->kind_of_p(state, get_system_call_error(state));
   }
 
   bool Exception::system_call_error_p(STATE, Exception* exc) {
@@ -375,6 +416,10 @@ namespace rubinius {
 
   Class* Exception::get_runtime_error(STATE) {
     return as<Class>(G(object)->get_const(state, "RuntimeError"));
+  }
+
+  Class* Exception::get_encoding_compatibility_error(STATE) {
+    return as<Class>(G(encoding)->get_const(state, "CompatibilityError"));
   }
 
   Class* Exception::get_errno_error(STATE, Fixnum* ern) {

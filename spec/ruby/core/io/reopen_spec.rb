@@ -36,7 +36,7 @@ describe "IO#reopen" do
     lambda { @io.reopen obj }.should raise_error(IOError)
   end
 
-  it "raises an TypeError if #to_io does not return an IO instance" do
+  it "raises a TypeError if #to_io does not return an IO instance" do
     obj = mock("io")
     obj.should_receive(:to_io).and_return("something else")
     lambda { @io.reopen obj }.should raise_error(TypeError)
@@ -216,10 +216,12 @@ describe "IO#reopen with an IO" do
     @io.gets.should == "Line 1\n"
   end
 
-  it "reads from the current position of the other IO's stream" do
-    @other_io.gets.should == "Line 1\n"
-    @io.reopen @other_io
-    @io.gets.should == "Line 2\n"
+  ruby_bug '#', '1.8' do
+    it "reads from the current position of the other IO's stream" do
+      @other_io.gets.should == "Line 1\n"
+      @io.reopen @other_io
+      @io.gets.should == "Line 2\n"
+    end
   end
 end
 

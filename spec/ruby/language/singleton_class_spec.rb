@@ -73,13 +73,19 @@ describe "A singleton class" do
     it "has class String as the superclass of a String instance" do
       "blah".singleton_class.superclass.should == String
     end
+  end
 
+  ruby_version_is "1.9"..."2.0" do
     it "has class Bignum as the superclass of a Bignum instance" do
-      # This behavior may be changed in the future, though.  [Feature #3222]
       bignum_value.singleton_class.superclass.should == Bignum
     end
   end
 
+  ruby_version_is "2.0" do
+    it "doesn't have singleton class" do
+      lambda { bignum_value.singleton_class.superclass.should == Bignum }.should raise_error(TypeError)
+    end
+  end
 end
 
 describe "A constant on a singleton class" do
@@ -171,7 +177,7 @@ describe "Defining instance methods on a singleton class" do
     @k_sc = @k.singleton_class
   end
 
-  it "define public methods" do
+  it "defines public methods" do
     @k_sc.should have_public_instance_method(:singleton_method)
   end
 end
@@ -188,7 +194,7 @@ describe "Instance methods of a singleton class" do
     @k_sc.should have_instance_method(:example_instance_method)
   end
 
-  it "do not include class methods of the object's class" do
+  it "does not include class methods of the object's class" do
     @k_sc.should_not have_instance_method(:example_class_method)
   end
 
@@ -196,7 +202,7 @@ describe "Instance methods of a singleton class" do
     @a_sc.should have_instance_method(:example_instance_method_of_object)
   end
 
-  it "do not include class methods of Object" do
+  it "does not include class methods of Object" do
     @a_sc.should_not have_instance_method(:example_class_method_of_object)
   end
 
@@ -205,15 +211,15 @@ describe "Instance methods of a singleton class" do
       @a_c_sc.should have_instance_method(:example_instance_method_of_class)
     end
 
-    it "do not include class methods of Class" do
+    it "does not include class methods of Class" do
       @a_c_sc.should_not have_instance_method(:example_class_method_of_class)
     end
 
-    it "do not include instance methods of the singleton class of Class" do
+    it "does not include instance methods of the singleton class of Class" do
       @a_c_sc.should_not have_instance_method(:example_instance_method_of_singleton_class)
     end
 
-    it "do not include class methods of the singleton class of Class" do
+    it "does not include class methods of the singleton class of Class" do
       @a_c_sc.should_not have_instance_method(:example_class_method_of_singleton_class)
     end
   end
@@ -241,7 +247,7 @@ describe "Class methods of a singleton class" do
     @k_sc.should have_method(:example_class_method)
   end
 
-  it "do not include instance methods of the object's class" do
+  it "does not include instance methods of the object's class" do
     @k_sc.should_not have_method(:example_instance_method)
   end
 
@@ -249,7 +255,7 @@ describe "Class methods of a singleton class" do
     @a_sc.should have_method(:example_instance_method_of_class)
   end
 
-  it "do not include class methods of Class" do
+  it "does not include class methods of Class" do
     @a_sc.should_not have_method(:example_class_method_of_class)
   end
 
@@ -266,7 +272,7 @@ describe "Class methods of a singleton class" do
       @a_c_sc.should have_method(:example_instance_method_of_singleton_class)
     end
 
-    it "do not include class methods of the singleton class of Class" do
+    it "does not include class methods of the singleton class of Class" do
       @a_c_sc.should_not have_method(:example_class_method_of_singleton_class)
     end
   end

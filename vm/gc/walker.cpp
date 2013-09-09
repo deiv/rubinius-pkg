@@ -1,7 +1,7 @@
 #include "gc/walker.hpp"
 #include "objectmemory.hpp"
 
-#include "capi/handle.hpp"
+#include "capi/handles.hpp"
 
 namespace rubinius {
   ObjectWalker::~ObjectWalker() {
@@ -20,30 +20,15 @@ namespace rubinius {
   }
 
   void ObjectWalker::seed(GCData& data) {
-    Object* tmp;
     ObjectArray *current_rs = object_memory_->remember_set();
 
     for(ObjectArray::iterator oi = current_rs->begin();
         oi != current_rs->end();
         ++oi) {
-      tmp = *oi;
+      Object* tmp = *oi;
       // unremember_object throws a NULL in to remove an object
       // so we don't have to compact the set in unremember
       if(tmp) saw_object(tmp);
-    }
-
-    for(std::list<gc::WriteBarrier*>::iterator wbi = object_memory_->aux_barriers().begin();
-        wbi != object_memory_->aux_barriers().end();
-        ++wbi) {
-      gc::WriteBarrier* wb = *wbi;
-      ObjectArray* rs = wb->remember_set();
-      for(ObjectArray::iterator oi = rs->begin();
-          oi != rs->end();
-          ++oi) {
-        tmp = *oi;
-
-        if(tmp) saw_object(tmp);
-      }
     }
 
     for(Roots::Iterator i(data.roots()); i.more(); i.advance()) {
@@ -58,11 +43,7 @@ namespace rubinius {
       }
     }
 
-    for(capi::Handles::Iterator i(*data.handles()); i.more(); i.advance()) {
-      saw_object(i->object());
-    }
-
-    for(capi::Handles::Iterator i(*data.cached_handles()); i.more(); i.advance()) {
+    for(Allocator<capi::Handle>::Iterator i(data.handles()->allocator()); i.more(); i.advance()) {
       saw_object(i->object());
     }
   }
@@ -76,5 +57,13 @@ namespace rubinius {
     scan_object(obj);
 
     return obj;
+  }
+
+  size_t ObjectWalker::stack_size() {
+    return stack_.size();
+  }
+
+  Object** ObjectWalker::stack_buf() {
+    return stack_.data();
   }
 }

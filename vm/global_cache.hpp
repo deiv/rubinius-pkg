@@ -1,10 +1,12 @@
 #ifndef RBX_VM_GLOBAL_CACHE_HPP
 #define RBX_VM_GLOBAL_CACHE_HPP
 
-#include "vm/oop.hpp"
-#include "vm/object_utils.hpp"
+#include "oop.hpp"
+#include "object_utils.hpp"
+#include "builtin/compiledcode.hpp"
+#include "builtin/symbol.hpp"
 
-#include "builtin/compiledmethod.hpp"
+#include "missing/unordered_set.hpp"
 
 namespace rubinius {
   #define CPU_CACHE_SIZE 0x1000
@@ -14,96 +16,109 @@ namespace rubinius {
   struct LookupData;
   class Dispatch;
 
+  typedef std_unordered_set<native_int> SeenMethodSet;
+
   class GlobalCache : public Lockable {
   public:
-    struct cache_entry {
+    struct CacheEntry {
       Module* klass;
-      Symbol* name;
       Module* module;
       Executable* method;
-      bool is_public;
-      bool method_missing;
+      Symbol* visibility;
+
+      void clear() {
+        klass = NULL;
+        module = NULL;
+        method = NULL;
+        visibility = NULL;
+      }
     };
 
-    struct cache_entry entries[CPU_CACHE_SIZE];
+    Symbol *entry_names[CPU_CACHE_SIZE];
+    CacheEntry entries[CPU_CACHE_SIZE];
+    SeenMethodSet seen_methods;
+    utilities::thread::SpinLock lock_;
 
   public:
 
     static bool resolve(STATE, Symbol* name, Dispatch& msg, LookupData& lookup);
+    bool resolve_i(STATE, Symbol* name, Dispatch& msg, LookupData& lookup);
 
     GlobalCache() {
+      reset();
+    }
+
+    void reset() {
+      lock_.init();
       clear();
     }
 
-    /** @todo This does NOT handle null? --rue */
-    struct cache_entry* lookup(STATE, Module* cls, Symbol* name) {
-      struct cache_entry* entry;
-
-      SYNC(state);
-      entry = entries + CPU_CACHE_HASH(cls, name);
-      if(entry->name == name && entry->klass == cls) {
-        return entry;
-      }
-
-      return NULL;
-    }
-
     void clear(STATE, Symbol* name) {
-      SYNC(state);
+      utilities::thread::SpinLock::LockGuard guard(lock_);
       for(size_t i = 0; i < CPU_CACHE_SIZE; i++) {
-        if(entries[i].name == name) {
-          entries[i].klass = NULL;
-          entries[i].name = NULL;
-          entries[i].module = NULL;
-          entries[i].method = NULL;
-          entries[i].method_missing = false;
+        if(entry_names[i] == name) {
+          entry_names[i] = NULL;
+          entries[i].clear();
         }
       }
     }
 
     void clear(STATE, Module* cls, Symbol* name) {
-      struct cache_entry* entry;
-      SYNC(state);
-      entry = entries + CPU_CACHE_HASH(cls, name);
-      if(entry->name == name && entry->klass == cls) {
-        entry->klass = NULL;
-        entry->name = NULL;
-        entry->module = NULL;
-        entry->method = NULL;
-        entry->method_missing = false;
+      utilities::thread::SpinLock::LockGuard guard(lock_);
+      size_t i = CPU_CACHE_HASH(cls, name);
+      if(entry_names[i] == name && entries[i].klass == cls) {
+        entry_names[i] = NULL;
+        entries[i].clear();
       }
     }
 
     void prune_young();
 
-    void prune_unmarked(int mark);
+    bool has_seen(STATE, Symbol* sym);
+    void add_seen(STATE, Symbol* sym);
+
+    void prune_unmarked(unsigned int mark);
 
     void retain(STATE, Module* cls, Symbol* name, Module* mod, Executable* meth,
-                bool missing, bool was_private = false) {
-      SYNC(state);
-      struct cache_entry* entry;
-
-      entry = entries + CPU_CACHE_HASH(cls, name);
-      entry->klass = cls;
-      entry->name = name;
-      entry->module = mod;
-      entry->method_missing = missing;
-
-      entry->method = meth;
-      entry->is_public = !was_private;
+                Symbol* visibility) {
+      utilities::thread::SpinLock::LockGuard guard(lock_);
+      retain_i(state, cls, name, mod, meth, visibility);
     }
 
     private:
 
+    void retain_i(STATE, Module* cls, Symbol* name, Module* mod, Executable* meth,
+                  Symbol* visibility) {
+
+      seen_methods.insert(name->index());
+
+      CacheEntry* entry;
+
+      entry = entries + CPU_CACHE_HASH(cls, name);
+      entry_names[CPU_CACHE_HASH(cls, name)] = name;
+      entry->klass = cls;
+      entry->module = mod;
+
+      entry->method = meth;
+      entry->visibility = visibility;
+    }
+
     void clear() {
       for(size_t i = 0; i < CPU_CACHE_SIZE; i++) {
-        entries[i].klass = 0;
-        entries[i].name  = 0;
-        entries[i].module = 0;
-        entries[i].method = 0;
-        entries[i].is_public = true;
-        entries[i].method_missing = false;
+        entry_names[i] = NULL;
+        entries[i].clear();
       }
+    }
+
+    // Must be called with the lock held on +this+
+    CacheEntry* lookup(STATE, Module* cls, Symbol* name) {
+      Symbol* entry_name = entry_names[CPU_CACHE_HASH(cls, name)];
+      CacheEntry* entry = entries + CPU_CACHE_HASH(cls, name);
+      if(entry_name == name && entry->klass == cls) {
+        return entry;
+      }
+
+      return NULL;
     }
 
   };

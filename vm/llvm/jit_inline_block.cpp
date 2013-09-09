@@ -1,8 +1,10 @@
 #ifdef ENABLE_LLVM
 
+#include <sys/param.h>
 #include "llvm/jit_inline_block.hpp"
 #include "llvm/stack_args.hpp"
 #include "llvm/method_info.hpp"
+#include "version.h"
 
 #include "call_frame.hpp"
 
@@ -14,22 +16,22 @@ namespace jit {
                                     JITStackArgs& stack_args)
   {
     llvm::Value* prev = info_.parent_call_frame();
-    llvm::Value* args = ConstantExpr::getNullValue(ls_->ptr_type("Arguments"));
+    llvm::Value* args = ConstantExpr::getNullValue(ctx_->ptr_type("Arguments"));
 
-    BasicBlock* entry = BasicBlock::Create(ls_->ctx(), "inline_entry", info_.function());
+    BasicBlock* entry = BasicBlock::Create(ctx_->llvm_context(), "inline_entry", info_.function());
     b().SetInsertPoint(entry);
 
     info_.set_args(args);
     info_.set_previous(prev);
     info_.set_entry(entry);
 
-    BasicBlock* body = BasicBlock::Create(ls_->ctx(), "block_body", info_.function());
+    BasicBlock* body = BasicBlock::Create(ctx_->llvm_context(), "block_body", info_.function());
     pass_one(body);
 
     BasicBlock* alloca_block = &info_.function()->getEntryBlock();
 
     Value* cfstk = new AllocaInst(obj_type,
-        cint((sizeof(CallFrame) / sizeof(Object*)) + vmm_->stack_size),
+        cint((sizeof(CallFrame) / sizeof(Object*)) + machine_code_->stack_size),
         "cfstk", alloca_block->getTerminator());
 
     call_frame = b().CreateBitCast(
@@ -43,7 +45,7 @@ namespace jit {
     info_.set_stack(stk);
 
     Value* var_mem = new AllocaInst(obj_type,
-        cint((sizeof(StackVariables) / sizeof(Object*)) + vmm_->number_of_locals),
+        cint((sizeof(StackVariables) / sizeof(Object*)) + machine_code_->number_of_locals),
         "var_mem", alloca_block->getTerminator());
 
     vars = b().CreateBitCast(
@@ -52,7 +54,7 @@ namespace jit {
 
     info_.set_variables(vars);
 
-    Value* rd = constant(runtime_data_, ls_->ptr_type("jit::RuntimeData"));
+    Value* rd = constant(runtime_data_, ctx_->ptr_type("jit::RuntimeData"));
 
     //  Setup the CallFrame
     //
@@ -61,16 +63,24 @@ namespace jit {
 
     // msg
     b().CreateStore(
-        b().CreatePointerCast(rd, ls_->Int8PtrTy),
+        b().CreatePointerCast(rd, ctx_->Int8PtrTy),
         get_field(call_frame, offset::CallFrame::dispatch_data));
 
-    // cm
+    // compiled_code
     method = b().CreateLoad(
-        b().CreateConstGEP2_32(rd, 0, offset::runtime_data_method, "method_pos"),
-        "cm");
+        b().CreateConstGEP2_32(rd, 0, offset::jit_RuntimeData::method, "method_pos"),
+        "compiled_code");
 
-    Value* cm_gep = get_field(call_frame, offset::CallFrame::cm);
-    b().CreateStore(method, cm_gep);
+    Value* code_gep = get_field(call_frame, offset::CallFrame::compiled_code);
+    b().CreateStore(method, code_gep);
+
+    // constant_scope
+    Value* constant_scope = b().CreateLoad(
+        b().CreateConstGEP2_32(info_.creator_info()->call_frame(), 0, offset::CallFrame::constant_scope, "constant_scope_pos"),
+        "constant_scope");
+
+    Value* constant_scope_gep = get_field(call_frame, offset::CallFrame::constant_scope);
+    b().CreateStore(constant_scope, constant_scope_gep);
 
     // flags
     int flags = CallFrame::cInlineFrame | CallFrame::cInlineBlock;
@@ -86,30 +96,52 @@ namespace jit {
     // scope
     b().CreateStore(vars, get_field(call_frame, offset::CallFrame::scope));
 
-    nil_stack(vmm_->stack_size, constant(Qnil, obj_type));
+    nil_stack(machine_code_->stack_size, constant(cNil, obj_type));
 
-    setup_inline_scope(self, constant(Qnil, obj_type), mod);
+    setup_inline_scope(self, constant(cNil, obj_type), mod);
 
-    if(ls_->config().version >= 19) {
+    if(!LANGUAGE_18_ENABLED) {
       // We don't support splat in an block method!
-      assert(vmm_->splat_position < 0);
+      assert(machine_code_->splat_position < 0);
 
-      // block logic has no arity checking, so we process
-      // up to the minimum of stack_args.size and vmm_->total_args;
-      size_t limit = MIN((int)stack_args.size(), (int)vmm_->total_args);
+      if(stack_args.size() == 1 && machine_code_->total_args > 1) {
+        Signature sig(ctx_, "Object");
+        sig << "State";
+        sig << "CallFrame";
+        sig << "Object";
+        sig << vars->getType();
+        sig << ctx_->Int32Ty;
 
-      for(size_t i = 0; i < limit; i++) {
-        Value* int_pos = cint(i);
+        Value* call_args[] = { info_.state(), info_.call_frame(),
+                               stack_args.at(0), vars, cint(machine_code_->total_args) };
 
-        Value* idx2[] = {
-          cint(0),
-          cint(offset::vars_tuple),
-          int_pos
-        };
+        Value* val = sig.call("rbx_destructure_inline_args", call_args, 5, "", b());
+        Value* null = Constant::getNullValue(val->getType());
+        Value* is_null = b().CreateICmpEQ(val, null);
 
-        Value* pos = b().CreateGEP(vars, idx2, idx2+3, "local_pos");
+        info_.add_return_value(null, b().GetInsertBlock());
 
-        b().CreateStore(stack_args.at(i), pos);
+        BasicBlock* cont = info_.new_block("continue");
+        b().CreateCondBr(is_null, info_.return_pad(), cont);
+        b().SetInsertPoint(cont);
+      } else {
+        // block logic has no arity checking, so we process
+        // up to the minimum of stack_args.size and machine_code_->total_args;
+        size_t limit = MIN((int)stack_args.size(), (int)machine_code_->total_args);
+
+        for(size_t i = 0; i < limit; i++) {
+          Value* int_pos = cint(i);
+
+          Value* idx2[] = {
+            cint(0),
+            cint(offset::StackVariables::locals),
+            int_pos
+          };
+
+          Value* pos = b().CreateGEP(vars, idx2, "local_pos");
+
+          b().CreateStore(stack_args.at(i), pos);
+        }
       }
     } else {
       // No argument handling, there are bytecodes in the body that

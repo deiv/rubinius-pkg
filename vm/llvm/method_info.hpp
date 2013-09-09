@@ -16,7 +16,7 @@ namespace rubinius {
   }
 
   class JITMethodInfo {
-    jit::Context& context_;
+    Context* context_;
     llvm::BasicBlock* entry_;
     llvm::Value* call_frame_;
     llvm::Value* stack_;
@@ -33,46 +33,46 @@ namespace rubinius {
     JITInlineBlock* inline_block_;
     JITInlineBlock* block_info_;
 
-    TypedRoot<CompiledMethod*> method_;
+    TypedRoot<CompiledCode*> method_;
 
     llvm::BasicBlock* return_pad_;
     llvm::PHINode* return_phi_;
 
     TypedRoot<Class*> self_class_;
     LocalMap local_info_;
-    jit::RuntimeData* runtime_data_;
 
   public:
-    VMMethod* vmm;
+    MachineCode* machine_code;
     bool is_block;
     llvm::BasicBlock* inline_return;
     llvm::Value* return_value;
     InlinePolicy* inline_policy;
     llvm::BasicBlock* fin_block;
     int called_args;
+    int hits;
     JITStackArgs* stack_args;
 
     JITMethodInfo* root;
     type::KnownType self_type;
 
   public:
-    JITMethodInfo(jit::Context& ctx, CompiledMethod* cm, VMMethod* v,
+    JITMethodInfo(Context* ctx, CompiledCode* code, MachineCode* mcode,
                   JITMethodInfo* parent = 0);
 
-    jit::Context& context() {
+    Context* context() {
       return context_;
     }
 
     llvm::Function* function() {
-      return context_.function();
+      return context_->function();
     }
 
-    void set_vm(llvm::Value* vm) {
-      context_.set_vm(vm);
+    void set_state(llvm::Value* state) {
+      context_->set_state(state);
     }
 
-    llvm::Value* vm() {
-      return context_.vm();
+    llvm::Value* state() {
+      return context_->state();
     }
 
     void set_args(llvm::Value* args) {
@@ -97,10 +97,6 @@ namespace rubinius {
 
     llvm::Value* profiling_entry() {
       return profiling_entry_;
-    }
-
-    llvm::Value* unwind_info() {
-      return context_.unwind_info();
     }
 
     void set_entry(llvm::BasicBlock* entry) {
@@ -135,7 +131,7 @@ namespace rubinius {
       return variables_;
     }
 
-    CompiledMethod* method() {
+    CompiledCode* method() {
       return method_.get();
     }
 
@@ -178,6 +174,11 @@ namespace rubinius {
       }
 
       return info->call_frame();
+    }
+
+    llvm::Value* creator_call_frame() {
+      if(!creator_info_) return llvm::Constant::getNullValue(context_->ptr_type("CallFrame"));
+      return creator_info_->call_frame();
     }
 
     bool for_inlined_method() {
@@ -232,7 +233,7 @@ namespace rubinius {
     }
 
     llvm::Value* out_args() {
-      return context_.out_args();
+      return context_->out_args();
     }
 
     bool use_full_scope() {
@@ -244,7 +245,7 @@ namespace rubinius {
     }
 
     llvm::Value* counter() {
-      return context_.counter();
+      return context_->counter();
     }
 
     Class* self_class() {
@@ -268,17 +269,10 @@ namespace rubinius {
 
     void setup_return();
 
-    llvm::AllocaInst* create_alloca(const llvm::Type* type, llvm::Value* size = 0,
+    llvm::AllocaInst* create_alloca(llvm::Type* type, llvm::Value* size = 0,
                                     const llvm::Twine& name = "");
 
     llvm::BasicBlock* new_block(const char* name);
-
-    void set_runtime_data(jit::RuntimeData* rd) {
-      runtime_data_ = rd;
-    }
-
-    jit::RuntimeData* runtime_data();
-
 
   };
 

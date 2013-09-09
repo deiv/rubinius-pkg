@@ -1,16 +1,17 @@
 #ifndef RBX_BUILTIN_THREAD_HPP
 #define RBX_BUILTIN_THREAD_HPP
 
-#include "vm/exception.hpp"
-#include "vm/type_info.hpp"
-
 #include "builtin/object.hpp"
-#include "executor.hpp"
+
+#define THREAD_STACK_SIZE 4194304
 
 namespace rubinius {
 
   class Channel;
   class Exception;
+  class LookupTable;
+  class Randomizer;
+  class Array;
 
   /**
    *  Ruby Thread implementation.
@@ -35,7 +36,24 @@ namespace rubinius {
 
     Fixnum* thread_id_; // slot
 
-    thread::SpinLock init_lock_;
+    Randomizer* randomizer_; // slot
+
+    LookupTable* locals_; // slot
+
+    Object* group_; // slot
+    Object* result_; // slot
+    Exception* exception_; // slot
+    Object* critical_; // slot
+    Object* dying_; // slot
+    Array* joins_; // slot
+    Object* killed_; // slot
+
+    utilities::thread::SpinLock init_lock_;
+
+    /// Whether this is an internal VM thread that should
+    /// not be exposed in Ruby land but does need to be a
+    /// managed thread.
+    bool system_thread_;
 
     /// The VM state for this thread and this thread alone
     VM* vm_;
@@ -47,7 +65,7 @@ namespace rubinius {
   public:
     const static object_type type = ThreadType;
 
-    static void   init(VM* state);
+    static void   init(State* state);
 
   public:
     attr_accessor(alive, Object);
@@ -62,8 +80,24 @@ namespace rubinius {
 
     attr_accessor(thread_id, Fixnum);
 
-    VM* vm() {
+    attr_accessor(randomizer, Randomizer);
+
+    attr_accessor(locals, LookupTable);
+
+    attr_accessor(group, Object);
+    attr_accessor(result, Object);
+    attr_accessor(exception, Exception);
+    attr_accessor(critical, Object);
+    attr_accessor(dying, Object);
+    attr_accessor(joins, Array);
+    attr_accessor(killed, Object);
+
+    VM* vm() const {
       return vm_;
+    }
+
+    bool system_thread() const {
+      return system_thread_;
     }
 
   public:
@@ -94,15 +128,20 @@ namespace rubinius {
      *
      *  This is the currently executing Thread.
      */
-    // Rubinius.primitive :thread_current
+    // Rubinius.primitive+ :thread_current
     static Thread* current(STATE);
 
     /**
      *  Attempt to schedule some other Thread.
      */
-    // Rubinius.primitive :thread_pass
+    // Rubinius.primitive+ :thread_pass
     static Object* pass(STATE, CallFrame* calling_environment);
 
+    /**
+     *   List all live threads.
+     */
+    // Rubinius.primitive :thread_list
+    static Array* list(STATE);
 
   public:   /* Instance primitives */
 
@@ -121,20 +160,40 @@ namespace rubinius {
     Object* fork(STATE);
 
     /**
+     *  Execute the Thread.
+     *
+     *  This leaves the thread in an attached state, so that
+     *  a pthread_join() later on will work.
+     */
+    int fork_attached(STATE);
+
+    /**
      *  Retrieve the priority set for this Thread.
      *
      *  The value is numeric, higher being more important
      *  but otherwise *potentially* platform-specific for
      *  any other connotations.
      */
-    // Rubinius.primitive :thread_priority
+    // Rubinius.primitive+ :thread_priority
     Object* priority(STATE);
 
     /**
      *  Process an exception raised for this Thread.
      */
     // Rubinius.primitive :thread_raise
-    Object* raise(STATE, Exception* exc);
+    Object* raise(STATE, GCToken gct, Exception* exc, CallFrame* calling_environment);
+
+    /**
+     *  Returns current exception
+     */
+    // Rubinius.primitive :thread_current_exception
+    Object* current_exception(STATE);
+
+    /**
+     *  Kill this Thread.
+     */
+    // Rubinius.primitive :thread_kill
+    Object* kill(STATE, GCToken gct, CallFrame* calling_environment);
 
     /**
      *  Set the priority for this Thread.
@@ -154,21 +213,66 @@ namespace rubinius {
      *  is queued to be run, although not necessarily immediately.
      */
     // Rubinius.primitive :thread_wakeup
-    Thread* wakeup(STATE);
+    Thread* wakeup(STATE, GCToken gct, CallFrame* calling_environment);
 
     // Rubinius.primitive :thread_context
     Tuple* context(STATE);
 
+    // Rubinius.primitive :thread_mri_backtrace
+    Array* mri_backtrace(STATE, GCToken gct, CallFrame* calling_environment);
+
     // Rubinius.primitive :thread_join
-    Object* join(STATE, CallFrame* calling_environment);
+    Object* join(STATE, GCToken gct, CallFrame* calling_environment);
 
     // Rubinius.primitive :thread_set_critical
-    static Object* set_critical(STATE, Object* obj);
+    static Object* set_critical(STATE, Object* obj, CallFrame* calling_environment);
 
     // Rubinius.primitive :thread_unlock_locks
-    Object* unlock_locks(STATE);
+    Object* unlock_locks(STATE, GCToken gct, CallFrame* calling_environment);
 
+    /**
+     * Retrieve a value store in the thread locals.
+     * This is done in a primitive because it also has
+     * to consider any running fibers.
+     */
+    // Rubinius.primitive+ :thread_locals_aref
+    Object* locals_aref(STATE, Symbol* key);
+
+    /**
+     * Store a value in the thread locals.
+     * This is done in a primitive because it also has
+     * to consider any running fibers.
+     */
+    // Rubinius.primitive :thread_locals_store
+    Object* locals_store(STATE, Symbol* key, Object* value);
+
+    /**
+     * Remove a value from the thread locals.
+     * This is done in a primitive because it also has
+     * to consider any running fibers.
+     */
+    // Rubinius.primitive :thread_locals_remove
+    Object* locals_remove(STATE, Symbol* key);
+
+    /**
+     * Retrieve the keys for all thread locals.
+     * This is done in a primitive because it also has
+     * to consider any running fibers.
+     */
+    // Rubinius.primitive :thread_locals_keys
+    Array* locals_keys(STATE);
+
+    /**
+     * Check whether a given key has a value store in the thread locals.
+     * This is done in a primitive because it also has
+     * to consider any running fibers.
+     */
+    // Rubinius.primitive+ :thread_locals_has_key
+    Object* locals_has_key(STATE, Symbol* key);
+
+    void init_lock();
     void cleanup();
+    void release_joins(STATE, GCToken gct, CallFrame* calling_environment);
 
     /**
      *  Create a Thread object.
@@ -181,8 +285,9 @@ namespace rubinius {
      *  @see  Thread::allocate().
      */
     static Thread* create(STATE, VM* target, Object* self, Run runner,
-                          bool main_thread = false);
+                          bool main_thread = false, bool system_thread = false);
 
+    int start_new_thread(STATE, const pthread_attr_t &attrs);
     static void* in_new_thread(void*);
 
   public:   /* TypeInfo */

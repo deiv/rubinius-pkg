@@ -3,21 +3,23 @@
 
 #include "missing/time.h"
 
+#include "vm_jit.hpp"
 #include "globals.hpp"
 #include "gc/object_mark.hpp"
 #include "gc/managed.hpp"
-#include "thread_state.hpp"
+#include "vm_thread_state.hpp"
 
 #include "util/refcount.hpp"
 #include "util/thread.hpp"
-
-#include "call_frame_list.hpp"
 
 #include "gc/variable_buffer.hpp"
 #include "gc/root_buffer.hpp"
 #include "gc/slab.hpp"
 
 #include "shared_state.hpp"
+
+#include "unwind_info.hpp"
+#include "fiber_stack.hpp"
 
 #include <vector>
 #include <setjmp.h>
@@ -54,19 +56,25 @@ namespace rubinius {
   class TypeError;
   class Assertion;
   struct CallFrame;
+  class CallSiteInformation;
   class Object;
   class Configuration;
-  struct Interrupts;
   class VMManager;
   class LookupTable;
   class SymbolTable;
   class SharedState;
   class Fiber;
+  class GarbageCollector;
+  class Park;
+  class NativeMethodEnvironment;
 
   enum MethodMissingReason {
     eNone, ePrivate, eProtected, eSuper, eVCall, eNormal
   };
 
+  enum ConstantMissingReason {
+    vFound, vPrivate, vNonExistent
+  };
 
   /**
    * Represents an execution context for running Ruby code.
@@ -78,40 +86,35 @@ namespace rubinius {
    */
 
   class VM : public ManagedThread {
+    friend class State;
+    friend class VMJIT;
+
   private:
+    UnwindInfoSet unwinds_;
+
     CallFrame* saved_call_frame_;
-    uintptr_t stack_start_;
-    uintptr_t stack_limit_;
-    int stack_size_;
-    bool run_signals_;
+    CallSiteInformation* saved_call_site_information_;
+    FiberStacks fiber_stacks_;
+    Park* park_;
+    rbxti::Env* tooling_env_;
+
+    uintptr_t root_stack_start_;
+    uintptr_t root_stack_size_;
+
+    VMJIT vm_jit_;
 
     MethodMissingReason method_missing_reason_;
-    void* young_start_;
-    void* young_end_;
-    bool thread_step_;
+    ConstantMissingReason constant_missing_reason_;
 
-    rbxti::Env* tooling_env_;
+    bool run_signals_;
     bool tooling_;
+    bool allocation_tracking_;
 
   public:
     /* Data members */
     SharedState& shared;
     TypedRoot<Channel*> waiting_channel_;
     TypedRoot<Exception*> interrupted_exception_;
-
-    bool interrupt_with_signal_;
-    InflatedHeader* waiting_header_;
-
-    void (*custom_wakeup_)(void*);
-    void* custom_wakeup_data_;
-
-    ObjectMemory* om;
-    Interrupts& interrupts;
-
-    bool check_local_interrupts;
-
-    ThreadState thread_state_;
-
     /// The Thread object for this VM state
     TypedRoot<Thread*> thread;
 
@@ -121,15 +124,29 @@ namespace rubinius {
     /// Root fiber, if any (lazily initialized)
     TypedRoot<Fiber*> root_fiber;
 
+    NativeMethodEnvironment* native_method_environment;
+    InflatedHeader* waiting_header_;
+
+    void (*custom_wakeup_)(void*);
+    void* custom_wakeup_data_;
+
+    ObjectMemory* om;
+
+    VMThreadState thread_state_;
+
     static unsigned long cStackDepthMax;
 
   public: /* Inline methods */
 
-    uint32_t thread_id() {
+    UnwindInfoSet& unwinds() {
+      return unwinds_;
+    }
+
+    uint32_t thread_id() const {
       return id_;
     }
 
-    bool run_signals_p() {
+    bool run_signals_p() const {
       return run_signals_;
     }
 
@@ -137,7 +154,7 @@ namespace rubinius {
       run_signals_ = val;
     }
 
-    ThreadState* thread_state() {
+    VMThreadState* thread_state() {
       return &thread_state_;
     }
 
@@ -149,11 +166,19 @@ namespace rubinius {
       saved_call_frame_ = frame;
     }
 
-    CallFrame* saved_call_frame() {
+    CallFrame* saved_call_frame() const {
       return saved_call_frame_;
     }
 
-    GlobalCache* global_cache() {
+    void set_call_site_information(CallSiteInformation* info) {
+      saved_call_site_information_ = info;
+    }
+
+    CallSiteInformation* saved_call_site_information() {
+      return saved_call_site_information_;
+    }
+
+    GlobalCache* global_cache() const {
       return shared.global_cache;
     }
 
@@ -161,55 +186,43 @@ namespace rubinius {
       return shared.globals;
     }
 
-    void* stack_start() {
-      return reinterpret_cast<void*>(stack_start_);
+    void* stack_start() const {
+      return reinterpret_cast<void*>(vm_jit_.stack_start_);
     }
 
-    int stack_size() {
-      return stack_size_;
+    int stack_size() const {
+      return vm_jit_.stack_size_;
     }
 
     void reset_stack_limit() {
       // @TODO assumes stack growth direction
-      stack_limit_ = (stack_start_ - stack_size_) + (4096 * 3);
+      vm_jit_.stack_limit_ = (vm_jit_.stack_start_ - vm_jit_.stack_size_) + (4096 * 10);
     }
 
     void set_stack_bounds(uintptr_t start, int length) {
-      stack_start_ = start;
-      stack_size_ = length;
+      if(start == 0) {
+        start  = root_stack_start_;
+        length = root_stack_size_;
+      }
+
+      vm_jit_.stack_start_ = start;
+      vm_jit_.stack_size_ = length;
       reset_stack_limit();
     }
 
-    void set_stack_start(void* s) {
-      set_stack_bounds(reinterpret_cast<uintptr_t>(s), stack_size_);
+    void set_root_stack(uintptr_t start, int length) {
+      root_stack_start_ = start;
+      root_stack_size_ = length;
+
+      set_stack_bounds(root_stack_start_, root_stack_size_);
     }
 
-    void set_stack_size(int s) {
-      set_stack_bounds(stack_start_, s);
-    }
-
-    void get_attention() {
-      stack_limit_ = stack_start_;
-    }
-
-    bool detect_stack_condition(void* end) {
+    bool detect_stack_condition(void* end) const {
       // @TODO assumes stack growth direction
-      return reinterpret_cast<uintptr_t>(end) < stack_limit_;
+      return reinterpret_cast<uintptr_t>(end) < vm_jit_.stack_limit_;
     }
 
-    bool check_stack(CallFrame* call_frame, void* end) {
-      // @TODO assumes stack growth direction
-      if(unlikely(reinterpret_cast<uintptr_t>(end) < stack_limit_)) {
-        raise_stack_error(call_frame);
-        return false;
-      }
-
-      return true;
-    }
-
-    bool check_interrupts(CallFrame* call_frame, void* end);
-
-    MethodMissingReason method_missing_reason() {
+    MethodMissingReason method_missing_reason() const {
       return method_missing_reason_;
     }
 
@@ -217,35 +230,65 @@ namespace rubinius {
       method_missing_reason_ = reason;
     }
 
-    bool young_object_p(Object* obj) {
-      return obj >= young_start_ && obj <= young_end_;
+    ConstantMissingReason constant_missing_reason() const {
+      return constant_missing_reason_;
     }
 
-    bool thread_step() {
-      return thread_step_;
+    void set_constant_missing_reason(ConstantMissingReason reason) {
+      constant_missing_reason_ = reason;
+    }
+
+    bool thread_step() const {
+      return vm_jit_.thread_step_;
     }
 
     void clear_thread_step() {
-      thread_step_ = false;
+      clear_check_local_interrupts();
+      vm_jit_.thread_step_ = false;
     }
 
     void set_thread_step() {
-      thread_step_ = true;
+      set_check_local_interrupts();
+      vm_jit_.thread_step_ = true;
     }
 
-    Exception* interrupted_exception() {
+    bool check_local_interrupts() const {
+      return vm_jit_.check_local_interrupts_;
+    }
+
+    void clear_check_local_interrupts() {
+      vm_jit_.check_local_interrupts_ = false;
+    }
+
+    void set_check_local_interrupts() {
+      vm_jit_.check_local_interrupts_ = true;
+    }
+
+    bool interrupt_by_kill() const {
+      return vm_jit_.interrupt_by_kill_;
+    }
+
+    void clear_interrupt_by_kill() {
+      vm_jit_.interrupt_by_kill_ = false;
+    }
+
+    void set_interrupt_by_kill() {
+      vm_jit_.interrupt_by_kill_ = true;
+    }
+
+    Exception* interrupted_exception() const {
       return interrupted_exception_.get();
     }
 
     void clear_interrupted_exception() {
-      interrupted_exception_.set(Qnil);
+      interrupted_exception_.set(cNil);
     }
 
-    rbxti::Env* tooling_env() {
+    rbxti::Env* tooling_env() const {
       return tooling_env_;
     }
 
-    bool tooling() {
+    bool tooling() const {
       return tooling_;
     }
 
@@ -257,11 +300,41 @@ namespace rubinius {
       tooling_ = false;
     }
 
+    bool allocation_tracking() const {
+      return allocation_tracking_;
+    }
+
+    void enable_allocation_tracking() {
+      allocation_tracking_ = true;
+    }
+
+    void disable_allocation_tracking() {
+      allocation_tracking_ = false;
+    }
+
+    FiberStack* allocate_fiber_stack() {
+      return fiber_stacks_.allocate();
+    }
+
+    void* fiber_trampoline() {
+      return fiber_stacks_.trampoline();
+    }
+
+    FiberData* new_fiber_data(bool root=false) {
+      return fiber_stacks_.new_data(root);
+    }
+
+    void remove_fiber_data(FiberData* data) {
+      fiber_stacks_.remove_data(data);
+    }
+
+    VariableRootBuffers& current_root_buffers();
+
   public:
     static void init_stack_size();
 
     static VM* current();
-    static void set_current(VM* vm);
+    static void set_current(VM* vm, std::string name);
 
     static void discard(STATE, VM*);
 
@@ -269,94 +342,67 @@ namespace rubinius {
 
     /* Prototypes */
     VM(uint32_t id, SharedState& shared);
-
-    void check_exception(CallFrame* call_frame);
+    ~VM();
 
     void initialize_as_root();
 
-    void bootstrap_class();
-    void bootstrap_ontology();
-    void bootstrap_symbol();
+    void bootstrap_class(STATE);
+    void bootstrap_ontology(STATE);
+    void bootstrap_symbol(STATE);
     void initialize_config();
 
-    void setup_errno(int num, const char* name, Class* sce, Module* ern);
-    void bootstrap_exceptions();
-    void initialize_fundamental_constants();
-    void initialize_builtin_classes();
-    void initialize_platform_data();
+    void setup_errno(STATE, int num, const char* name, Class* sce, Module* ern);
+    void bootstrap_exceptions(STATE);
+    void initialize_fundamental_constants(STATE);
+    void initialize_builtin_classes(STATE);
+    void initialize_platform_data(STATE);
 
     void set_current_fiber(Fiber* fib);
 
-    void raise_stack_error(CallFrame* call_frame);
-
+    Object* new_object_typed_dirty(Class* cls, size_t bytes, object_type type);
     Object* new_object_typed(Class* cls, size_t bytes, object_type type);
     Object* new_object_typed_mature(Class* cls, size_t bytes, object_type type);
-    Object* new_object_from_type(Class* cls, TypeInfo* ti);
 
     template <class T>
       T* new_object(Class *cls) {
-        return reinterpret_cast<T*>(new_object_typed(cls, sizeof(T), T::type));
-      }
-
-    template <class T>
-      T* new_struct(Class* cls, size_t bytes = 0) {
-        T* obj = reinterpret_cast<T*>(new_object_typed(cls, sizeof(T) + bytes, T::type));
-        return obj;
+        return static_cast<T*>(new_object_typed(cls, sizeof(T), T::type));
       }
 
     template <class T>
       T* new_object_mature(Class *cls) {
-        return reinterpret_cast<T*>(new_object_typed_mature(cls, sizeof(T), T::type));
+        return static_cast<T*>(new_object_typed_mature(cls, sizeof(T), T::type));
+      }
+
+    template <class T>
+      T* new_object_bytes_dirty(Class* cls, size_t& bytes) {
+        bytes = ObjectHeader::align(sizeof(T) + bytes);
+        return static_cast<T*>(new_object_typed_dirty(cls, bytes, T::type));
       }
 
     template <class T>
       T* new_object_bytes(Class* cls, size_t& bytes) {
         bytes = ObjectHeader::align(sizeof(T) + bytes);
-        T* obj = reinterpret_cast<T*>(new_object_typed(cls, bytes, T::type));
-
-        return obj;
+        return static_cast<T*>(new_object_typed(cls, bytes, T::type));
       }
 
     template <class T>
       T* new_object_variable(Class* cls, size_t fields, size_t& bytes) {
-        bytes = sizeof(T) + (fields * sizeof(Object*));
-        return reinterpret_cast<T*>(new_object_typed(cls, bytes, T::type));
+        bytes = T::fields_offset + (fields * sizeof(Object*));
+        return static_cast<T*>(new_object_typed(cls, bytes, T::type));
       }
+
+    /// Create a String in the young GC space, return NULL if not possible.
+    String* new_young_string_dirty();
 
     /// Create a Tuple in the young GC space, return NULL if not possible.
     Tuple* new_young_tuple_dirty(size_t fields);
 
-    /// Create an uninitialized Class object
-    Class* new_basic_class(Class* sup);
-
-    /// Create a Class of name +name+ as an Object subclass
-    Class* new_class(const char* name);
-
-    /// Create a Class of name +name+ as a subclass of +super_class+
-    Class* new_class(const char* name, Class* super_class);
-
-    /// Create a Class of name +name+ as a subclass of +sup+
-    /// under Module +under+
-    Class* new_class(const char* name, Class* sup, Module* under);
-
-    /// Create a Class of name +name+ under +under+
-    Class* new_class_under(const char* name, Module* under);
-
-    Module* new_module(const char* name, Module* under = NULL);
-
-    Symbol* symbol(const char* str);
-    Symbol* symbol(String* str);
-
     TypeInfo* find_type(int type);
 
-    void init_ffi();
-    void init_native_libraries();
-
-    Thread* current_thread();
-    void collect(CallFrame* call_frame);
+    static void init_ffi(STATE);
 
     /// Check the GC flags in ObjectMemory and collect if we need to.
-    void collect_maybe(CallFrame* call_frame);
+    void collect_maybe(GCToken gct, CallFrame* call_frame);
 
     void raise_from_errno(const char* reason);
     void raise_exception(Exception* exc);
@@ -365,6 +411,8 @@ namespace rubinius {
 
     void set_const(const char* name, Object* val);
     void set_const(Module* mod, const char* name, Object* val);
+
+    Object* path2class(const char* name);
 
 #ifdef ENABLE_LLVM
     llvm::Module* llvm_module();
@@ -381,31 +429,33 @@ namespace rubinius {
     void wait_on_inflated_lock(InflatedHeader* ih);
     void wait_on_custom_function(void (*func)(void*), void* data);
     void clear_waiter();
-    bool wakeup(STATE);
-    bool waiting_p();
+    bool wakeup(STATE, GCToken gct, CallFrame* call_frame);
+
+    void set_parked();
+    void set_unparked();
 
     void set_sleeping();
     void clear_sleeping();
 
     void interrupt_with_signal();
-    bool should_interrupt_with_signal() {
-      return interrupt_with_signal_;
+    bool should_interrupt_with_signal() const {
+      return vm_jit_.interrupt_with_signal_;
     }
 
     void register_raise(STATE, Exception* exc);
+    void register_kill(STATE);
 
-    bool process_async(CallFrame* call_frame);
-
-    bool check_async(CallFrame* call_frame) {
-      if(check_local_interrupts) {
-        return process_async(call_frame);
-      }
-      return true;
-    }
-
-    // For thread-local roots
-    static std::list<Roots*>* roots;
+    void gc_scan(GarbageCollector* gc);
+    void gc_fiber_clear_mark();
+    void gc_fiber_scan(GarbageCollector* gc, bool only_marked = true);
+    void gc_verify(GarbageCollector* gc);
   };
+
+}
+
+#include "state.hpp"
+
+namespace rubinius {
 
 
   /**
@@ -415,57 +465,54 @@ namespace rubinius {
    */
 
   class StopTheWorld {
-    VM* vm_;
+    State* state_;
 
   public:
-    StopTheWorld(STATE) :
-      vm_(state)
+    StopTheWorld(STATE, GCToken gct, CallFrame* cf) :
+      state_(state)
     {
-      vm_->shared.stop_the_world(vm_);
+      while(!state->stop_the_world()) {
+        state->checkpoint(gct, cf);
+      }
     }
 
     ~StopTheWorld() {
-      vm_->shared.restart_world(vm_);
+      state_->restart_world();
     }
   };
 
   class NativeMethodEnvironment;
 
   class GCIndependent {
-    VM* vm_;
+    State* state_;
 
   public:
     GCIndependent(STATE, CallFrame* call_frame)
-      : vm_(state)
+      : state_(state)
     {
-      vm_->set_call_frame(call_frame);
-      vm_->shared.gc_independent(vm_);
-    }
-
-    GCIndependent(STATE)
-      : vm_(state)
-    {
-      vm_->shared.gc_independent(vm_);
+      GCTokenImpl gct;
+      state_->gc_independent(gct, call_frame);
     }
 
     GCIndependent(NativeMethodEnvironment* env);
 
     ~GCIndependent() {
-      vm_->shared.gc_dependent(vm_);
+      GCTokenImpl gct;
+      state_->gc_dependent(gct, state_->vm()->saved_call_frame());
     }
   };
 
   template <class T>
-  class GCIndependentLockGuard : public thread::LockGuardTemplate<T> {
-    VM* vm_;
+  class GCIndependentLockGuard : public utilities::thread::LockGuardTemplate<T> {
+    State* state_;
   public:
-    GCIndependentLockGuard(STATE, T& in_lock)
-      : thread::LockGuardTemplate<T>(in_lock, false)
-      , vm_(state)
+    GCIndependentLockGuard(STATE, GCToken gct, CallFrame* call_frame, T& in_lock)
+      : utilities::thread::LockGuardTemplate<T>(in_lock, false)
+      , state_(state)
     {
-      vm_->shared.gc_independent(vm_);
+      state_->shared().gc_independent(state_, call_frame);
       this->lock();
-      vm_->shared.gc_dependent(vm_);
+      state->shared().gc_dependent(state_, call_frame);
     }
 
     ~GCIndependentLockGuard() {
@@ -473,7 +520,7 @@ namespace rubinius {
     }
   };
 
-   typedef GCIndependentLockGuard<thread::Mutex> GCLockGuard;
+   typedef GCIndependentLockGuard<utilities::thread::Mutex> GCLockGuard;
 };
 
 #endif

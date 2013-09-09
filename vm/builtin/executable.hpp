@@ -1,28 +1,30 @@
 #ifndef RBX_BUILTIN_EXECUTABLE_HPP
 #define RBX_BUILTIN_EXECUTABLE_HPP
 
-#include <assert.h>
-
 #include "builtin/object.hpp"
-#include "type_info.hpp"
 #include "executor.hpp"
 #include "gc/code_resource.hpp"
 
-#include <list>
+#include <vector>
 
 namespace rubinius {
   class Arguments;
 
-  class VMMethod;
-  class CompiledMethod;
+  class MachineCode;
+  class CompiledCode;
+  class ObjectMemory;
 
   class Inliners : public CodeResource {
-    std::list<CompiledMethod*> inliners_;
+    std::vector<CompiledCode*> inliners_;
 
   public:
-    std::list<CompiledMethod*>& inliners() {
+    Inliners(ObjectMemory* om);
+
+    std::vector<CompiledCode*>& inliners() {
       return inliners_;
     }
+
+    void cleanup(State* state, CodeManager* cm);
   };
 
   class Executable : public Object {
@@ -38,8 +40,9 @@ namespace rubinius {
     executor execute;
 
   protected:
-    int prim_index_;
     Inliners* inliners_;
+    int prim_index_;
+    bool custom_call_site_;
 
   public:
     /* accessors */
@@ -51,8 +54,12 @@ namespace rubinius {
       execute = exc;
     }
 
-    int prim_index() {
+    int prim_index() const {
       return prim_index_;
+    }
+
+    bool custom_call_site_p() const {
+      return custom_call_site_;
     }
 
     /* interface */
@@ -66,9 +73,15 @@ namespace rubinius {
     // Rubinius.primitive :executable_invoke
     Object* invoke(STATE, Symbol* name, Module* mod, Object* recv, Array* args, Object* block, CallFrame* calling_environment);
 
+    // Rubinius.primitive :executable_set_custom_call_site
+    Object* set_custom_call_site(STATE) {
+      custom_call_site_ = true;
+      return cNil;
+    }
+
     bool resolve_primitive(STATE);
 
-    void add_inliner(ObjectMemory* om, CompiledMethod* cm);
+    void add_inliner(ObjectMemory* om, CompiledCode* code);
     void clear_inliners(STATE);
 
     class Info : public TypeInfo {
@@ -76,10 +89,8 @@ namespace rubinius {
       BASIC_TYPEINFO(TypeInfo)
 
       virtual void mark(Object* obj, ObjectMark& mark);
-      virtual void visit(Object* obj, ObjectVisitor& visit);
 
       void mark_inliners(Object* obj, ObjectMark& mark);
-      void visit_inliners(Object* obj, ObjectVisitor& visit);
     };
 
     friend class Info;

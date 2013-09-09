@@ -18,8 +18,8 @@ namespace rubinius {
         size_ = size;
       }
 
-      void set_stream(VMMethod* vmm) {
-        set_stream(vmm->opcodes, vmm->total);
+      void set_stream(MachineCode* mcode) {
+        set_stream(mcode->opcodes, mcode->total);
       }
 
       void visit(opcode code, opcode arg1, opcode arg2) { }
@@ -33,7 +33,7 @@ namespace rubinius {
 #define HANDLE_INST2(code, name) \
       void visit_ ## name(opcode arg1, opcode arg2) { SPECIFIC->visit(code, arg1, arg2); }
 
-#include "vm/gen/instruction_visitors.hpp"
+#include "gen/instruction_visitors.hpp"
 
 #undef HANDLE_INST0
 #undef HANDLE_INST1
@@ -64,7 +64,7 @@ namespace rubinius {
                    if(SPECIFIC->before(stream_[ip], stream_[ip + 1], stream_[ip + 2])) { \
                      SPECIFIC->visit_ ## name(stream_[ip + 1], stream_[ip + 2]); } return next_ip_;
 
-#include "vm/gen/instruction_visitors.hpp"
+#include "gen/instruction_visitors.hpp"
 
 #undef HANDLE_INST0
 #undef HANDLE_INST1
@@ -96,7 +96,7 @@ namespace rubinius {
 #define HANDLE_INST1(code, name) case code: return 2;
 #define HANDLE_INST2(code, name) case code: return 3;
 
-#include "vm/gen/instruction_visitors.hpp"
+#include "gen/instruction_visitors.hpp"
 
 #undef HANDLE_INST0
 #undef HANDLE_INST1
@@ -122,8 +122,8 @@ namespace rubinius {
         }
       }
 
-      void drive(VMMethod* vmm) {
-        drive(vmm->opcodes, vmm->total);
+      void drive(MachineCode* mcode) {
+        drive(mcode->opcodes, mcode->total);
       }
     };
 }

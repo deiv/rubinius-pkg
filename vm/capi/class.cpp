@@ -1,11 +1,16 @@
 #include "builtin/class.hpp"
 #include "builtin/module.hpp"
+#include "builtin/string.hpp"
 #include "builtin/symbol.hpp"
 
 #include "helpers.hpp"
+#include "exception_point.hpp"
+#include "on_stack.hpp"
 
 #include "capi/capi.hpp"
 #include "capi/18/include/ruby.h"
+
+#include <string.h>
 
 using namespace rubinius;
 using namespace rubinius::capi;
@@ -24,14 +29,14 @@ extern "C" {
   // MUST return the immediate object in the class field, not the real class!
   VALUE CLASS_OF(VALUE object_handle) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
-    Class* class_object = env->get_object(object_handle)->lookup_begin(env->state());
+    Class* class_object = env->get_object(object_handle)->direct_class(env->state());
     return env->get_handle(class_object);
   }
 
   VALUE rb_class_name(VALUE class_handle) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
     Class* class_object = c_as<Class>(env->get_object(class_handle));
-    return env->get_handle(class_object->name()->to_str(env->state()));
+    return env->get_handle(class_object->get_name(env->state()));
   }
 
   VALUE rb_class_inherited(VALUE super_handle, VALUE class_handle)
@@ -56,39 +61,38 @@ extern "C" {
     return env->get_handle(klass);
   }
 
-  VALUE rb_path2class(const char* name) {
+  VALUE rb_path2class(const char* path) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
-    Module* mod = env->state()->shared.globals.object.get();
+    State* state = env->state();
+    Module* mod = G(object);
 
-    char* base = strdup(name);
-    char* str = base;
-    char* pos = strstr(str, "::");
+    char* pathd = strdup(path);
+    char* ptr = pathd;
+    char* context;
+    char* name;
 
-    while(pos) {
-      pos[0] = 0;
+    ConstantMissingReason reason = vNonExistent;
 
-      mod = try_as<Module>(mod->get_const(env->state(), str));
-      if(!mod) {
-        free(base);
-        capi_raise_type_error(Module::type, mod);
-        return Qnil;
+    while((name = strtok_r(ptr, ":", &context))) {
+      ptr = NULL;
+
+      Object* val = mod->get_const(env->state(), env->state()->symbol(name), G(sym_private), &reason);
+
+      if(reason != vFound) {
+        free(pathd);
+        rb_raise(rb_eArgError, "undefined class or module %s", path);
       }
 
-      str = pos+2;
-      pos = strstr(str, "::");
+      if(!(mod = try_as<Module>(val))) {
+        free(pathd);
+        capi_raise_type_error(Module::type, val);
+      }
     }
 
-    Object* val = mod->get_const(env->state(), str);
+    free(pathd);
 
-    free(base);
-
-    // Make sure val is a module.
-    if(!kind_of<Module>(val)) {
-      capi_raise_type_error(Module::type, val);
-    }
-
-    return env->get_handle(val);
+    return env->get_handle(mod);
   }
 
   VALUE rb_cv_get(VALUE module_handle, const char* name) {
@@ -102,13 +106,13 @@ extern "C" {
   VALUE rb_cvar_defined(VALUE module_handle, ID name) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
-    if (((Symbol *)name)->is_cvar_p(env->state())->true_p()) {
-       return rb_funcall(module_handle, rb_intern("class_variable_defined?"),
-                         1, name);
-     } else {
+    if(((Symbol *)name)->is_cvar_p(env->state())->true_p()) {
+      return rb_funcall(module_handle, rb_intern("class_variable_defined?"),
+                        1, name);
+    } else {
       return rb_funcall(module_handle, rb_intern("instance_variable_defined?"),
                         1, name);
-     }
+    }
   }
 
   VALUE rb_cvar_get(VALUE module_handle, ID name) {
@@ -119,7 +123,7 @@ extern "C" {
                       env->get_handle(prefixed_by(env->state(), "@@", 2, name)));
   }
 
-  VALUE rb_cvar_set(VALUE module_handle, ID name, VALUE value, int unused) {
+  VALUE rb_cvar_set_internal(VALUE module_handle, ID name, VALUE value) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
     return rb_funcall(module_handle, rb_intern("class_variable_set"),
@@ -139,6 +143,8 @@ extern "C" {
 
   /** @note   Shares code with rb_define_module_under, change there too. --rue */
   VALUE rb_define_class_under(VALUE outer, const char* name, VALUE super) {
+
+
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
     Module* module = c_as<Module>(env->get_object(outer));
@@ -146,8 +152,30 @@ extern "C" {
     Symbol* constant = env->state()->symbol(name);
 
     bool created = false;
-    VALUE klass = env->get_handle(rubinius::Helpers::open_class(env->state(),
-        env->current_call_frame(), module, superclass, constant, &created));
+
+    LEAVE_CAPI(env->state());
+    Class* opened_class = NULL;
+
+    // Run in a block so OnStack is properly deallocated before we
+    // might do a longjmp because of an exception.
+    {
+      GCTokenImpl gct;
+      OnStack<3> os(env->state(), module, superclass, constant);
+
+      opened_class = rubinius::Helpers::open_class(env->state(), gct,
+          env->current_call_frame(), module, superclass, constant, &created);
+    }
+
+    // The call above could have triggered an Autoload resolve, which may
+    // raise an exception, so we have to check the value returned.
+    if(!opened_class) env->current_ep()->return_to(env);
+
+    // We need to grab the handle before entering back into C-API
+    // code. The problem otherwise can be that the GC runs and
+    // the opened_class is GC'ed.
+
+    VALUE klass = env->get_handle(opened_class);
+    ENTER_CAPI(env->state());
 
     if(super) rb_funcall(super, rb_intern("inherited"), 1, klass);
 

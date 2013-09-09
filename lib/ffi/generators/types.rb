@@ -1,3 +1,4 @@
+module Rubinius
 module FFI
   module Generators
     class Types
@@ -49,6 +50,7 @@ module FFI
       end
 
       def source(io)
+        io.puts "#include <stdint.h>"
         io.puts "#include <sys/types.h>"
         unless @platform.windows?
           io.puts "#include <sys/socket.h>"
@@ -61,7 +63,7 @@ module FFI
       end
 
       def process(target)
-        "cpp #{@platform.defines} #{target}"
+        "#{@platform.compiler} -E #{@platform.defines} #{target}"
       end
 
       def process_failed
@@ -138,4 +140,5 @@ module FFI
   end
 
   TypesGenerator = Generators::Types
+end
 end

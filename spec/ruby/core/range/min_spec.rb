@@ -13,14 +13,40 @@ ruby_version_is "1.8.7" do
       end
     end
 
+    ruby_version_is ""..."1.9" do
+      it "raises TypeError when called on a Float range" do
+        lambda { (303.20..908.1111).min }.should raise_error(TypeError)
+      end
+    end
+
     it "returns nil when the start point is greater than the endpoint" do
       (100..10).min.should be_nil
       ('z'..'l').min.should be_nil
     end
 
+    it "returns nil when the endpoint equals the start point and the range is exclusive" do
+      (7...7).min.should be_nil
+    end
+
+    it "returns the start point when the endpoint equals the start point and the range is inclusive" do
+      (7..7).min.should equal(7)
+    end
+
     ruby_version_is "1.9" do
       it "returns nil when the start point is greater than the endpoint in a Float range" do
         (3003.20..908.1111).min.should be_nil
+      end
+
+      it "returns start point when the range is Time..Time(included end point)" do
+        time_start = Time.now
+        time_end = Time.now + 1.0
+        (time_start..time_end).min.should equal(time_start)
+      end
+
+      it "returns start point when the range is Time...Time(excluded end point)" do
+        time_start = Time.now
+        time_end = Time.now + 1.0
+        (time_start...time_end).min.should equal(time_start)
       end
     end
   end
@@ -50,6 +76,12 @@ ruby_version_is "1.8.7" do
 
     it "returns the element the block determines to be the minimum" do
       (1..3).min {|a,b| -3 }.should == 3
+    end
+
+    it "returns nil when the start point is greater than the endpoint" do
+      (100..10).min {|x,y| x <=> y}.should be_nil
+      ('z'..'l').min {|x,y| x <=> y}.should be_nil
+      (7...7).min {|x,y| x <=> y}.should be_nil
     end
   end
 end

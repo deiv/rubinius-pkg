@@ -2,6 +2,10 @@
 require File.expand_path('../../../spec_helper', __FILE__)
 require File.expand_path('../fixtures/classes.rb', __FILE__)
 
+ruby_version_is "1.9" do
+  require File.expand_path("../versions/gsub_1.9", __FILE__)
+end
+
 describe "String#gsub with pattern and replacement" do
 
   before :each do
@@ -156,6 +160,10 @@ describe "String#gsub with pattern and replacement" do
     "hello".gsub(/./, 'hah\\').should == 'hah\\' * 5
   end
 
+  ruby_version_is "1.9" do
+    it_behaves_like :string_gsub_named_capture, :gsub
+  end
+
   it "taints the result if the original string or replacement is tainted" do
     hello = "hello"
     hello_t = "hello"
@@ -177,6 +185,12 @@ describe "String#gsub with pattern and replacement" do
   end
 
   ruby_version_is "1.9" do
+    it "handles pattern collapse without $KCODE" do
+      str = "こにちわ"
+      reg = %r!!
+      str.gsub(reg, ".").should == ".こ.に.ち.わ."
+    end
+
     it "untrusts the result if the original string or replacement is untrusted" do
       hello = "hello"
       hello_t = "hello"
@@ -225,10 +239,10 @@ describe "String#gsub with pattern and replacement" do
   end
 
   it "returns subclass instances when called on a subclass" do
-    StringSpecs::MyString.new("").gsub(//, "").should be_kind_of(StringSpecs::MyString)
-    StringSpecs::MyString.new("").gsub(/foo/, "").should be_kind_of(StringSpecs::MyString)
-    StringSpecs::MyString.new("foo").gsub(/foo/, "").should be_kind_of(StringSpecs::MyString)
-    StringSpecs::MyString.new("foo").gsub("foo", "").should be_kind_of(StringSpecs::MyString)
+    StringSpecs::MyString.new("").gsub(//, "").should be_an_instance_of(StringSpecs::MyString)
+    StringSpecs::MyString.new("").gsub(/foo/, "").should be_an_instance_of(StringSpecs::MyString)
+    StringSpecs::MyString.new("foo").gsub(/foo/, "").should be_an_instance_of(StringSpecs::MyString)
+    StringSpecs::MyString.new("foo").gsub("foo", "").should be_an_instance_of(StringSpecs::MyString)
   end
 
   # Note: $~ cannot be tested because mspec messes with it
@@ -291,12 +305,10 @@ ruby_version_is "1.9" do
       "food!".gsub(/./, hsh).should == "[]00[]!"
     end
 
-    it "raises a TypeError if the hash has a default proc" do
+    it "uses the hash's value set from default_proc for missing keys" do
       hsh = new_hash
       hsh.default_proc = lambda { |k,v| 'lamb' }
-      lambda do
-        "food!".gsub(/./, hsh)
-      end.should_not raise_error(TypeError)
+      "food!".gsub(/./, hsh).should == "lamblamblamblamblamb"
     end
 
     it "sets $~ to MatchData of last match and nil when there's none for access from outside" do
@@ -337,6 +349,95 @@ ruby_version_is "1.9" do
     it "taints the result if a hash value is tainted" do
       str = "Ghana"
       str.gsub(/a$/, 'a' => 'di'.taint).tainted?.should be_true
+    end
+
+  end
+
+  describe "String#gsub! with pattern and Hash" do
+
+    it "returns self with all occurrences of pattern replaced with the value of the corresponding hash key" do
+      "hello".gsub!(/./, 'l' => 'L').should == "LL"
+      "hello!".gsub!(/(.)(.)/, 'he' => 'she ', 'll' => 'said').should == 'she said'
+      "hello".gsub!('l', 'l' => 'el').should == 'heelelo'
+    end
+
+    it "ignores keys that don't correspond to matches" do
+      "hello".gsub!(/./, 'z' => 'L', 'h' => 'b', 'o' => 'ow').should == "bow"
+    end
+
+    it "replaces self with an empty string if the pattern matches but the hash specifies no replacements" do
+      "hello".gsub!(/./, 'z' => 'L').should == ""
+    end
+
+    it "ignores non-String keys" do
+      "hello".gsub!(/(ll)/, 'll' => 'r', :ll => 'z').should == "hero"
+    end
+
+    it "uses a key's value as many times as needed" do
+      "food".gsub!(/o/, 'o' => '0').should == "f00d"
+    end
+
+    it "uses the hash's default value for missing keys" do
+      hsh = new_hash
+      hsh.default='?'
+      hsh['o'] = '0'
+      "food".gsub!(/./, hsh).should == "?00?"
+    end
+
+    it "coerces the hash values with #to_s" do
+      hsh = new_hash
+      hsh.default=[]
+      hsh['o'] = 0
+      obj = mock('!')
+      obj.should_receive(:to_s).and_return('!')
+      hsh['!'] = obj
+      "food!".gsub!(/./, hsh).should == "[]00[]!"
+    end
+
+    it "uses the hash's value set from default_proc for missing keys" do
+      hsh = new_hash
+      hsh.default_proc = lambda { |k,v| 'lamb' }
+      "food!".gsub!(/./, hsh).should == "lamblamblamblamblamb"
+    end
+
+    it "sets $~ to MatchData of last match and nil when there's none for access from outside" do
+      'hello.'.gsub!('l', 'l' => 'L')
+      $~.begin(0).should == 3
+      $~[0].should == 'l'
+
+      'hello.'.gsub!('not', 'ot' => 'to')
+      $~.should == nil
+
+      'hello.'.gsub!(/.(.)/, 'o' => ' hole')
+      $~[0].should == 'o.'
+
+      'hello.'.gsub!(/not/, 'z' => 'glark')
+      $~.should == nil
+    end
+
+    it "doesn't interpolate special sequences like \\1 for the block's return value" do
+      repl = '\& \0 \1 \` \\\' \+ \\\\ foo'
+      "hello".gsub!(/(.+)/, 'hello' => repl ).should == repl
+    end
+
+    it "keeps untrusted state" do
+      str = "Ghana".untrust
+      str.gsub!(/[Aa]na/, 'ana' => '').untrusted?.should be_true
+    end
+
+    it "untrusts self if a hash value is untrusted" do
+      str = "Ghana"
+      str.gsub!(/a$/, 'a' => 'di'.untrust).untrusted?.should be_true
+    end
+
+    it "keeps tainted state" do
+      str = "Ghana".taint
+      str.gsub!(/[Aa]na/, 'ana' => '').tainted?.should be_true
+    end
+
+    it "taints self if a hash value is tainted" do
+      str = "Ghana"
+      str.gsub!(/a$/, 'a' => 'di'.taint).tainted?.should be_true
     end
 
   end
@@ -439,6 +540,36 @@ describe "String#gsub with pattern and block" do
       hello.gsub(//) { empty_t }.untrusted?.should == true
 
       hello.gsub(//.untrust) { "foo" }.untrusted?.should == false
+    end
+  end
+
+  ruby_version_is "1.9" do
+    it "uses the compatible encoding if they are compatible" do
+      s  = "hello"
+      s2 = "#{195.chr}#{192.chr}#{195.chr}"
+
+      s.gsub(/l/) { |bar| 195.chr }.encoding.should == Encoding::ASCII_8BIT
+      s2.gsub("#{192.chr}") { |bar| "hello" }.encoding.should == Encoding::ASCII_8BIT
+    end
+
+    it "raises an Encoding::CompatibilityError if the encodings are not compatible" do
+      s = "hllëllo"
+      s2 = "hellö"
+
+      lambda { s.gsub(/l/) { |bar| "Русский".force_encoding("iso-8859-5") } }.should raise_error(Encoding::CompatibilityError)
+      lambda { s2.gsub(/l/) { |bar| "Русский".force_encoding("iso-8859-5") } }.should raise_error(Encoding::CompatibilityError)
+    end
+
+    it "replaces the incompatible part properly even if the encodings are not compatible" do
+      s = "hllëllo"
+
+      s.gsub(/ë/) { |bar| "Русский".force_encoding("iso-8859-5") }.encoding.should == Encoding::ISO_8859_5
+    end
+  end
+
+  ruby_version_is "1.9" do
+    it "raises an ArgumentError if encoding is not valid" do
+      lambda { "a\x92b".gsub(/[^\x00-\x7f]/u, '') }.should raise_error(ArgumentError)
     end
   end
 end
@@ -570,6 +701,36 @@ describe "String#gsub! with pattern and block" do
       lambda { s.gsub!(/ROAR/)    { "x" } }.should raise_error(RuntimeError)
       lambda { s.gsub!(/e/)       { "e" } }.should raise_error(RuntimeError)
       lambda { s.gsub!(/[aeiou]/) { '*' } }.should raise_error(RuntimeError)
+    end
+  end
+
+  ruby_version_is "1.9" do
+    it "uses the compatible encoding if they are compatible" do
+      s  = "hello"
+      s2 = "#{195.chr}#{192.chr}#{195.chr}"
+
+      s.gsub!(/l/) { |bar| 195.chr }.encoding.should == Encoding::ASCII_8BIT
+      s2.gsub!("#{192.chr}") { |bar| "hello" }.encoding.should == Encoding::ASCII_8BIT
+    end
+
+    it "raises an Encoding::CompatibilityError if the encodings are not compatible" do
+      s = "hllëllo"
+      s2 = "hellö"
+
+      lambda { s.gsub!(/l/) { |bar| "Русский".force_encoding("iso-8859-5") } }.should raise_error(Encoding::CompatibilityError)
+      lambda { s2.gsub!(/l/) { |bar| "Русский".force_encoding("iso-8859-5") } }.should raise_error(Encoding::CompatibilityError)
+    end
+
+    it "replaces the incompatible part properly even if the encodings are not compatible" do
+      s = "hllëllo"
+
+      s.gsub!(/ë/) { |bar| "Русский".force_encoding("iso-8859-5") }.encoding.should == Encoding::ISO_8859_5
+    end
+  end
+
+  ruby_version_is "1.9" do
+    it "raises an ArgumentError if encoding is not valid" do
+      lambda { "a\x92b".gsub!(/[^\x00-\x7f]/u, '') }.should raise_error(ArgumentError)
     end
   end
 end

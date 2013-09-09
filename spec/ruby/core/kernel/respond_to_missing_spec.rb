@@ -7,6 +7,18 @@ ruby_version_is "1.9" do
       @a = KernelSpecs::A.new
     end
 
+    ruby_version_is "1.9"..."2.0" do
+      it "is a public method" do
+        Kernel.should have_public_instance_method(:respond_to_missing?, false)
+      end
+    end
+
+    ruby_version_is "2.0" do
+      it "is a private method" do
+        Kernel.should have_private_instance_method(:respond_to_missing?, false)
+      end
+    end
+
     it "is not called when #respond_to? would return true" do
       obj = mock('object')
       obj.stub!(:glark)
@@ -50,6 +62,12 @@ ruby_version_is "1.9" do
       obj.respond_to?(:undefined_method).should be_false
     end
 
+    it "causes #respond_to? to return false if called and returning nil" do
+      obj = mock('object')
+      obj.should_receive(:respond_to_missing?).with(:undefined_method, false).and_return(nil)
+      obj.respond_to?(:undefined_method).should be_false
+    end
+
     it "isn't called when obj responds to the given public method" do
       @a.should_not_receive(:respond_to_missing?)
       @a.respond_to?(:pub_method).should be_true
@@ -60,9 +78,18 @@ ruby_version_is "1.9" do
       @a.respond_to?(:pub_method, true).should be_true
     end
 
-    it "isn't called when obj responds to the given protected method, include_private = false" do
-      @a.should_not_receive(:respond_to_missing?)
-      @a.respond_to?(:protected_method, false).should be_true
+    ruby_version_is ""..."2.0" do
+      it "isn't called when obj responds to the given protected method, include_private = false" do
+        @a.should_not_receive(:respond_to_missing?)
+        @a.respond_to?(:protected_method, false).should be_true
+      end
+    end
+
+    ruby_version_is "2.0" do
+      it "is called when obj responds to the given protected method, include_private = false" do
+        @a.should_receive(:respond_to_missing?)
+        @a.respond_to?(:protected_method, false).should be_false
+      end
     end
 
     it "isn't called when obj responds to the given protected method, include_private = true" do

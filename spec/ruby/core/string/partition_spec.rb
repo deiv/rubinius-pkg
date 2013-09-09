@@ -16,6 +16,12 @@ ruby_version_is '1.8.7' do
       "hello!".partition(/l./).should == ["he", "ll", "o!"]
     end
 
+    it "sets global vars if regexp used" do
+      "hello!".partition(/(.l)(.o)/)
+      $1.should == "el"
+      $2.should == "lo"
+    end
+
     ruby_bug "redmine #1510", '1.9.1' do
       it "converts its argument using :to_str" do
         find = mock('l')
@@ -24,7 +30,7 @@ ruby_version_is '1.8.7' do
       end
     end
 
-    it "raises error if not convertible to string" do
+    it "raises an error if not convertible to string" do
       lambda{ "hello".partition(5) }.should raise_error(TypeError)
       lambda{ "hello".partition(nil) }.should raise_error(TypeError)
     end

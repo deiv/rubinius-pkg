@@ -14,6 +14,12 @@ describe "Module#const_set" do
     ConstantSpecs.const_set(:CS_CONST403, :const403).should == :const403
   end
 
+  it "sets the name of an anonymous module" do
+    m = Module.new
+    ConstantSpecs.const_set(:CS_CONST1000, m)
+    m.name.should == "ConstantSpecs::CS_CONST1000"
+  end
+
   it "raises a NameError if the name does not start with a capital letter" do
     lambda { ConstantSpecs.const_set "name", 1 }.should raise_error(NameError)
   end
@@ -44,5 +50,26 @@ describe "Module#const_set" do
 
     name.should_receive(:to_str).and_return(123)
     lambda { ConstantSpecs.const_set name, 1 }.should raise_error(TypeError)
+  end
+
+  describe "on a frozen module" do
+    before(:each) do
+      @frozen = Module.new.freeze
+      @name = :Foo
+    end
+
+    ruby_version_is "" ... "1.9" do
+      it "raises a TypeError before setting the name" do
+        lambda { @frozen.const_set @name, nil }.should raise_error(TypeError)
+        @frozen.should_not have_constant(@name)
+      end
+    end
+
+    ruby_version_is "1.9" do
+      it "raises a RuntimeError before setting the name" do
+        lambda { @frozen.const_set @name, nil }.should raise_error(RuntimeError)
+        @frozen.should_not have_constant(@name)
+      end
+    end
   end
 end

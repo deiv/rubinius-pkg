@@ -1,70 +1,79 @@
 #ifndef RBX_BUILTIN_TIME_HPP
 #define RBX_BUILTIN_TIME_HPP
 
+#include "util/time64.h"
+
 #include "builtin/object.hpp"
-#include "type_info.hpp"
-
-#include "builtin/tuple.hpp"
 #include "builtin/integer.hpp"
-
-#if defined(__linux__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || defined(__APPLE__)
-# define HAVE_STRUCT_TM_TM_GMTOFF
-# define HAVE_STRUCT_TM_TM_ZONE
-#endif
 
 namespace rubinius {
   class Array;
   class String;
-
-  typedef time_t int64_t;
+  class Tuple;
 
   class Time : public Object {
   public:
     const static object_type type = TimeType;
 
   private:
-    time_t seconds_;
-    time_t microseconds_;
+    time64_t seconds_;
+    long nanoseconds_;
 
     Array* decomposed_; // slot
     Object* is_gmt_;  // slot
+    Object* offset_; // slot
+    Object* zone_; // slot
 
   public:
     /* accessors */
     attr_accessor(decomposed, Array);
     attr_accessor(is_gmt, Object);
+    attr_accessor(offset, Object);
+    attr_accessor(zone, Object);
 
     /* interface */
 
     static void init(STATE);
 
-    // Rubinius.primitive :time_s_specific
-    static Time* specific(STATE, Object* self, Integer* sec, Integer* usec, Object* gmt);
+    static Time* at(STATE, time64_t seconds, long nanoseconds = 0);
 
-    // Rubinius.primitive :time_s_now
+    // Rubinius.primitive+ :time_s_specific
+    static Time* specific(STATE, Object* self, Integer* sec, Integer* nsec, Object* gmt, Object* offset);
+
+    // Rubinius.primitive+ :time_s_now
     static Time* now(STATE, Object* self);
 
     // Rubinius.primitive :time_s_from_array
-    static Time* from_array(STATE, Object* self, Fixnum* sec, Fixnum* min, Fixnum* hour, Fixnum* mday, Fixnum* mon, Fixnum* year, Fixnum* usec, Fixnum* isdst, Object* from_gmt);
+    static Time* from_array(STATE, Object* self, Fixnum* sec, Fixnum* min, Fixnum* hour, Fixnum* mday, Fixnum* mon, Fixnum* year, Fixnum* nsec, Fixnum* isdst, Object* from_gmt, Object* offset, Fixnum* offset_sec, Fixnum* offset_nsec);
 
-    // Rubinius.primitive :time_dup
-    Time* dup(STATE);
+    // Rubinius.primitive :time_s_dup
+    static Time* dup(STATE, Object* self, Time* other);
 
-    // Rubinius.primitive :time_seconds
+    // Rubinius.primitive+ :time_seconds
     Integer* seconds(STATE) {
       return Integer::from(state, seconds_);
     }
 
-    // Rubinius.primitive :time_useconds
+    // Rubinius.primitive+ :time_useconds
     Integer* useconds(STATE) {
-      return Integer::from(state, microseconds_);
+      return Integer::from(state, nanoseconds_ / 1000);
     }
 
+    // Rubinius.primitive+ :time_nseconds
+    Integer* nseconds(STATE) {
+      return Integer::from(state, nanoseconds_);
+    }
+
+    // Rubinius.primitive :time_utc_offset
+    Object* utc_offset(STATE);
+
     // Rubinius.primitive :time_decompose
-    Array* calculate_decompose(STATE, Object* gmt);
+    Array* calculate_decompose(STATE);
 
     // Rubinius.primitive :time_strftime
     String* strftime(STATE, String* format);
+
+    struct tm64 get_tm();
 
     class Info : public TypeInfo {
     public:

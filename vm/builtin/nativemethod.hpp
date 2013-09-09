@@ -1,19 +1,9 @@
 #ifndef RBX_BUILTIN_NATIVEMETHOD_HPP
 #define RBX_BUILTIN_NATIVEMETHOD_HPP
 
-/* Project */
-#include "vm/executor.hpp"
-#include "vm/vm.hpp"
-
+#include "executor.hpp"
 #include "builtin/class.hpp"
 #include "builtin/executable.hpp"
-#include "builtin/string.hpp"
-#include "builtin/symbol.hpp"
-
-#include "util/thread.hpp"
-#include "gc/root.hpp"
-
-#include "vm/object_utils.hpp"
 
 #include "capi/tag.hpp"
 #include "capi/value.hpp"
@@ -21,19 +11,17 @@
 
 namespace rubinius {
   class ExceptionPoint;
-  class Message;
   class NativeMethodFrame;
+  class NativeMethod;
   class Pointer;
-
-  /** Tracks RARRAY and RSTRING structs */
-  typedef std::tr1::unordered_map<capi::Handle*, void*> CApiStructs;
+  class StackVariables;
 
   /**
    * Thread-local info about native method calls. @see NativeMethodFrame.
    */
   class NativeMethodEnvironment {
-    /** VM in which executing. */
-    VM*                 state_;
+    State state_;
+
     /** Current callframe in Ruby-land. */
     CallFrame*          current_call_frame_;
     /** Current native callframe. */
@@ -44,7 +32,7 @@ namespace rubinius {
 
   public:   /* Class Interface */
     NativeMethodEnvironment(STATE)
-      : state_(state)
+      : state_(state->vm())
       , current_call_frame_(0)
       , current_native_frame_(0)
       , current_ep_(0)
@@ -59,14 +47,11 @@ namespace rubinius {
     /** Create or retrieve VALUE for obj. */
     VALUE get_handle(Object* obj);
 
-    /** Delete a global Object and its VALUE. */
-    void delete_global(VALUE handle);
-
     /** GC marking for Objects behind VALUEs. */
     void mark_handles(ObjectMark& mark);
 
   public:
-    VALUE outgoing_block() {
+    VALUE outgoing_block() const {
       return outgoing_block_;
     }
 
@@ -75,8 +60,8 @@ namespace rubinius {
     }
 
     /** Obtain the Object the VALUE represents. */
-    Object* get_object(VALUE val) {
-      if(CAPI_REFERENCE_P(val)) {
+    inline Object* get_object(VALUE val) const {
+      if(REFERENCE_P(val)) {
         capi::Handle* handle = capi::Handle::from(val);
         if(!handle->valid_p()) {
           handle->debug_print();
@@ -86,18 +71,18 @@ namespace rubinius {
         return handle->object();
       } else if(FIXNUM_P(val) || SYMBOL_P(val)) {
         return reinterpret_cast<Object*>(val);
-      } else if(CAPI_FALSE_P(val)) {
-        return Qfalse;
-      } else if(CAPI_TRUE_P(val)) {
-        return Qtrue;
-      } else if(CAPI_NIL_P(val)) {
-        return Qnil;
-      } else if(CAPI_UNDEF_P(val)) {
-        return Qundef;
+      } else if(FALSE_P(val)) {
+        return cFalse;
+      } else if(TRUE_P(val)) {
+        return cTrue;
+      } else if(NIL_P(val)) {
+        return cNil;
+      } else if(UNDEF_P(val)) {
+        return cUndef;
       }
 
       rubinius::bug("requested Object for unknown NativeMethod handle type");
-      return Qnil; // keep compiler happy
+      return cNil; // keep compiler happy
     }
 
 
@@ -105,15 +90,11 @@ namespace rubinius {
 
     Object* block();
 
-    void set_state(VM* vm) {
-      state_ = vm;
+    State* state() {
+      return &state_;
     }
 
-    VM* state() {
-      return state_;
-    }
-
-    CallFrame* current_call_frame() {
+    CallFrame* current_call_frame() const {
       return current_call_frame_;
     }
 
@@ -121,7 +102,7 @@ namespace rubinius {
       current_call_frame_ = frame;
     }
 
-    NativeMethodFrame* current_native_frame() {
+    NativeMethodFrame* current_native_frame() const {
       return current_native_frame_;
     }
 
@@ -129,12 +110,16 @@ namespace rubinius {
       current_native_frame_ = frame;
     }
 
-    ExceptionPoint* current_ep() {
+    ExceptionPoint* current_ep() const {
       return current_ep_;
     }
 
     void set_current_ep(ExceptionPoint* ep) {
       current_ep_ = ep;
+    }
+
+    SharedState& shared() {
+      return state_.shared();
     }
 
     /** Set of Handles available in current Frame (convenience.) */
@@ -147,6 +132,8 @@ namespace rubinius {
 
     /** Updates cached data with changes to the Ruby objects. */
     void update_cached_data();
+
+    StackVariables* scope();
   };
 
 
@@ -158,9 +145,12 @@ namespace rubinius {
      *  @note This is rarely the direct caller. */
     NativeMethodFrame* previous_;
 
+    NativeMethodEnvironment* env_;
+
     /** HandleSet to Objects used in this Frame. */
     capi::HandleSet handles_;
 
+    int capi_lock_index_;
     bool check_handles_;
 
     /** Handle for the block passed in **/
@@ -176,12 +166,7 @@ namespace rubinius {
     VALUE method_;
 
   public:
-    NativeMethodFrame(NativeMethodFrame* prev)
-      : previous_(prev)
-      , check_handles_(false)
-      , block_(cCApiHandleQnil)
-    {}
-
+    NativeMethodFrame(NativeMethodEnvironment* env, NativeMethodFrame* prev, NativeMethod* method);
     ~NativeMethodFrame();
 
   public:     /* Interface methods */
@@ -192,7 +177,7 @@ namespace rubinius {
     }
 
     /** Create or retrieve a VALUE for the Object. */
-    VALUE get_handle(VM*, Object* obj);
+    VALUE get_handle(STATE, Object* obj);
 
     void check_tracked_handle(capi::Handle* hdl, bool need_update=true);
 
@@ -205,6 +190,10 @@ namespace rubinius {
     /** Updates cached data with changes to the Ruby objects. */
     void update_cached_data();
 
+    int capi_lock_index() const {
+      return capi_lock_index_;
+    }
+
   public:     /* Accessors */
 
     /** HandleSet to Objects used in this Frame. */
@@ -213,7 +202,7 @@ namespace rubinius {
     }
 
     /** Native Frame active before this call. */
-    NativeMethodFrame* previous() {
+    NativeMethodFrame* previous() const {
       return previous_;
     }
 
@@ -224,19 +213,23 @@ namespace rubinius {
       module_ = module;
     }
 
-    VALUE block() {
+    VALUE block() const {
       return block_;
     }
 
-    VALUE receiver() {
+    void set_block(VALUE blk) {
+      block_ = blk;
+    }
+
+    VALUE receiver() const {
       return receiver_;
     }
 
-    VALUE method() {
+    VALUE method() const {
       return method_;
     }
 
-    VALUE module() {
+    VALUE module() const {
       return module_;
     }
 
@@ -253,6 +246,7 @@ namespace rubinius {
     ITERATE_BLOCK = -98,
     C_CALLBACK = -97,
     C_LAMBDA = -96,
+    C_BLOCK_CALL = -95,
     ARGS_IN_RUBY_ARRAY = -3,
     RECEIVER_PLUS_ARGS_IN_RUBY_ARRAY = -2,
     ARG_COUNT_ARGS_IN_C_ARRAY_PLUS_RECEIVER = -1
@@ -299,6 +293,8 @@ namespace rubinius {
     /** Function object that implements this method. */
     void* func_;
 
+    int capi_lock_index_;
+
   public:   /* Accessors */
 
     /** Arity of the method within. @see Arity. */
@@ -310,20 +306,24 @@ namespace rubinius {
     /** Module on which created. */
     attr_accessor(module, Module);
 
+    int capi_lock_index() const {
+      return capi_lock_index_;
+    }
+
   public:   /* Ruby bookkeeping */
 
     /** Statically held object type. */
     const static object_type type = NativeMethodType;
 
     /** Set class up in the VM. @see vm/ontology.cpp. */
-    static void init(VM* state);
+    static void init(State* state);
 
     // Called when starting a new native thread, initializes any thread
     // local data.
-    static void init_thread(VM* state);
+    static void init_thread(State* state);
 
     // Called when a thread is exiting, to cleanup the thread local data.
-    static void cleanup_thread(VM* state);
+    static void cleanup_thread(State* state);
 
 
   public:   /* Ctors */
@@ -334,9 +334,10 @@ namespace rubinius {
      *  Takes a function to call in the form of a void*. +arity+ is used
      *  to figure out how to call the function properly.
      */
-    static NativeMethod* create(VM* state, String* file_name,
+    static NativeMethod* create(State* state, String* file_name,
                                 Module* module, Symbol* method_name,
-                                void* func, Fixnum* arity);
+                                void* func, Fixnum* arity,
+                                int capi_lock_index);
 
   public:   /* Class Interface */
 
@@ -357,7 +358,7 @@ namespace rubinius {
      *  entered.
      */
     // Rubinius.primitive :nativemethod_load_extension_entry_point
-    static NativeMethod* load_extension_entry_point(STATE, Pointer* ptr);
+    static NativeMethod* load_extension_entry_point(STATE, String* library, Symbol* name, Pointer* ptr);
 
 
   public:   /* Instance methods */

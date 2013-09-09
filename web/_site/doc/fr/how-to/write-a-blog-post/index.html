@@ -26,6 +26,11 @@
     <!--[if IE]><link href="/stylesheets/blueprint/ie.css" media="screen" rel="stylesheet" type="text/css" /><![endif]-->
     <!--[if IE]><link href="/stylesheets/ie.css"           media="screen" rel="stylesheet" type="text/css" /><![endif]-->
     <link href="/stylesheets/pygments.css" media="screen" rel="stylesheet" />
+
+    <link href="/favicon.ico"                 rel="shortcut icon"    type="image/vnd.microsoft.icon" />
+    <link href="/images/apple-touch-icon.png" rel="apple-touch-icon" type="image/png" />
+    <link href="/images/apple-touch-icon.png" rel="apple-touch-icon" type="image/png" sizes="72x72"   />
+    <link href="/images/apple-touch-icon.png" rel="apple-touch-icon" type="image/png" sizes="114x114" />
   </head>
 
   <body>
@@ -87,6 +92,12 @@
     
     
     
+    <li><a href="/doc/it/how-to/write-a-blog-post/"
+      
+      >it</a></li>
+    
+    
+    
     <li><a href="/doc/ja/how-to/write-a-blog-post/"
       
       >ja</a></li>
@@ -141,7 +152,7 @@
 
     <p>Le blog Rubinius utilise Jekyll et est intégré dans le site web et la
 documentation. Nous encourageons et apprécions les billets écrits par
-des invités concernant vos expériences en tant qu&rsquo;utilisateur ou
+des invités concernant vos expériences en tant qu’utilisateur ou
 développeur Rubinius.</p>
 
 <p>Le format préféré pour les billets est le Markdown. Toutefois, si vous
@@ -153,7 +164,7 @@ HTML directement.</p>
 <pre><code>git clone https://github.com/rubinius/rubinius.git
 </code></pre>
 
-<p>Pour démarrer, assurez-vous d&rsquo;avoir installé les gems <code>kramdown</code> et <code>jekyll</code>.</p>
+<p>Pour démarrer, assurez-vous d’avoir installé les gems <code>kramdown</code> et <code>jekyll</code>.</p>
 
 <pre><code>rbx gem install jekyll kramdown
 </code></pre>
@@ -176,7 +187,7 @@ HTML directement.</p>
 <p>Lancez jekyll pour compiler le site web, qui incluera votre billet</p>
 
 <pre><code>cd ../web/
-rbx -S jekyll
+rbx -S jekyll build
 </code></pre>
 
 <p>Créez un commit pour tous vos changements dans le dossier <code>web/</code></p>
@@ -187,9 +198,9 @@ git commit -m "Wrote a blog post on ....."
 </code></pre>
 
 <p>Soumettez un patch, une pull request, ou si vous avez les droits
-d&rsquo;écrire sur le dépôt, poussez sur la branche master.</p>
+d’écrire sur le dépôt, poussez sur la branche master.</p>
 
-<p>Prévenez-nous qu&rsquo;il y a un nouveau billet sur le blog. Nous pourrions
+<p>Prévenez-nous qu’il y a un nouveau billet sur le blog. Nous pourrions
 avoir des retour à vous soumettre avant de publier le billet.</p>
 
 

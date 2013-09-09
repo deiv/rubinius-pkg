@@ -1,20 +1,21 @@
-#include "prelude.hpp"
-#include "oop.hpp"
-
-#include "bytecode_verification.hpp"
-#include "builtin/compiledmethod.hpp"
+#include "builtin/compiledcode.hpp"
 #include "builtin/iseq.hpp"
 #include "builtin/tuple.hpp"
 #include "builtin/fixnum.hpp"
 #include "builtin/symbol.hpp"
-
-#include "vmmethod.hpp"
-#include "object_utils.hpp"
+#include "bytecode_verification.hpp"
+#include "configuration.hpp"
 #include "instruments/timing.hpp"
+#include "machine_code.hpp"
+#include "object_utils.hpp"
+#include "version.h"
 
 namespace rubinius {
-  BytecodeVerification::BytecodeVerification(CompiledMethod* cm)
-    : method_(cm)
+  BytecodeVerification::BytecodeVerification(CompiledCode* code)
+    : method_(code)
+    , ops_(NULL)
+    , total_(0)
+    , max_stack_allowed_(0)
     , max_stack_seen_(0)
     , stack_(0)
     , locals_(0)
@@ -29,10 +30,10 @@ namespace rubinius {
 
   bool BytecodeVerification::verify(STATE) {
     // Do this setup here instead of the constructor so we can do
-    // some validation of the CompiledMethod's fields we read them.
+    // some validation of the CompiledCode's fields we read them.
 
     // Double check the method itself, since it might be a nil
-    if(!kind_of<CompiledMethod>(method_)) {
+    if(!kind_of<CompiledCode>(method_)) {
       fail("invalid method", -1);
       return false;
     }
@@ -62,6 +63,52 @@ namespace rubinius {
     } else {
       fail("method not initialized properly", -1);
       return false;
+    }
+
+    // FIXME
+    //
+    // This is conditional because in 1.8 mode, CM's for blocks have arity
+    // info that isn't used, but therefore fails these checks because
+    // of the way 'for' works.
+    //
+    // FIXME
+    if(!LANGUAGE_18_ENABLED) {
+      if(Fixnum* fix = try_as<Fixnum>(method_->splat())) {
+        if(fix->to_native() >= locals_) {
+          fail("invalid splat position", -1);
+          return false;
+        }
+      }
+
+      Fixnum* tot = try_as<Fixnum>(method_->total_args());
+      Fixnum* req = try_as<Fixnum>(method_->required_args());
+      Fixnum* post = try_as<Fixnum>(method_->post_args());
+
+      if(!tot || !req || !post) {
+        fail("method not initialized properly (missing arg counts)", -1);
+        return false;
+      }
+
+      if(tot->to_native() > locals_) {
+        fail("more arguments than local slots", -1);
+        return false;
+      }
+
+      if(req->to_native() > tot->to_native()) {
+        fail("more required arguments than total", -1);
+        return false;
+      }
+
+      if(post->to_native() > req->to_native()) {
+        fail("more post arguments than required", -1);
+        return false;
+      }
+
+      if(post->to_native() > tot->to_native()) {
+        fail("more post arguments than total", -1);
+        return false;
+      }
+
     }
 
     total_ = ops_->num_fields();

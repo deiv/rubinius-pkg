@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   module AST
     class Case < Node
@@ -182,7 +184,7 @@ module Rubinius
         if @single
           conditions_sexp = [:array, @single.to_sexp]
         else
-          conditions_sexp = @conditions.to_sexp
+          conditions_sexp = @conditions ? @conditions.to_sexp : []
           conditions_sexp << @splat.to_sexp if @splat
         end
         [:when, conditions_sexp, @body.to_sexp]
@@ -203,8 +205,9 @@ module Rubinius
         g.dup
         @condition.bytecode(g)
         g.cast_array
-        g.swap
-        g.send :__matches_when__, 1
+        g.push_literal Rubinius::Compiler::Runtime
+        g.rotate(3)
+        g.send :matches_when, 2
         g.git body
       end
 
@@ -224,28 +227,72 @@ module Rubinius
         @finish = finish
       end
 
+      def sexp_name
+        :flip2
+      end
+
+      def exclusive?
+        false
+      end
+
       def bytecode(g)
-        g.push :nil
+        done = g.new_label
+        on_label = g.new_label
+        index = g.state.flip_flops
+        g.state.push_flip_flop
+
+        get_flip_flop(g, index)
+        g.git on_label
+
+        @start.bytecode(g)
+        g.dup
+        g.gif done
+        g.pop
+        set_flip_flop(g, index, true)
+
+        if exclusive?
+          g.goto done
+        else
+          g.pop
+        end
+
+        on_label.set!
+        g.push_literal true
+        @finish.bytecode(g)
+        g.gif done
+        set_flip_flop(g, index, false)
+        g.pop
+
+        done.set!
+      end
+
+      def get_flip_flop(g, index)
+        g.push_literal Rubinius::Compiler::Runtime
+        g.push_scope
+        g.push_literal index
+        g.send(:get_flip_flop, 2)
+      end
+
+      def set_flip_flop(g, index, value)
+        g.push_literal Rubinius::Compiler::Runtime
+        g.push_scope
+        g.push_literal index
+        g.push_literal value
+        g.send(:set_flip_flop, 3)
       end
 
       def to_sexp
-        [:flip2, @start.to_sexp, @finish.to_sexp]
+        [sexp_name, @start.to_sexp, @finish.to_sexp]
       end
     end
 
-    class Flip3 < Node
-      def initialize(line, start, finish)
-        @line = line
-        @start = start
-        @finish = finish
+    class Flip3 < Flip2
+      def sexp_name
+        :flip3
       end
 
-      def bytecode(g)
-        g.push :nil
-      end
-
-      def to_sexp
-        [:flip3, @start.to_sexp, @finish.to_sexp]
+      def exclusive?
+        true
       end
     end
 
@@ -418,6 +465,30 @@ module Rubinius
         @pattern.bytecode(g)
         @value.bytecode(g)
         g.send :=~, 1
+        if @pattern.kind_of? RegexLiteral
+          regexp = Regexp.new(@pattern.source)
+          if table = regexp.name_table
+            table.sort_by { |name, idx| idx }.each do |name, idx|
+              local = g.state.scope.new_local name
+              g.last_match 5, idx.last - 1
+
+              case local
+              when Compiler::LocalVariable
+                g.set_local local.slot
+              when Compiler::EvalLocalVariable
+                g.push_variables
+                g.swap
+                g.push_literal name
+                g.swap
+                g.send :set_eval_local, 2, false
+              else
+                raise CompileError, "unknown type of local #{local.inspect}"
+              end
+
+              g.pop
+            end
+          end
+        end
       end
 
       def to_sexp
@@ -538,6 +609,7 @@ module Rubinius
         pos(g)
 
         if g.redo
+          g.check_interrupts
           g.goto g.redo
         else
           jump_error g, :redo
@@ -576,6 +648,10 @@ module Rubinius
         @line = line
         @value = expr
         @splat = nil
+      end
+
+      def block=(node)
+        @value.block = node if @value
       end
 
       def bytecode(g, force=false)

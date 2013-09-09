@@ -16,28 +16,26 @@ namespace rubinius {
   public:
 
     // Rubinius.primitive+ :weakref_object
-    Object* object() {
+    Object* object() const {
       return object_;
     }
 
-    void set_object(gc::WriteBarrier* wb, Object* obj) {
+    void set_object(ObjectMemory* om, Object* obj) {
       object_ = obj;
-      write_barrier(wb, obj);
+      write_barrier(om, obj);
     }
 
-    // Rubinius.primitive :weakref_set_object
+    // Rubinius.primitive+ :weakref_set_object
     Object* set_object(STATE, Object* obj) {
       object_ = obj;
       write_barrier(state, obj);
       return obj;
     }
 
-    static void init(STATE);
-
     // Rubinius.primitive+ :weakref_new
     static WeakRef* create(STATE, Object* obj);
 
-    bool alive_p() {
+    bool alive_p() const {
       return object_->reference_p();
     }
 

@@ -343,6 +343,21 @@ describe "String#%" do
 
       lambda { "%c" % Object }.should raise_error(TypeError)
     end
+
+    it "supports single character strings as argument for %c" do
+      ("%c" % 'A').should == "A"
+    end
+
+    it "raises an exception for multiple character strings as argument for %c" do
+      lambda { "%c" % 'AA' }.should raise_error(ArgumentError)
+    end
+
+    it "calls to_str on argument for %c formats" do
+      obj = mock('A')
+      obj.should_receive(:to_str).and_return('A')
+
+      ("%c" % obj).should == "A"
+    end
   end
 
   ruby_version_is "1.8.6.278" do
@@ -409,16 +424,25 @@ describe "String#%" do
     ("%*e" % [10, 9]).should == "9.000000e+00"
   end
 
-  # TODO: If http://redmine.ruby-lang.org/issues/show/1566 is confirmed, we
-  # can guard the behaviour of capitalising Inf and NaN as a bug, and
-  # removed the compliance guards.
   ruby_version_is ""..."1.9" do
     not_compliant_on :rubinius, :jruby do
-      it "supports float formats using %e, and downcases -Inf, Inf, and NaN" do
+      it "supports float formats using %e, and downcases -Inf, Inf" do
         ("%e" % 1e1020).should == "inf"
         ("%e" % -1e1020).should == "-inf"
-        ("%e" % (0.0/0)).should == "nan"
-        ("%e" % (-0e0/0)).should == "nan"
+      end
+
+      platform_is :bsd do
+        it "supports float formats using %e, and downcases NaN" do
+          ("%e" % (0.0/0)).should == "nan"
+          ("%e" % (-0e0/0)).should == "nan"
+        end
+      end
+
+      platform_is :linux do
+        it "supports float formats using %e, and downcases -NaN" do
+          ("%e" % (0.0/0)).should == "-nan"
+          ("%e" % (-0e0/0)).should == "-nan"
+        end
       end
     end
   end
@@ -428,9 +452,6 @@ describe "String#%" do
   # or downcasing these identifiers for %e or %E, which refers to the case of the
   # of the exponent identifier, is silly.
 
-  # TODO: If http://redmine.ruby-lang.org/issues/show/1566 is confirmed, we
-  # can guard the behaviour of capitalising Inf and NaN as a bug, and
-  # removed the compliance guards.
   deviates_on :rubinius, :jruby do
     it "supports float formats using %e, but Inf, -Inf, and NaN are not floats" do
       ("%e" % 1e1020).should == "Inf"
@@ -462,25 +483,31 @@ describe "String#%" do
     ("%*E" % [10, 9]).should == "9.000000E+00"
   end
 
-  # TODO: If http://redmine.ruby-lang.org/issues/show/1566 is confirmed, we
-  # can guard the behaviour of capitalising Inf and NaN as a bug, and
-  # removed the compliance guards.
   not_compliant_on :rubinius, :jruby do
     ruby_version_is ""..."1.9" do
-      it "supports float formats using %E, and upcases Inf, -Inf, and NaN" do
+      it "supports float formats using %E, and upcases Inf, -Inf" do
         ("%E" % 1e1020).should == "INF"
         ("%E" % -1e1020).should == "-INF"
         ("%-10E" % 1e1020).should == "INF       "
         ("%+E" % 1e1020).should == "+INF"
         ("% E" % 1e1020).should == " INF"
-        ("%E" % (0.0/0)).should == "NAN"
-        ("%E" % (-0e0/0)).should == "NAN"
+      end
+
+      platform_is :bsd do
+        it "supports float formats using %E, and upcases NaN" do
+          ("%E" % (0.0/0)).should == "NAN"
+          ("%E" % (-0e0/0)).should == "NAN"
+        end
+      end
+
+      platform_is :linux do
+        it "supports float formats using %E, and upcases -NaN" do
+          ("%E" % (0.0/0)).should == "-NAN"
+          ("%E" % (-0e0/0)).should == "-NAN"
+        end
       end
     end
 
-    # TODO: If http://redmine.ruby-lang.org/issues/show/1566 is confirmed, we
-    # can guard the behaviour of capitalising Inf and NaN as a bug, and
-    # removed the compliance guards.
     ruby_version_is ""..."1.9" do
       platform_is :darwin do
         it "pads with zeros using %E with Inf, -Inf, and NaN" do
@@ -490,7 +517,15 @@ describe "String#%" do
         end
       end
 
-      platform_is_not :darwin do
+      platform_is :linux do
+        it "pads with spaces for %E with Inf, -Inf, and NaN" do
+          ("%010E" % -1e1020).should == "      -INF"
+          ("%010E" % 1e1020).should == "       INF"
+          ("%010E" % (0.0/0)).should == "      -NAN"
+        end
+      end
+
+      platform_is_not :darwin, :linux do
         it "pads with spaces for %E with Inf, -Inf, and NaN" do
           ("%010E" % -1e1020).should == "      -INF"
           ("%010E" % 1e1020).should == "       INF"
@@ -513,6 +548,7 @@ describe "String#%" do
     ("% f" % 10).should == " 10.000000"
     ("%1$f" % 10).should == "10.000000"
     ("%#f" % 10).should == "10.000000"
+    ("%#0.3f" % 10).should == "10.000"
     ("%+f" % 10).should == "+10.000000"
     ("%-7f" % 10).should == "10.000000"
     ("%05f" % 10).should == "10.000000"
@@ -524,9 +560,11 @@ describe "String#%" do
     ("% g" % 10).should == " 10"
     ("%1$g" % 10).should == "10"
     ("%#g" % 10).should == "10.0000"
+    ("%#.3g" % 10).should == "10.0"
     ("%+g" % 10).should == "+10"
     ("%-7g" % 10).should == "10     "
     ("%05g" % 10).should == "00010"
+    ("%g" % 10**10).should == "1e+10"
     ("%*g" % [10, 9]).should == "         9"
   end
 
@@ -535,9 +573,11 @@ describe "String#%" do
     ("% G" % 10).should == " 10"
     ("%1$G" % 10).should == "10"
     ("%#G" % 10).should == "10.0000"
+    ("%#.3G" % 10).should == "10.0"
     ("%+G" % 10).should == "+10"
     ("%-7G" % 10).should == "10     "
     ("%05G" % 10).should == "00010"
+    ("%G" % 10**10).should == "1E+10"
     ("%*G" % [10, 9]).should == "         9"
   end
 
@@ -646,7 +686,12 @@ describe "String#%" do
   it "taints result for %s when argument is tainted" do
     ("%s" % "x".taint).tainted?.should == true
     ("%s" % mock('x').taint).tainted?.should == true
-    ("%s" % 5.0.taint).tainted?.should == true
+  end
+
+  ruby_version_is ""..."2.0" do
+    it "taints result for %s when argument is tainted float" do
+      ("%s" % 0.0.taint).tainted?.should == true # float is frozen on 2.0
+    end
   end
 
   # MRI crashes on this one.
@@ -794,21 +839,21 @@ describe "String#%" do
   end
 
   ruby_version_is "1.9" do
-    it 'formats zero without prefix using %#x' do
+    it "formats zero without prefix using %#x" do
       ("%#x" % 0).should == "0"
     end
 
-    it 'formats zero without prefix using %#X' do
+    it "formats zero without prefix using %#X" do
       ("%#X" % 0).should == "0"
     end
   end
 
   ruby_version_is "" ... "1.9" do
-    it 'formats zero with prefix using %#x' do
+    it "formats zero with prefix using %#x" do
       ("%#x" % 0).should == "0x0"
     end
 
-    it 'formats zero without prefix using %#X' do
+    it "formats zero without prefix using %#X" do
       ("%#X" % 0).should == "0X0"
     end
   end
@@ -911,6 +956,37 @@ describe "String#%" do
 
     it "doesn't taint the result for #{format} when argument is tainted" do
       (format % "5".taint).tainted?.should == false
+    end
+  end
+  
+  ruby_version_is "1.9.2" do
+    describe "when format string contains %{} sections" do
+    
+      it "replaces %{} sections with values from passed-in hash" do
+        ("%{foo}bar" % {:foo => 'oof'}).should == "oofbar"
+      end
+      
+      it "raises KeyError if key is missing from passed-in hash" do
+        lambda {"%{foo}" % {}}.should raise_error(KeyError)
+      end
+      
+      it "should raise ArgumentError if no hash given" do
+        lambda {"%{foo}" % []}.should raise_error(ArgumentError)
+      end
+    end
+    
+    describe "when format string contains %<> formats" do
+      it "uses the named argument for the format's value" do
+        ("%<foo>d" % {:foo => 1}).should == "1"
+      end
+      
+      it "raises KeyError if key is missing from passed-in hash" do
+        lambda {"%<foo>d" % {}}.should raise_error(KeyError)
+      end
+      
+      it "should raise ArgumentError if no hash given" do
+        lambda {"%<foo>" % []}.should raise_error(ArgumentError)
+      end
     end
   end
 end

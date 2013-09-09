@@ -2,7 +2,6 @@
 #define RBX_BUILTIN_BLOCK_WRAPPER_HPP
 
 #include "builtin/object.hpp"
-#include "type_info.hpp"
 
 namespace rubinius {
   class BlockEnvironment;
@@ -15,11 +14,13 @@ namespace rubinius {
     BlockEnvironment* block_; // slot
     Object* lambda_; // slot
     Object* bound_method_; // slot
+    Object* ruby_method_; // slot
 
   public:
     attr_accessor(block, BlockEnvironment);
     attr_accessor(lambda, Object);
     attr_accessor(bound_method, Object);
+    attr_accessor(ruby_method, Object);
 
     static void init(STATE);
 
@@ -36,8 +37,10 @@ namespace rubinius {
     // Rubinius.primitive? :proc_call_on_object
     Object* call_on_object(STATE, CallFrame* call_frame, Executable* exec, Module* mod, Arguments& args);
 
-    // Rubinius.primitive :proc_from_env
     static Proc* from_env(STATE, Object* self, Object* env);
+
+    // Rubinius.primitive :proc_from_env
+    static Proc* from_env_prim(STATE, Object* self, Object* env);
 
     class Info : public TypeInfo {
     public:

@@ -1,13 +1,16 @@
 #include "objectmemory.hpp"
 #include "gc/immix.hpp"
+#include "gc/immix_marker.hpp"
 
-#include "instruments/stats.hpp"
-
-#include "capi/handle.hpp"
+#include "capi/handles.hpp"
 #include "capi/tag.hpp"
 #include "object_watch.hpp"
 
 #include "configuration.hpp"
+
+#ifdef ENABLE_LLVM
+#include "llvm/state.hpp"
+#endif
 
 namespace rubinius {
   void ImmixGC::ObjectDescriber::added_chunk(int count) {
@@ -41,10 +44,19 @@ namespace rubinius {
   ImmixGC::ImmixGC(ObjectMemory* om)
     : GarbageCollector(om)
     , allocator_(gc_.block_allocator())
+    , marker_(NULL)
+    , marked_objects_(0)
+    , chunks_left_(0)
     , chunks_before_collection_(10)
   {
     gc_.describer().set_object_memory(om, this);
     reset_chunks_left();
+  }
+
+  ImmixGC::~ImmixGC() {
+    if(marker_) {
+      delete marker_;
+    }
   }
 
   memory::Address ImmixGC::ObjectDescriber::copy(memory::Address original,
@@ -68,11 +80,7 @@ namespace rubinius {
     return addr.as<Object>()->size_in_bytes(object_memory_->state());
   }
 
-  ImmixGC::~ImmixGC() {
-    // @todo free data
-  }
-
-  Object* ImmixGC::allocate(int bytes) {
+  Object* ImmixGC::allocate(uint32_t bytes) {
     if(bytes > immix::cMaxObjectSize) return 0;
 
     Object* obj = allocator_.allocate(bytes).as<Object>();
@@ -82,22 +90,14 @@ namespace rubinius {
     return obj;
   }
 
-  Object* ImmixGC::move_object(Object* orig, int bytes) {
+  Object* ImmixGC::move_object(Object* orig, uint32_t bytes) {
     if(bytes > immix::cMaxObjectSize) return 0;
 
     Object* obj = allocator_.allocate(bytes).as<Object>();
 
     memcpy(obj, orig, bytes);
 
-    // If the header is inflated, repoint it.
-    if(obj->inflated_header_p()) {
-      orig->deflate_header();
-      obj->inflated_header()->set_object(obj);
-    }
-
-    obj->flags().zone = MatureObjectZone;
-    obj->flags().age = 0;
-
+    obj->set_zone(MatureObjectZone);
     obj->set_in_immix();
 
     orig->set_forward(obj);
@@ -118,15 +118,15 @@ namespace rubinius {
     Object* copy = fwd.as<Object>();
 
     // Check and update an inflated header
-    if(copy && copy != obj && obj->inflated_header_p()) {
-      InflatedHeader* ih = obj->deflate_header();
-      ih->reset_object(copy);
-      if(!copy->set_inflated_header(ih)) {
-        rubinius::bug("Massive IMMIX inflated header screwup.");
-      }
+    if(copy && copy != obj) {
+      obj->set_forward(copy);
     }
 
     return copy;
+  }
+
+  void ImmixGC::scanned_object(Object* obj) {
+    obj->scanned();
   }
 
   ObjectPosition ImmixGC::validate_object(Object* obj) {
@@ -144,56 +144,52 @@ namespace rubinius {
   /**
    * Performs a garbage collection of the immix space.
    */
-  void ImmixGC::collect(GCData& data) {
-    Object* tmp;
+  void ImmixGC::collect(GCData* data) {
+    gc_.clear_marks();
+    collect_scan(data);
+    process_mark_stack();
+    collect_finish(data);
+  }
 
-    gc_.clear_lines();
+  void ImmixGC::collect_start(GCData* data) {
+    gc_.clear_marks();
+    collect_scan(data);
+    marker_->concurrent_mark(data);
+  }
 
-    int via_handles_ = 0;
-    int via_roots = 0;
-
-    for(Roots::Iterator i(data.roots()); i.more(); i.advance()) {
-      tmp = i->get();
+  void ImmixGC::collect_scan(GCData* data) {
+    for(Roots::Iterator i(data->roots()); i.more(); i.advance()) {
+      Object* tmp = i->get();
       if(tmp->reference_p()) saw_object(tmp);
-      via_roots++;
     }
 
-    if(data.threads()) {
-      for(std::list<ManagedThread*>::iterator i = data.threads()->begin();
-          i != data.threads()->end();
+    if(data->threads()) {
+      for(std::list<ManagedThread*>::iterator i = data->threads()->begin();
+          i != data->threads()->end();
           ++i) {
         scan(*i, false);
       }
     }
 
-    for(capi::Handles::Iterator i(*data.handles()); i.more(); i.advance()) {
+    for(Allocator<capi::Handle>::Iterator i(data->handles()->allocator()); i.more(); i.advance()) {
       if(i->in_use_p() && !i->weak_p()) {
         saw_object(i->object());
-        via_handles_++;
       }
     }
 
-    for(capi::Handles::Iterator i(*data.cached_handles()); i.more(); i.advance()) {
-      if(i->in_use_p() && !i->weak_p()) {
-        saw_object(i->object());
-        via_handles_++;
-      }
-    }
-
-    std::list<capi::Handle**>* gh = data.global_handle_locations();
+    std::list<capi::GlobalHandle*>* gh = data->global_handle_locations();
 
     if(gh) {
-      for(std::list<capi::Handle**>::iterator i = gh->begin();
+      for(std::list<capi::GlobalHandle*>::iterator i = gh->begin();
           i != gh->end();
           ++i) {
-        capi::Handle** loc = *i;
+        capi::Handle** loc = (*i)->handle();
         if(capi::Handle* hdl = *loc) {
-          if(!CAPI_REFERENCE_P(hdl)) continue;
+          if(!REFERENCE_P(hdl)) continue;
           if(hdl->valid_p()) {
             Object* obj = hdl->object();
             if(obj && obj->reference_p()) {
               saw_object(obj);
-              via_handles_++;
             }
           } else {
             std::cerr << "Detected bad handle checking global capi handles\n";
@@ -202,15 +198,72 @@ namespace rubinius {
       }
     }
 
-    gc_.process_mark_stack(allocator_);
+#ifdef ENABLE_LLVM
+    if(LLVMState* ls = data->llvm_state()) ls->gc_scan(this);
+#endif
+  }
+
+  void ImmixGC::collect_finish(GCData* data) {
+    collect_scan(data);
+
+    ObjectArray* marked_set = object_memory_->swap_marked_set();
+    for(ObjectArray::iterator oi = marked_set->begin();
+        oi != marked_set->end();
+        ++oi) {
+      Object* obj = *oi;
+      if(obj) saw_object(obj);
+    }
+    delete marked_set;
+
+    // Users manipulate values accessible from the data* within an
+    // RData without running a write barrier. Thusly if we see any rdata
+    // we must always scan it again here because it could contain new pointers.
+    //
+    // We do this in a loop because the scanning might generate new entries
+    // on the mark stack.
+    do {
+      for(Allocator<capi::Handle>::Iterator i(data->handles()->allocator()); i.more(); i.advance()) {
+        capi::Handle* hdl = i.current();
+        if(!hdl->in_use_p()) continue;
+        if(hdl->is_rdata()) {
+          Object* obj = hdl->object();
+          if(obj->marked_p(object_memory_->mark())) {
+            scan_object(obj);
+          }
+        }
+      }
+    } while(process_mark_stack());
 
     // We've now finished marking the entire object graph.
+    // Clean weakrefs before keeping additional objects alive
+    // for finalization, so people don't get a hold of finalized
+    // objects through weakrefs.
+    clean_weakrefs();
 
-    check_finalize();
+    // Marking objects to be Finalized can cause more things to continue to
+    // live, so we must check the mark_stack again.
+    do {
+      walk_finalizers();
+      scan_fibers(data, true);
+    } while(process_mark_stack());
 
-    // Finalize can cause more things to continue to live, so we must
-    // check the mark_stack again.
-    gc_.process_mark_stack(allocator_);
+    // Remove unreachable locked objects still in the list
+    if(data->threads()) {
+      for(std::list<ManagedThread*>::iterator i = data->threads()->begin();
+          i != data->threads()->end();
+          ++i) {
+        clean_locked_objects(*i, false);
+      }
+    }
+
+    // Clear unreachable objects from the various remember sets
+    unsigned int mark = object_memory_->mark();
+    object_memory_->unremember_objects(mark);
+  }
+
+  void ImmixGC::sweep() {
+    // Copy marks for use in new allocations
+    gc_.copy_marks();
 
     // Sweep up the garbage
     gc_.sweep_blocks();
@@ -218,17 +271,6 @@ namespace rubinius {
     // This resets the allocator state to sync it up with the BlockAllocator
     // properly.
     allocator_.get_new_block();
-
-    // Clear unreachable objects from the various remember sets
-    int cleared = 0;
-    unsigned int mark = object_memory_->mark();
-    cleared = object_memory_->unremember_objects(mark);
-    for(std::list<gc::WriteBarrier*>::iterator wbi = object_memory_->aux_barriers().begin();
-        wbi != object_memory_->aux_barriers().end();
-        ++wbi) {
-      gc::WriteBarrier* wb = *wbi;
-      cleared += wb->unremember_objects(mark);
-    }
 
     // Now, calculate how much space we're still using.
     immix::Chunks& chunks = gc_.block_allocator().chunks();
@@ -247,8 +289,6 @@ namespace rubinius {
     if(object_memory_->state()->shared.config.gc_immix_debug) {
       std::cerr << "[GC IMMIX: " << clear_marked_objects() << " marked"
                 << ", "
-                << via_roots << " roots "
-                << via_handles_ << " handles "
                 << (int)(percentage_live * 100) << "% live"
                 << ", " << live_bytes << "/" << total_bytes
                 << "]\n";
@@ -264,8 +304,6 @@ namespace rubinius {
     }
 
 #ifdef IMMIX_DEBUG
-    std::cout << "Immix: RS size cleared: " << cleared << "\n";
-
     immix::Chunks& chunks = gc_.block_allocator().chunks();
     std::cout << "chunks=" << chunks.size() << "\n";
 
@@ -317,80 +355,45 @@ namespace rubinius {
 #endif
   }
 
-  void ImmixGC::check_finalize() {
-    // If finalizers are running right now, just fixup any finalizer references
-    if(object_memory_->running_finalizers()) {
-      for(std::list<FinalizeObject>::iterator i = object_memory_->finalize().begin();
-          i != object_memory_->finalize().end();
-          ++i) {
-        if(i->object) {
-          i->object = saw_object(i->object);
-        }
-
-        if(i->ruby_finalizer) {
-          i->ruby_finalizer = saw_object(i->ruby_finalizer);
-        }
-      }
-      return;
-    }
-
-    for(std::list<FinalizeObject>::iterator i = object_memory_->finalize().begin();
-        i != object_memory_->finalize().end(); )
-    {
-
-      FinalizeObject& fi = *i;
-
-      if(i->ruby_finalizer) {
-        i->ruby_finalizer = saw_object(i->ruby_finalizer);
-      }
-
-      bool remove = false;
-
-      switch(i->status) {
-      case FinalizeObject::eLive:
-        if(!i->object->marked_p(object_memory_->mark())) {
-          // Run C finalizers now rather that queue them.
-          if(i->finalizer) {
-            (*i->finalizer)(state(), i->object);
-            i->status = FinalizeObject::eFinalized;
-            remove = true;
-          } else {
-            i->queued();
-            object_memory_->add_to_finalize(&fi);
-
-            // We have to still keep it alive though until we finish with it.
-            i->object = saw_object(i->object);
-          }
-        } else {
-          // Update the reference
-          i->object = saw_object(i->object);
-        }
-
-        break;
-      case FinalizeObject::eQueued:
-        // Nothing, we haven't gotten to it yet.
-        // Keep waiting and keep i->object updated.
-        i->object = saw_object(i->object);
-        i->queue_count++;
-        break;
-      case FinalizeObject::eFinalized:
-        if(!i->object->marked_p(object_memory_->mark())) {
-          // finalized and done with.
-          remove = true;
-        } else {
-          // RESURRECTION!
-          i->queued();
-          i->object = saw_object(i->object);
-        }
-        break;
-      }
-
-      if(remove) {
-        i = object_memory_->finalize().erase(i);
-      } else {
-        ++i;
-      }
+  void ImmixGC::start_marker(STATE) {
+    if(!marker_) {
+      marker_ = new ImmixMarker(state, this);
     }
   }
 
+  void ImmixGC::wait_for_marker(STATE) {
+    if(marker_) {
+      marker_->wait_for_marker(state);
+    }
+  }
+
+  bool ImmixGC::process_mark_stack(int count) {
+    return gc_.process_mark_stack(allocator_, count);
+  }
+
+  immix::MarkStack& ImmixGC::mark_stack() {
+    return gc_.mark_stack();
+  }
+
+  void ImmixGC::walk_finalizers() {
+    FinalizerHandler* fh = object_memory_->finalizer_handler();
+    if(!fh) return;
+
+    for(FinalizerHandler::iterator i = fh->begin();
+        !i.end();
+        /* advance is handled in the loop */)
+    {
+      FinalizeObject& fi = i.current();
+
+      bool live = fi.object->marked_p(object_memory_->mark());
+
+      if(fi.ruby_finalizer) {
+        fi.ruby_finalizer = saw_object(fi.ruby_finalizer);
+      }
+
+      fi.object = saw_object(fi.object);
+
+      i.next(live);
+    }
+  }
 }

@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Process
   module Constants
     EXIT_SUCCESS = Rubinius::Config['rbx.platform.process.EXIT_SUCCESS'] || 0
@@ -23,26 +25,34 @@ module Process
     RLIMIT_SBSIZE  = Rubinius::Config['rbx.platform.process.RLIMIT_SBSIZE']
     RLIMIT_STACK   = Rubinius::Config['rbx.platform.process.RLIMIT_STACK']
 
+    RLIMIT_RTPRIO     = Rubinius::Config['rbx.platform.process.RLIMIT_RTPRIO']
+    RLIMIT_RTTIME     = Rubinius::Config['rbx.platform.process.RLIMIT_RTTIME']
+    RLIMIT_SIGPENDING = Rubinius::Config['rbx.platform.process.RLIMIT_SIGPENDING']
+    RLIMIT_MSGQUEUE   = Rubinius::Config['rbx.platform.process.RLIMIT_MSGQUEUE']
+    RLIMIT_NICE       = Rubinius::Config['rbx.platform.process.RLIMIT_NICE']
+
     WNOHANG = 1
     WUNTRACED = 2
   end
   include Constants
+
+  FFI = Rubinius::FFI
 
   class Rlimit < FFI::Struct
     config "rbx.platform.rlimit", :rlim_cur, :rlim_max
   end
 
   def self.setrlimit(resource, cur_limit, max_limit=undefined)
-    resource =  Rubinius::Type.coerce_to resource, Integer, :to_int
+    resource =  coerce_rlimit_resource(resource)
     cur_limit = Rubinius::Type.coerce_to cur_limit, Integer, :to_int
 
-    unless max_limit.equal? undefined
+    unless undefined.equal? max_limit
       max_limit = Rubinius::Type.coerce_to max_limit, Integer, :to_int
     end
 
     rlimit = Rlimit.new
     rlimit[:rlim_cur] = cur_limit
-    rlimit[:rlim_max] = max_limit.equal?(undefined) ? cur_limit : max_limit
+    rlimit[:rlim_max] = undefined.equal?(max_limit) ? cur_limit : max_limit
 
     ret = FFI::Platform::POSIX.setrlimit(resource, rlimit.pointer)
     Errno.handle if ret == -1
@@ -50,7 +60,7 @@ module Process
   end
 
   def self.getrlimit(resource)
-    resource =  Rubinius::Type.coerce_to resource, Integer, :to_int
+    resource = coerce_rlimit_resource(resource)
 
     lim_max = []
     rlimit = Rlimit.new
@@ -62,7 +72,7 @@ module Process
 
   def self.setsid
     pgid = FFI::Platform::POSIX.setsid
-    Errno.handle if -1 == pgid
+    Errno.handle if pgid == -1
     pgid
   end
 
@@ -76,7 +86,7 @@ module Process
       rescue SystemExit => e
         status = e.status
       rescue Exception => e
-        e.render "An exception occured in a forked block"
+        e.render "An exception occurred in a forked block"
         status = 1
       end
 
@@ -104,45 +114,50 @@ module Process
     Struct::Tms.new(*cpu_times)
   end
 
-  def self.kill(sig, pid)
+  def self.kill(signal, *pids)
+    raise ArgumentError, "PID argument required" if pids.length == 0
+
     use_process_group = false
-    sig = sig.to_s if sig.kind_of?(Symbol)
+    signal = signal.to_s if signal.kind_of?(Symbol)
 
-    if sig.kind_of?(String)
-      if sig[0] == ?-
-        sig = sig[1..-1]
+    if signal.kind_of?(String)
+      if signal[0] == ?-
+        signal = signal[1..-1]
         use_process_group = true
       end
-      if sig[0..2] == "SIG"
-        sig = sig[3..-1]
+
+      if signal[0..2] == "SIG"
+        signal = signal[3..-1]
       end
-      number = Signal::Names[sig]
-    else
-      number = sig.to_i
-      if number < 0
-        number = -number
-        use_process_group = true
-      end
+
+      signal = Signal::Names[signal]
     end
 
-    raise ArgumentError unless number
+    raise ArgumentError unless signal.kind_of? Fixnum
 
-    pid = Rubinius::Type.coerce_to pid, Integer, :to_int
-
-    pid = -pid if use_process_group
-    ret = FFI::Platform::POSIX.kill(pid, number)
-
-    case ret
-    when 0
-      return 1
-    when -1
-      Errno.handle
+    if signal < 0
+      signal = -signal
+      use_process_group = true
     end
+
+    pids.each do |pid|
+      pid = Rubinius::Type.coerce_to_pid pid
+
+      pid = -pid if use_process_group
+      result = FFI::Platform::POSIX.kill(pid, signal)
+
+      Errno.handle if result == -1
+    end
+
+    return pids.length
   end
 
   def self.abort(msg=nil)
-    $stderr.puts(msg) if msg
-    raise SystemExit.new(1)
+    if msg
+      msg = StringValue(msg)
+      $stderr.puts(msg)
+    end
+    raise SystemExit.new(1, msg)
   end
 
   def self.getpgid(pid)
@@ -192,8 +207,31 @@ module Process
   end
 
   def self.uid=(uid)
+    # the 4 rescue clauses below are needed
+    # until respond_to? can be used to query the implementation of methods attached via FFI
+    # atm respond_to returns true if a method is attached but not implemented on the platform
     uid = Rubinius::Type.coerce_to uid, Integer, :to_int
-    Process::Sys.setuid uid
+    begin
+      ret = FFI::Platform::POSIX.setresuid(uid, -1, -1)
+    rescue NotImplementedError
+      begin
+        ret = FFI::Platform::POSIX.setreuid(uid, -1)
+      rescue NotImplementedError
+        begin
+          ret = FFI::Platform::POSIX.setruid(uid)
+        rescue NotImplementedError
+          if Process.euid == uid
+            ret = FFI::Platform::POSIX.setuid(uid)
+          else
+            raise NotImplementedError
+          end
+        end
+      end
+    end
+
+    Errno.handle if ret == -1
+
+    uid
   end
 
   def self.gid=(gid)
@@ -202,8 +240,31 @@ module Process
   end
 
   def self.euid=(uid)
+    # the 4 rescue clauses below are needed
+    # until respond_to? can be used to query the implementation of methods attached via FFI
+    # atm respond_to returns true if a method is attached but not implemented on the platform
     uid = Rubinius::Type.coerce_to uid, Integer, :to_int
-    Process::Sys.seteuid uid
+    begin
+      ret = FFI::Platform::POSIX.setresuid(-1, uid, -1)
+    rescue NotImplementedError
+      begin
+        ret = FFI::Platform::POSIX.setreuid(-1, uid)
+      rescue NotImplementedError
+        begin
+          ret = FFI::Platform::POSIX.seteuid(uid)
+        rescue NotImplementedError
+          if Process.uid == uid
+            ret = FFI::Platform::POSIX.setuid(uid)
+          else
+            raise NotImplementedError
+          end
+        end
+      end
+    end
+
+    Errno.handle if ret == -1
+
+    uid
   end
 
   def self.egid=(gid)
@@ -269,7 +330,7 @@ module Process
     @maxgroups = g.length if g.length > @maxgroups
     FFI::MemoryPointer.new(:int, @maxgroups) { |p|
       p.write_array_of_int(g)
-      Errno.handle if -1 == FFI::Platform::POSIX.setgroups(g.length, p)
+      Errno.handle if FFI::Platform::POSIX.setgroups(g.length, p) == -1
     }
     g
   end
@@ -332,7 +393,7 @@ module Process
     status, termsig, stopsig, pid = value
 
     status = Process::Status.new(pid, status, termsig, stopsig)
-    Rubinius::Globals.set! :$?, status
+    set_status_global status
     [pid, status]
   end
 
@@ -371,27 +432,6 @@ module Process
     alias_method :waitpid2, :wait2
   end
 
-  #
-  # Indicate disinterest in child process.
-  #
-  # Sets up an internal wait on the given process ID.
-  # Only possibly real pids, i.e. positive numbers,
-  # may be waited for.
-  #
-  # TODO: Should an error be raised on ECHILD? --rue
-  #
-  # TODO: This operates on the assumption that waiting on
-  #       the event consumes very little resources. If this
-  #       is not the case, the check should be made WNOHANG
-  #       and called periodically.
-  #
-  def self.detach(pid)
-    raise ArgumentError, "Only positive pids may be detached" unless pid > 0
-
-    # The evented system does not need a loop
-    Thread.new { Process.wait pid }
-  end
-
   #--
   # TODO: Most of the fields aren't implemented yet.
   # TODO: Also, these objects should only need to be constructed by
@@ -410,48 +450,48 @@ module Process
       @termsig = termsig
       @stopsig = stopsig
     end
-    
+
     def to_i
       @exitstatus
     end
-    
+
     def to_s
       @exitstatus.to_s
     end
-    
+
     def &(num)
       @exitstatus & num
     end
-    
+
     def ==(other)
       other = other.to_i if other.kind_of? Process::Status
       @exitstatus == other
     end
-    
+
     def >>(num)
       @exitstatus >> num
     end
-    
+
     def coredump?
       false
     end
-    
+
     def exited?
       @exitstatus != nil
     end
-    
+
     def pid
       @pid
     end
-    
+
     def signaled?
       @termsig != nil
     end
-    
+
     def stopped?
       @stopsig != nil
     end
-    
+
     def success?
       if exited?
         @exitstatus == 0
@@ -540,10 +580,11 @@ module Process
         nil
       end
 
-      def setreuid(rid)
+      def setreuid(rid, eid)
         rid = Rubinius::Type.coerce_to rid, Integer, :to_int
+        eid = Rubinius::Type.coerce_to eid, Integer, :to_int
 
-        ret = FFI::Platform::POSIX.setreuid rid
+        ret = FFI::Platform::POSIX.setreuid rid, eid
         Errno.handle if ret == -1
         nil
       end
@@ -558,7 +599,7 @@ module Process
         nil
       end
 
-      def setresuid(rid, eig, sid)
+      def setresuid(rid, eid, sid)
         rid = Rubinius::Type.coerce_to rid, Integer, :to_int
         eid = Rubinius::Type.coerce_to eid, Integer, :to_int
         sid = Rubinius::Type.coerce_to sid, Integer, :to_int
@@ -705,61 +746,12 @@ module Kernel
   end
   module_function :fork
 
-  def system(prog, *args)
-    pid = Process.fork
-    if pid
-      Process.waitpid(pid)
-      $?.exitstatus == 0
-    else
-      begin
-        Kernel.exec(prog, *args)
-      rescue Exception => e
-        if $DEBUG
-          e.render("Unable to execute subprogram", STDERR)
-        end
-        exit! 1
-      end
-
-      if $DEBUG
-        STDERR.puts "Unable to execute subprogram - exec silently returned"
-      end
-      exit! 1
-    end
-  end
-  module_function :system
-
-  def exec(cmd, *args)
-    if args.empty? and cmd.kind_of? String
-      raise Errno::ENOENT if cmd.empty?
-      if /([*?{}\[\]<>()~&|$;'`"\n\s]|[^\w])/o.match(cmd)
-        Process.perform_exec "/bin/sh", ["sh", "-c", cmd]
-      else
-        Process.perform_exec cmd, [cmd]
-      end
-    else
-      if cmd.kind_of? Array
-        prog = cmd[0]
-        name = cmd[1]
-      else
-        name = prog = cmd
-      end
-
-      argv = [name]
-      args.each do |arg|
-        argv << arg.to_s
-      end
-
-      Process.perform_exec prog, argv
-    end
-  end
-  module_function :exec
-
   def `(str) #`
     str = StringValue(str) unless str.kind_of?(String)
     pid, output = Process.replace(str)
 
     Process.waitpid(pid)
-    return output
+    return Rubinius::Type.external_string(output)
   end
 
   module_function :` # `

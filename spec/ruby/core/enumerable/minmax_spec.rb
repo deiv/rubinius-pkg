@@ -1,8 +1,8 @@
 require File.expand_path('../../../spec_helper', __FILE__)
 require File.expand_path('../fixtures/classes', __FILE__)
 
-describe "Enumerable#minmax" do
-  ruby_version_is '1.8.7' do
+ruby_version_is "1.8.7" do
+  describe "Enumerable#minmax" do
     before :each do
       @enum = EnumerableSpecs::Numerous.new(6, 4, 5, 10, 8)
 
@@ -43,9 +43,14 @@ describe "Enumerable#minmax" do
       end
     end
 
-    it "return the minimun when using a block rule" do
+    it "returns the minimum when using a block rule" do
       @enum.minmax {|a,b| b <=> a }.should == [10, 4]
       @strs.minmax {|a,b| a.length <=> b.length }.should == ["2", "55555"]
+    end
+
+    it "gathers whole arrays as elements when each yields multiple" do
+      multi = EnumerableSpecs::YieldsMulti.new
+      multi.minmax.should == [[1, 2], [6, 7, 8, 9]]
     end
   end
 end

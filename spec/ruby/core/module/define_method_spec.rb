@@ -4,6 +4,10 @@ require File.expand_path('../fixtures/classes', __FILE__)
 class DefineMethodSpecClass
 end
 
+ruby_version_is "1.9" do
+  require File.expand_path("../versions/define_method_1.9", __FILE__)
+end
+
 describe "Module#define_method when given an UnboundMethod" do
   it "passes the given arguments to the new method" do
     klass = Class.new do
@@ -94,6 +98,22 @@ describe "Module#define_method" do
     }.should raise_error(ArgumentError)
   end
 
+  ruby_version_is ""..."1.9" do
+    it "raises a TypeError if frozen" do
+      lambda {
+        Class.new { freeze; define_method(:foo) {} }
+      }.should raise_error(TypeError)
+    end
+  end
+
+  ruby_version_is "1.9" do
+    it "raises a RuntimeError if frozen" do
+      lambda {
+        Class.new { freeze; define_method(:foo) {} }
+      }.should raise_error(RuntimeError)
+    end
+  end
+
   it "accepts a Method (still bound)" do
     class DefineMethodSpecClass
       attr_accessor :data
@@ -144,6 +164,17 @@ describe "Module#define_method" do
       method = define_method("return_test") { || true }
       method.is_a?(Proc).should be_true
       # check if it is a lambda:
+      lambda {
+        method.call :too_many_arguments
+      }.should raise_error(ArgumentError)
+    end
+  end
+
+  it "does not change the arity check style of the original proc" do
+    class DefineMethodSpecClass
+      prc = Proc.new { || true }
+      method = define_method("proc_style_test", &prc)
+      prc.call(:too_many_arguments).should be_true
       lambda {
         method.call :too_many_arguments
       }.should raise_error(ArgumentError)
@@ -277,10 +308,14 @@ describe "Module#define_method" do
     end
 
     it "returns the value computed by the block when passed one argument" do
-      @klass.new.m(1, 2).should == [1, [2]]
+      @klass.new.m(1).should == [1, []]
     end
 
     it "returns the value computed by the block when passed two arguments" do
+      @klass.new.m(1, 2).should == [1, [2]]
+    end
+
+    it "returns the value computed by the block when passed three arguments" do
       @klass.new.m(1, 2, 3).should == [1, [2, 3]]
     end
   end

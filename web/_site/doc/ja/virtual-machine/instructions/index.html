@@ -26,6 +26,11 @@
     <!--[if IE]><link href="/stylesheets/blueprint/ie.css" media="screen" rel="stylesheet" type="text/css" /><![endif]-->
     <!--[if IE]><link href="/stylesheets/ie.css"           media="screen" rel="stylesheet" type="text/css" /><![endif]-->
     <link href="/stylesheets/pygments.css" media="screen" rel="stylesheet" />
+
+    <link href="/favicon.ico"                 rel="shortcut icon"    type="image/vnd.microsoft.icon" />
+    <link href="/images/apple-touch-icon.png" rel="apple-touch-icon" type="image/png" />
+    <link href="/images/apple-touch-icon.png" rel="apple-touch-icon" type="image/png" sizes="72x72"   />
+    <link href="/images/apple-touch-icon.png" rel="apple-touch-icon" type="image/png" sizes="114x114" />
   </head>
 
   <body>
@@ -82,6 +87,12 @@
     <li><a href="/doc/fr/virtual-machine/instructions/"
       
       >fr</a></li>
+    
+    
+    
+    <li><a href="/doc/it/virtual-machine/instructions/"
+      
+      >it</a></li>
     
     
     
@@ -179,7 +190,7 @@
 </thead>
 <tbody>
 <tr><td>...</td><td>nil</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="push_true">push_true()</a></h3>
@@ -192,7 +203,7 @@
 </thead>
 <tbody>
 <tr><td>...</td><td>true</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="push_false">push_false()</a></h3>
@@ -205,7 +216,7 @@
 </thead>
 <tbody>
 <tr><td>...</td><td>false</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="push_int">push_int(number)</a></h3>
@@ -218,7 +229,7 @@
 </thead>
 <tbody>
 <tr><td>...</td><td>number</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 
@@ -243,7 +254,7 @@
 </thead>
 <tbody>
 <tr><td>...</td><td>self</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="set_literal">set_literal(literal)</a></h3>
@@ -265,7 +276,7 @@
 <p>Unlike other literals such as strings and numbers, creating a Regexp
    literal (i.e. via the /regex/ syntax) is a two step process to create the
    literal slot for the Regexp, create a literal for the string between the
-   &lsquo;/&rsquo; delimiters and create a new Regexp object passing it the string.  Only
+   ‘/’ delimiters and create a new Regexp object passing it the string.  Only
    then can the literal value be set, using the set_literal opcode.</p>
 
 <h3><a class="instruction" name="push_literal">push_literal(literal)</a></h3>
@@ -279,7 +290,7 @@
 </thead>
 <tbody>
 <tr><td>...</td><td>literal</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 
@@ -322,7 +333,7 @@
 </thead>
 <tbody>
 <tr><td>value</td><td>...</td></tr>
-<tr><td>...</td><td /></tr>
+<tr><td>...</td><td></td></tr>
 </tbody>
 </table>
 
@@ -342,7 +353,7 @@
 </thead>
 <tbody>
 <tr><td>value</td><td>...</td></tr>
-<tr><td>...</td><td /></tr>
+<tr><td>...</td><td></td></tr>
 </tbody>
 </table>
 
@@ -405,7 +416,7 @@
 <tbody>
 <tr><td>s0</td><td>s0</td></tr>
 <tr><td>...</td><td>s0</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="dup_many">dup_many(count)</a></h3>
@@ -429,9 +440,9 @@
 <tr><td>   ...
 </td><td>   value1
 </td></tr>
-<tr><td /><td>   value2
+<tr><td></td><td>   value2
 </td></tr>
-<tr><td /><td>   ...
+<tr><td></td><td>   ...
 </td></tr>
 </tbody>
 </table>
@@ -445,7 +456,7 @@
 </thead>
 <tbody>
 <tr><td>value</td><td>...</td></tr>
-<tr><td>...</td><td /></tr>
+<tr><td>...</td><td></td></tr>
 </tbody>
 </table>
 
@@ -466,9 +477,9 @@
 </td><td>   ...
 </td></tr>
 <tr><td>   value2
-</td><td /></tr>
+</td><td></td></tr>
 <tr><td>   ...
-</td><td /></tr>
+</td><td></td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="rotate">rotate(count)</a></h3>
@@ -548,7 +559,7 @@
 </thead>
 <tbody>
 <tr><td>...</td><td>value</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 
@@ -570,7 +581,7 @@
 </thead>
 <tbody>
 <tr><td>...</td><td>value</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 
@@ -593,7 +604,7 @@
 
 <p>Updates the value of a local variable contained in an enclosing scope</p>
 
-<p>Read a value from the top of these stack and use it to update a local
+<p>Read a value from the top of the stack and use it to update a local
    variable in an enclosing scope. The <em>depth</em> and <em>index</em> operands
    identify the specific local the same as in <code>push_local_depth</code>.</p>
 
@@ -630,7 +641,7 @@
 </thead>
 <tbody>
 <tr><td>...</td><td>boolean</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 
@@ -649,7 +660,7 @@
 </thead>
 <tbody>
 <tr><td>...</td><td>exception</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 
@@ -689,7 +700,7 @@
 </thead>
 <tbody>
 <tr><td>...</td><td>exc_state</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="restore_exception_state">restore_exception_state()</a></h3>
@@ -704,7 +715,7 @@
 </thead>
 <tbody>
 <tr><td>exception</td><td>...</td></tr>
-<tr><td>...</td><td /></tr>
+<tr><td>...</td><td></td></tr>
 </tbody>
 </table>
 
@@ -725,7 +736,7 @@
 </thead>
 <tbody>
 <tr><td>value</td><td>...</td></tr>
-<tr><td>...</td><td /></tr>
+<tr><td>...</td><td></td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="setup_unwind">setup_unwind(ip, type)</a></h3>
@@ -763,7 +774,7 @@
 
 <p>Remove the next unused unwind registration from the current invocation.
    This instruction is paired with <code>setup_unwind</code> to remove registrations
-   when control exits a section of code that registered a handler but didn&rsquo;t
+   when control exits a section of code that registered a handler but didn’t
    use it. For example, exiting a begin that had a rescue expression.</p>
 
 <table class="stack_effect">
@@ -872,11 +883,11 @@
 </td><td>   ...
 </td></tr>
 <tr><td>   value2
-</td><td /></tr>
+</td><td></td></tr>
 <tr><td>   value1
-</td><td /></tr>
+</td><td></td></tr>
 <tr><td>   ...
-</td><td /></tr>
+</td><td></td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="cast_array">cast_array()</a></h3>
@@ -890,7 +901,7 @@ tuple data.</li>
   <li>If in 1.9 mode and the input is nil, an empty Array is returned</li>
 </ol>
 
-<p>If the input is any other type, call <code>Array.coerce_into_array(value)</code>.
+<p>If the input is any other type, call <code>Rubinius::Type.coerce_to_array(value)</code>.
    If the return value of the method call is an <code>Array</code>, make it the result.
    Otherwise make the result an 1 element <code>Array</code> contain the original value.</p>
 
@@ -924,14 +935,14 @@ tuple data.</li>
 <tr><td>   ...
 </td><td>   [value2, ..., valueN]
 </td></tr>
-<tr><td /><td>   ...
+<tr><td></td><td>   ...
 </td></tr>
 </tbody>
 </table>
-<h3><a class="instruction" name="set_ivar">set_ivar(index)</a></h3>
+<h3><a class="instruction" name="set_ivar">set_ivar(literal)</a></h3>
 
 <p>Pops a value off the stack, and uses it to set the value of the instance
-   variable identifies by the literal specified by operand <em>index</em>.  The
+   variable identifies by the literal specified by operand <em>literal</em>.  The
    value popped off the stack is then pushed back on again.</p>
 
 <table class="stack_effect">
@@ -943,9 +954,9 @@ tuple data.</li>
 <tr><td>...</td><td>...</td></tr>
 </tbody>
 </table>
-<h3><a class="instruction" name="push_ivar">push_ivar(index)</a></h3>
+<h3><a class="instruction" name="push_ivar">push_ivar(literal)</a></h3>
 
-<p>Pushes the instance variable identified by <em>index</em> onto the stack.</p>
+<p>Pushes the instance variable identified by <em>literal</em> onto the stack.</p>
 
 <table class="stack_effect">
 <thead>
@@ -953,7 +964,7 @@ tuple data.</li>
 </thead>
 <tbody>
 <tr><td>...</td><td>value</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="push_const">push_const(literal)</a></h3>
@@ -969,7 +980,7 @@ tuple data.</li>
 </thead>
 <tbody>
 <tr><td>...</td><td>constant</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 
@@ -977,10 +988,10 @@ tuple data.</li>
 <pre><code> engine = RUBY_ENGINE # RUBY_ENGINE is a constant defined by Rubinius
 </code></pre>
 
-<h3><a class="instruction" name="set_const">set_const(index)</a></h3>
+<h3><a class="instruction" name="set_const">set_const(literal)</a></h3>
 
 <p>Pops an object off the stack, and uses value to set a constant named
-   by the literal <em>index</em>. The value is pushed back onto the stack.</p>
+   by the <em>literal</em>. The value is pushed back onto the stack.</p>
 
 <table class="stack_effect">
 <thead>
@@ -991,9 +1002,9 @@ tuple data.</li>
 <tr><td>...</td><td>...</td></tr>
 </tbody>
 </table>
-<h3><a class="instruction" name="set_const_at">set_const_at(index)</a></h3>
+<h3><a class="instruction" name="set_const_at">set_const_at(literal)</a></h3>
 
-<p>Pop a value from the literals table specified by the operand <em>index</em> and
+<p>Pop a value from the literals table specified by the operand <em>literal</em> and
    use it as the value of a constant named inside a Module object popped from
    the stack.  The <em>value</em> is pushed back on the stack.</p>
 
@@ -1009,13 +1020,13 @@ tuple data.</li>
 </td><td>   ...
 </td></tr>
 <tr><td>   ...
-</td><td /></tr>
+</td><td></td></tr>
 </tbody>
 </table>
-<h3><a class="instruction" name="find_const">find_const(index)</a></h3>
+<h3><a class="instruction" name="find_const">find_const(literal)</a></h3>
 
 <p>Pops <em>module</em> off the stack, and searches within its namespace for the
-   constant named by the literal specified by the operand <em>index</em>. If found,
+   constant named by the literal specified by the operand <em>literal</em>. If found,
    it is pushed onto the stack; otherwise, nothing is pushed onto the stack,
    and a <code>NameError</code> exception is raised.</p>
 
@@ -1046,10 +1057,10 @@ tuple data.</li>
 </thead>
 <tbody>
 <tr><td>...</td><td>constant</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
-<h3><a class="instruction" name="push_const_fast">push_const_fast(literal, association)</a></h3>
+<h3><a class="instruction" name="push_const_fast">push_const_fast(literal)</a></h3>
 
 <p>Pushes a constant onto the stack. Caches the lookup to provide faster
    future lookup. This instruction is normally emitted only by the Generator.</p>
@@ -1060,7 +1071,7 @@ tuple data.</li>
 </thead>
 <tbody>
 <tr><td>...</td><td>constant</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 
@@ -1071,6 +1082,31 @@ tuple data.</li>
 <h4>See Also</h4>
 <ul class="insn_cross_ref">
 <li><a href="#push_const">push_const</a></li>
+</ul>
+<h3><a class="instruction" name="find_const_fast">find_const_fast(literal)</a></h3>
+
+<p>Pushes a constant onto the stack scoped under the module on the top of
+   the stack. Caches the lookup to provide faster future lookup. This
+   instruction is normally emitted only by the Generator.</p>
+
+<table class="stack_effect">
+<thead>
+<tr><th>Before</th><th>After</th></tr>
+</thead>
+<tbody>
+<tr><td>module</td><td>constant</td></tr>
+<tr><td>...</td><td>...</td></tr>
+</tbody>
+</table>
+
+<h4 id="example-6">Example</h4>
+<pre><code> str = "abc"
+ enum = Enumerable::Enumerator(str, :each_byte)
+</code></pre>
+
+<h4>See Also</h4>
+<ul class="insn_cross_ref">
+<li><a href="#find_const">find_const</a></li>
 </ul>
 <h3><a class="instruction" name="set_call_flags">set_call_flags(flags)</a></h3>
 
@@ -1149,11 +1185,11 @@ tuple data.</li>
 </td><td>   ...
 </td></tr>
 <tr><td>   arg2
-</td><td /></tr>
+</td><td></td></tr>
 <tr><td>   arg1
-</td><td /></tr>
+</td><td></td></tr>
 <tr><td>   receiver
-</td><td /></tr>
+</td><td></td></tr>
 </tbody>
 </table>
 
@@ -1189,13 +1225,13 @@ tuple data.</li>
 </td><td>   ...
 </td></tr>
 <tr><td>   ...
-</td><td /></tr>
+</td><td></td></tr>
 <tr><td>   arg2
-</td><td /></tr>
+</td><td></td></tr>
 <tr><td>   arg1
-</td><td /></tr>
+</td><td></td></tr>
 <tr><td>   receiver
-</td><td /></tr>
+</td><td></td></tr>
 </tbody>
 </table>
 
@@ -1216,8 +1252,8 @@ tuple data.</li>
 <tbody>
 <tr><td>block</td><td>value</td></tr>
 <tr><td>array</td><td>...</td></tr>
-<tr><td>receiver</td><td /></tr>
-<tr><td>...</td><td /></tr>
+<tr><td>receiver</td><td></td></tr>
+<tr><td>...</td><td></td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="send_super_stack_with_block">send_super_stack_with_block(literal, count)</a></h3>
@@ -1240,11 +1276,11 @@ tuple data.</li>
 </td><td>   ...
 </td></tr>
 <tr><td>   ...
-</td><td /></tr>
+</td><td></td></tr>
 <tr><td>   arg2
-</td><td /></tr>
+</td><td></td></tr>
 <tr><td>   arg1
-</td><td /></tr>
+</td><td></td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="send_super_stack_with_splat">send_super_stack_with_splat(literal, count)</a></h3>
@@ -1267,11 +1303,11 @@ tuple data.</li>
 </td><td>   ...
 </td></tr>
 <tr><td>   ...
-</td><td /></tr>
+</td><td></td></tr>
 <tr><td>   arg2
-</td><td /></tr>
+</td><td></td></tr>
 <tr><td>   arg1
-</td><td /></tr>
+</td><td></td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="push_block">push_block()</a></h3>
@@ -1285,7 +1321,7 @@ tuple data.</li>
 </thead>
 <tbody>
 <tr><td>...</td><td>block</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 
@@ -1303,7 +1339,7 @@ tuple data.</li>
 </thead>
 <tbody>
 <tr><td>...</td><td>boolean</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 
@@ -1312,7 +1348,7 @@ tuple data.</li>
 
 <h3><a class="instruction" name="create_block">create_block(literal)</a></h3>
 
-<p>Read a CompiledMethod specified by the operand +literal+ and create a
+<p>Read a CompiledCode specified by the operand +literal+ and create a
    <code>BlockEnvironment</code>.  Push the new <code>BlockEnvironment</code> object on the stack.</p>
 
 <table class="stack_effect">
@@ -1321,7 +1357,7 @@ tuple data.</li>
 </thead>
 <tbody>
 <tr><td>...</td><td>block</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="cast_for_single_block_arg">cast_for_single_block_arg()</a></h3>
@@ -1346,7 +1382,7 @@ tuple data.</li>
 </thead>
 <tbody>
 <tr><td>...</td><td>argument</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 
@@ -1360,7 +1396,7 @@ tuple data.</li>
    the arg is an array.</p>
 
 <p>If the Proc invoked from was in lambda mode, and one argument is passed:
-     * and it&rsquo;s an Array, push it.
+     * and it’s an Array, push it.
      * and it responds to <code>#to_ary</code>, try and convert it and push it.
      * otherwise wrap it in a one element Array and push it.</p>
 
@@ -1379,11 +1415,11 @@ tuple data.</li>
 </td><td>   ...
 </td></tr>
 <tr><td>   ...
-</td><td /></tr>
+</td><td></td></tr>
 </tbody>
 </table>
 
-<h4 id="example-6">Example</h4>
+<h4 id="example-7">Example</h4>
 <pre><code> [[1,2,3]].each do |i,j,k|
    # do something
  end
@@ -1406,7 +1442,7 @@ tuple data.</li>
 </thead>
 <tbody>
 <tr><td>...</td><td>arguments</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="yield_stack">yield_stack(count)</a></h3>
@@ -1425,11 +1461,11 @@ tuple data.</li>
 </td><td>   ...
 </td></tr>
 <tr><td>   arg2
-</td><td /></tr>
+</td><td></td></tr>
 <tr><td>   arg1
-</td><td /></tr>
+</td><td></td></tr>
 <tr><td>   ...
-</td><td /></tr>
+</td><td></td></tr>
 </tbody>
 </table>
 
@@ -1454,13 +1490,13 @@ tuple data.</li>
 </td><td>   ...
 </td></tr>
 <tr><td>   ...
-</td><td /></tr>
+</td><td></td></tr>
 <tr><td>   arg2
-</td><td /></tr>
+</td><td></td></tr>
 <tr><td>   arg1
-</td><td /></tr>
+</td><td></td></tr>
 <tr><td>   ...
-</td><td /></tr>
+</td><td></td></tr>
 </tbody>
 </table>
 
@@ -1480,7 +1516,7 @@ tuple data.</li>
 <tbody>
 <tr><td>prefix</td><td>string</td></tr>
 <tr><td>suffix</td><td>...</td></tr>
-<tr><td>...</td><td /></tr>
+<tr><td>...</td><td></td></tr>
 </tbody>
 </table>
 
@@ -1509,9 +1545,9 @@ tuple data.</li>
 </td><td>   ...
 </td></tr>
 <tr><td>   string2
-</td><td /></tr>
+</td><td></td></tr>
 <tr><td>   string1
-</td><td /></tr>
+</td><td></td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="string_dup">string_dup()</a></h3>
@@ -1531,7 +1567,7 @@ tuple data.</li>
 </table>
 <h3><a class="instruction" name="push_scope">push_scope()</a></h3>
 
-<p>Pushes the current <code>StaticScope</code> object on the stack. Many operations are
+<p>Pushes the current <code>ConstantScope</code> object on the stack. Many operations are
    defered to the current scope. This operation retrieves the current scope
    so methods can be called on it.</p>
 
@@ -1541,16 +1577,13 @@ tuple data.</li>
 </thead>
 <tbody>
 <tr><td>...</td><td>scope</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="add_scope">add_scope()</a></h3>
 
-<p>Create a new <code>StaticScope</code> object for the given Module on the stack.
+<p>Create a new <code>ConstantScope</code> object for the given Module on the stack.
    This scope is chained off the current scope of the method.</p>
-
-<p>This also sets the scope of the current <code>CompiledMethod</code> to the new
-   <code>StaticScope</code>.</p>
 
 <table class="stack_effect">
 <thead>
@@ -1558,7 +1591,7 @@ tuple data.</li>
 </thead>
 <tbody>
 <tr><td>module</td><td>...</td></tr>
-<tr><td>...</td><td /></tr>
+<tr><td>...</td><td></td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="push_variables">push_variables()</a></h3>
@@ -1572,7 +1605,7 @@ tuple data.</li>
 </thead>
 <tbody>
 <tr><td>...</td><td>scope</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="check_interrupts">check_interrupts()</a></h3>
@@ -1646,16 +1679,16 @@ tuple data.</li>
    runtime to determine which code path is executed.</p>
 
 <p>For example, a method such as <code>Fixnum#times</code> can be optimised at compile
-   time, but we can&rsquo;t know until runtime whether or not the <code>Fixnum#times</code>
+   time, but we can’t know until runtime whether or not the <code>Fixnum#times</code>
    method has been overridden. The serial number check is used to determine
    each time the code is executed, whether or not the standard <code>Fixnum#times</code>
    has been overridden. It leverages the serial number field on a
-   <code>CompiledMethod</code>, is initialised to either 0 (for kernel land methods) or
+   <code>CompiledCode</code>, is initialised to either 0 (for kernel land methods) or
    1 (for user land methods).</p>
 
 <h3><a class="instruction" name="check_serial_private">check_serial_private(literal, serial)</a></h3>
 
-<p>Checks if the specified method&rsquo;s serial number matches an expected value.
+<p>Checks if the specified method’s serial number matches an expected value.
    Considers <code>private</code> methods too.</p>
 
 <table class="stack_effect">
@@ -1683,7 +1716,7 @@ tuple data.</li>
 </thead>
 <tbody>
 <tr><td>...</td><td>value</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 
@@ -1728,7 +1761,7 @@ tuple data.</li>
 <tbody>
 <tr><td>object</td><td>boolean</td></tr>
 <tr><td>class</td><td>...</td></tr>
-<tr><td>...</td><td /></tr>
+<tr><td>...</td><td></td></tr>
 </tbody>
 </table>
 
@@ -1750,7 +1783,7 @@ tuple data.</li>
 <tbody>
 <tr><td>object</td><td>boolean</td></tr>
 <tr><td>class</td><td>...</td></tr>
-<tr><td>...</td><td /></tr>
+<tr><td>...</td><td></td></tr>
 </tbody>
 </table>
 
@@ -1768,7 +1801,7 @@ tuple data.</li>
 </thead>
 <tbody>
 <tr><td>...</td><td>value</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 
@@ -1785,7 +1818,7 @@ tuple data.</li>
 </thead>
 <tbody>
 <tr><td>...</td><td>value</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 
@@ -1802,7 +1835,7 @@ tuple data.</li>
 </thead>
 <tbody>
 <tr><td>...</td><td>value</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 
@@ -1819,7 +1852,7 @@ tuple data.</li>
 </thead>
 <tbody>
 <tr><td>...</td><td>value</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 
@@ -1842,7 +1875,7 @@ tuple data.</li>
 <tbody>
 <tr><td>value1</td><td>sum</td></tr>
 <tr><td>value2</td><td>...</td></tr>
-<tr><td>...</td><td /></tr>
+<tr><td>...</td><td></td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="meta_send_op_minus">meta_send_op_minus(literal)</a></h3>
@@ -1861,7 +1894,7 @@ tuple data.</li>
 <tbody>
 <tr><td>value1</td><td>difference</td></tr>
 <tr><td>value2</td><td>...</td></tr>
-<tr><td>...</td><td /></tr>
+<tr><td>...</td><td></td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="meta_send_op_equal">meta_send_op_equal(literal)</a></h3>
@@ -1880,7 +1913,7 @@ tuple data.</li>
 <tbody>
 <tr><td>value1</td><td>boolean</td></tr>
 <tr><td>value2</td><td>...</td></tr>
-<tr><td>...</td><td /></tr>
+<tr><td>...</td><td></td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="meta_send_op_lt">meta_send_op_lt(literal)</a></h3>
@@ -1899,7 +1932,7 @@ tuple data.</li>
 <tbody>
 <tr><td>value1</td><td>boolean</td></tr>
 <tr><td>value2</td><td>...</td></tr>
-<tr><td>...</td><td /></tr>
+<tr><td>...</td><td></td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="meta_send_op_gt">meta_send_op_gt(literal)</a></h3>
@@ -1918,7 +1951,7 @@ tuple data.</li>
 <tbody>
 <tr><td>value1</td><td>boolean</td></tr>
 <tr><td>value2</td><td>...</td></tr>
-<tr><td>...</td><td /></tr>
+<tr><td>...</td><td></td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="meta_send_op_tequal">meta_send_op_tequal(literal)</a></h3>
@@ -1938,12 +1971,12 @@ tuple data.</li>
 <tbody>
 <tr><td>value1</td><td>boolean</td></tr>
 <tr><td>value2</td><td>...</td></tr>
-<tr><td>...</td><td /></tr>
+<tr><td>...</td><td></td></tr>
 </tbody>
 </table>
 
 <h4 id="notes-24">Notes</h4>
-<p>Exactly like equal, except calls <code>#===</code> if it can&rsquo;t handle it directly.</p>
+<p>Exactly like equal, except calls <code>#===</code> if it can’t handle it directly.</p>
 
 <h3><a class="instruction" name="meta_send_call">meta_send_call(literal, count)</a></h3>
 
@@ -1959,11 +1992,11 @@ tuple data.</li>
 </td><td>   retval
 </td></tr>
 <tr><td>   ...
-</td><td /></tr>
+</td><td></td></tr>
 <tr><td>   arg1
-</td><td /></tr>
+</td><td></td></tr>
 <tr><td>   receiver
-</td><td /></tr>
+</td><td></td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="push_my_offset">push_my_offset(index)</a></h3>
@@ -1976,7 +2009,7 @@ tuple data.</li>
 </thead>
 <tbody>
 <tr><td>...</td><td>offset</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 
@@ -2005,11 +2038,11 @@ tuple data.</li>
 </td><td>   ...
 </td></tr>
 <tr><td>   arg2
-</td><td /></tr>
+</td><td></td></tr>
 <tr><td>   arg1
-</td><td /></tr>
+</td><td></td></tr>
 <tr><td>   ...
-</td><td /></tr>
+</td><td></td></tr>
 </tbody>
 </table>
 
@@ -2034,7 +2067,7 @@ tuple data.</li>
 </thead>
 <tbody>
 <tr><td>...</td><td>block</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 
@@ -2052,7 +2085,7 @@ tuple data.</li>
 </thead>
 <tbody>
 <tr><td>...</td><td>value</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="push_stack_local">push_stack_local(which)</a></h3>
@@ -2065,7 +2098,7 @@ tuple data.</li>
 </thead>
 <tbody>
 <tr><td>...</td><td>value</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 
@@ -2102,7 +2135,7 @@ tuple data.</li>
 </thead>
 <tbody>
 <tr><td>...</td><td>value</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 
@@ -2121,7 +2154,7 @@ tuple data.</li>
 </thead>
 <tbody>
 <tr><td>...</td><td>value</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 
@@ -2187,14 +2220,14 @@ tuple data.</li>
 </td><td>   ...
 </td></tr>
 <tr><td>   arg2
-</td><td /></tr>
+</td><td></td></tr>
 <tr><td>   arg1
-</td><td /></tr>
+</td><td></td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="push_rubinius">push_rubinius()</a></h3>
 
-<p>Pushes the top-level global <code>Rubinius</code> constant onto the stack.  Generally
+<p>Pushes the top-level global <code>Rubinius</code> constant onto the stack. Generally
    this is done to call a utility method.</p>
 
 <table class="stack_effect">
@@ -2203,7 +2236,7 @@ tuple data.</li>
 </thead>
 <tbody>
 <tr><td>...</td><td>constant</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="call_custom">call_custom(literal, count)</a></h3>
@@ -2225,16 +2258,16 @@ tuple data.</li>
 </td><td>   ...
 </td></tr>
 <tr><td>   arg2
-</td><td /></tr>
+</td><td></td></tr>
 <tr><td>   arg1
-</td><td /></tr>
-<tr><td>   reciever
-</td><td /></tr>
+</td><td></td></tr>
+<tr><td>   receiver
+</td><td></td></tr>
 </tbody>
 </table>
 <h3><a class="instruction" name="meta_to_s">meta_to_s(literal)</a></h3>
 
-<p>Pop a value off the stack and if it&rsquo;s not a <code>String</code>, call a method
+<p>Pop a value off the stack and if it’s not a <code>String</code>, call a method
    indicated by <em>literal</em> on it.  Push the resulting object back on the
    stack.</p>
 
@@ -2254,13 +2287,28 @@ tuple data.</li>
 
 <h3><a class="instruction" name="push_type">push_type()</a></h3>
 
+<p>Pushes the distinguished module <code>Rubinius::Type</code> onto the stack.</p>
+
 <table class="stack_effect">
 <thead>
 <tr><th>Before</th><th>After</th></tr>
 </thead>
 <tbody>
 <tr><td>...</td><td>constant</td></tr>
-<tr><td /><td>...</td></tr>
+<tr><td></td><td>...</td></tr>
+</tbody>
+</table>
+<h3><a class="instruction" name="push_mirror">push_mirror()</a></h3>
+
+<p>Pushes the distinguished class <code>Rubinius::Mirror</code> onto the stack.</p>
+
+<table class="stack_effect">
+<thead>
+<tr><th>Before</th><th>After</th></tr>
+</thead>
+<tbody>
+<tr><td>...</td><td>constant</td></tr>
+<tr><td></td><td>...</td></tr>
 </tbody>
 </table>
 

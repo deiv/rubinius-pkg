@@ -1,5 +1,6 @@
 require File.expand_path('../../../spec_helper', __FILE__)
 require File.expand_path('../fixtures/classes', __FILE__)
+require File.expand_path('../shared/accessor', __FILE__)
 
 describe "Struct#hash" do
 
@@ -18,6 +19,18 @@ describe "Struct#hash" do
     car.hash.should == similar_car.hash
   end
 
+  it "allows for overriding methods in an included module" do
+    mod = Module.new do
+      def hash
+        "different"
+      end
+    end
+    s = Struct.new(:arg) do
+      include mod
+    end
+    s.new.hash.should == "different"
+  end
+
   ruby_bug "redmine #1852", "1.9.1" do
     it "returns the same hash for recursive structs" do
       car = StructClasses::Car.new("Honda", "Accord", "1998")
@@ -31,4 +44,5 @@ describe "Struct#hash" do
     end
   end
 
+  it_behaves_like :struct_accessor, :hash
 end

@@ -1,15 +1,12 @@
 #ifndef RBX_BUILTIN_EXCEPTION_HPP
 #define RBX_BUILTIN_EXCEPTION_HPP
 
-#include <string>
-
 #include "builtin/object.hpp"
-#include "type_info.hpp"
 
 namespace rubinius {
   class Class;
   class Array;
-  class CompiledMethod;
+  class CompiledCode;
 
   class Exception : public Object {
   public:
@@ -19,6 +16,8 @@ namespace rubinius {
     Object* reason_message_;  // slot
     Array* locations_; // slot
     Exception* parent_; // slot
+    Object* backtrace_; // slot
+    Object* custom_backtrace_; // slot
 
   public:
     /* accessors */
@@ -26,6 +25,8 @@ namespace rubinius {
     attr_accessor(reason_message, Object);
     attr_accessor(locations, Array);
     attr_accessor(parent, Exception);
+    attr_accessor(backtrace, Object);
+    attr_accessor(custom_backtrace, Object);
 
     Object* message() {
       return reason_message_;
@@ -50,6 +51,7 @@ namespace rubinius {
     static Exception* make_errno_exception(STATE, Class* exc_class, Object* reason);
 
     static Exception* make_argument_error(STATE, int expected, int given, Symbol* name=0);
+    static Exception* make_encoding_compatibility_error(STATE, Object* a, Object* b);
     static void argument_error(STATE, int expected, int given);
     static void argument_error(STATE, const char* reason);
     static void regexp_error(STATE, const char* reason);
@@ -78,15 +80,20 @@ namespace rubinius {
     static Exception* make_lje(STATE, CallFrame* frame);
 
     static void internal_error(STATE, CallFrame* frame, const char* reason);
-    static void bytecode_error(STATE, CallFrame* frame, CompiledMethod* cm,
+    static void bytecode_error(STATE, CallFrame* frame, CompiledCode* code,
                                int ip, const char* reason);
     static void frozen_error(STATE, CallFrame* frame);
+
+    static void encoding_compatibility_error(STATE, Object* a, Object* b);
+    static void encoding_compatibility_error(STATE, Object* a, Object* b,
+                                             CallFrame* frame);
 
     // Rubinius.primitive :exception_errno_error
     static Object* errno_error(STATE, Object* reason, Fixnum* ern);
 
     static void errno_error(STATE, const char* reason = NULL, int ern = 0,
                             const char* entity = 0);
+    static void errno_eagain_error(STATE, const char* reason);
 
     /**
      * Convenience predicates for checking the class of an
@@ -119,6 +126,7 @@ namespace rubinius {
     static Class* get_fiber_error(STATE);
     static Class* get_errno_error(STATE, Fixnum* ern);
     static Class* get_runtime_error(STATE);
+    static Class* get_encoding_compatibility_error(STATE);
 
     class Info : public TypeInfo {
     public:

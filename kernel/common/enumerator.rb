@@ -1,52 +1,43 @@
-# A class which provides a method `each' to be used as an Enumerable
-# object.
+# -*- encoding: us-ascii -*-
 
 module Enumerable
   class Enumerator
     include Enumerable
 
-    def initialize(obj, iter=:each, *args)
-      @object = obj
-      @iter = iter.to_sym
-      @args = args
-      @generator = nil
+    def each_with_block
+      @object.__send__ @iter, *@args do |*args|
+        yield(*args)
+      end
     end
+    private :each_with_block
 
-    def each(&block)
-      @object.__send__(@iter, *@args, &block)
+    def each
+      if block_given?
+        each_with_block do |*args|
+          yield(*args)
+        end
+      else
+        self
+      end
     end
-
-    ##
-    # :call-seq:
-    #   enum.each_with_index(*arg){ |obj, i| block }  -> enum or enumerator
-    #
-    # Calls +block+ with two arguments, the item and its index, for
-    # each item in +enum+.
-    #
-    #   hash = {}
-    #   %w[cat dog wombat].each_with_index { |item, index|
-    #     hash[item] = index
-    #   }
-    #
-    #   p hash   #=> {"cat"=>0, "wombat"=>2, "dog"=>1}
 
     def each_with_index
       return to_enum(:each_with_index) unless block_given?
 
       idx = 0
 
-      each do |o|
+      each do
+        o = Rubinius.single_block_arg
         val = yield(o, idx)
         idx += 1
         val
       end
     end
 
-    alias_method :enum_with_index, :each_with_index
-    alias_method :with_index, :each_with_index
-
     if Rubinius::Fiber::ENABLED
       class FiberGenerator
+        attr_reader :result
+
         def initialize(obj)
           @object = obj
           rewind
@@ -75,8 +66,8 @@ module Enumerable
           @done = false
           @fiber = Rubinius::Fiber.new(0) do
             obj = @object
-            obj.each do |val|
-              Rubinius::Fiber.yield val
+            @result = obj.each do |*val|
+              Rubinius::Fiber.yield *val
             end
             @done = true
           end
@@ -87,6 +78,8 @@ module Enumerable
     end
 
     class ThreadGenerator
+      attr_reader :result
+
       def initialize(enum, obj, meth, args)
         @object = obj
         @method = meth
@@ -119,11 +112,12 @@ module Enumerable
         reset unless @thread
 
         @hold_channel << nil
-        val = @channel.receive
+        vals = @channel.receive
 
         raise StopIteration, "iteration has ended" if @done
 
-        return val
+        # return *[1] == [1], unfortunately.
+        return vals.size == 1 ? vals.first : vals
       end
 
       def rewind
@@ -141,9 +135,9 @@ module Enumerable
         @hold_channel = Rubinius::Channel.new
 
         @thread = Thread.new do
-          @object.__send__(@method, *@args) do |val|
+          @result = @object.__send__(@method, *@args) do |*vals|
             @hold_channel.receive
-            @channel << val
+            @channel << vals
           end
 
           # Hold to indicate done to avoid race conditions setting
@@ -157,49 +151,6 @@ module Enumerable
           @channel << nil
         end
       end
-    end
-
-    # Returns the next object in the enumerator
-    # and move the internal position forward.
-    # When the position reached at the end,
-    # internal position is rewound then StopIteration is raised.
-    #
-    # Note that enumeration sequence by next method
-    # does not affect other non-external enumeration methods,
-    # unless underlying iteration methods itself has side-effect, e.g. IO#each_line.
-    #
-    def next
-      unless @generator
-        # Allow #to_generator to return nil, indicating it has none for
-        # this method.
-        if @object.respond_to? :to_generator
-          @generator = @object.to_generator(@iter)
-        end
-
-        if !@generator and gen = FiberGenerator
-          @generator = gen.new(self)
-        else
-          @generator = ThreadGenerator.new(self, @object, @iter, @args)
-        end
-      end
-
-      begin
-        return @generator.next if @generator.next?
-      rescue StopIteration
-      end
-
-      @generator.rewind
-
-      raise StopIteration, "iteration reached end"
-    end
-
-    # Rewinds the enumeration sequence by the next method.
-    #
-    # If the enclosed object responds to a "rewind" method, it is called.
-    #
-    def rewind
-      @generator.rewind if @generator
-      self
     end
   end
 end

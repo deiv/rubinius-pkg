@@ -4,23 +4,22 @@
 namespace rubinius {
   class CodeManager;
   class VM;
+  class State;
 
   class CodeResource {
     bool mark_;
-    bool detached_;
 
   public:
     CodeResource()
-      : mark_(false)
-      , detached_(false)
+      : mark_(true)
     {}
 
     virtual ~CodeResource() { };
-    virtual void cleanup(VM* state, CodeManager* cm) { };
+    virtual void cleanup(State* state, CodeManager* cm) = 0;
     virtual int  size() { return 0; }
     virtual const char* kind() { return "resource"; }
 
-    bool marked() {
+    bool marked() const {
       return mark_ ;
     }
 
@@ -31,15 +30,6 @@ namespace rubinius {
     void clear_mark() {
       mark_ = false;
     }
-
-    bool detached() {
-      return detached_;
-    }
-
-    void set_detached() {
-      detached_ = true;
-    }
-
   };
 }
 

@@ -1,7 +1,7 @@
 #ifndef RBX_INSTR
 #define RBX_INSTR
 
-#include "vm/vmmethod.hpp"
+#include "machine_code.hpp"
 
 namespace rubinius {
   namespace instructions {

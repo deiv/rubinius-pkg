@@ -11,18 +11,19 @@ end
 # Common settings. These can be augmented or overridden
 # by the particular extension Rakefile.
 #
-DEFAULT = RbConfig::CONFIG
+DEFAULT_CONFIG = RbConfig::CONFIG.dup
 
 # Don't like the globals? Too bad, they are simple and the
 # duration of this process is supposed to be short.
 
-$CC       = env "CC", "gcc"
-$CXX      = env "CXX", "g++"
-$LDSHARED = env "LDSHARED", $CXX
+$CC       = env "CC", DEFAULT_CONFIG["CC"]
+$CXX      = env "CXX", DEFAULT_CONFIG["CXX"] || "g++"
+$LDSHARED = env "LDSHARED", Rubinius::BUILD_CONFIG[:ldsharedxx]
 $YACC     = env "YACC", "bison"
 
-$CFLAGS   = env "CFLAGS", Rubinius::BUILD_CONFIG[:user_cflags]
-$CXXFLAGS = env "CXXFLAGS", Rubinius::BUILD_CONFIG[:user_cppflags]
+$CFLAGS   = env "CFLAGS", Rubinius::BUILD_CONFIG[:user_cflags] || ""
+$CXXFLAGS = env "CXXFLAGS", Rubinius::BUILD_CONFIG[:user_cxxflags] || ""
+$CPPFLAGS = env "CPPFLAGS", Rubinius::BUILD_CONFIG[:user_cppflags] || ""
 
 $DEBUGFLAGS = "-O0" if ENV["DEV"]
 
@@ -31,8 +32,8 @@ $LIBS     = env "LIBS"
 $LDDIRS   = env "LDDIRS"
 $LDFLAGS  = env "LDFLAGS", Rubinius::BUILD_CONFIG[:user_ldflags]
 
-$DLEXT    = env "DLEXT", DEFAULT["DLEXT"]
-$LIBEXT   = env "LIBEXT", DEFAULT["LIBEXT"]
+$DLEXT    = env "DLEXT", DEFAULT_CONFIG["DLEXT"]
+$LIBEXT   = env "LIBEXT", DEFAULT_CONFIG["LIBEXT"]
 
 $BITS        = 1.size == 8 ? 64 : 32
 
@@ -42,7 +43,6 @@ def add_define(*defines)
   defines.each do |d|
     define = "-D#{d}"
     add_cflag define
-    add_cxxflag define
   end
 end
 
@@ -50,7 +50,6 @@ def add_include_dir(*dirs)
   dirs.each do |f|
     incl = "-I#{f}"
     add_cflag incl
-    add_cxxflag incl
   end
 end
 
@@ -62,11 +61,8 @@ def add_cxxflag(*flags)
   flags.each { |f| $CXXFLAGS << " #{f}" }
 end
 
-def add_flag(*flags)
-  flags.each do |f|
-    add_cflag f
-    add_cxxflag f
-  end
+def add_cppflag(*flags)
+  flags.each { |f| $CPPFLAGS << " #{f}" }
 end
 
 def add_ldflag(*flags)
@@ -90,28 +86,44 @@ def add_external_lib(*libs)
 end
 
 def add_mri_capi
-  add_cflag DEFAULT["DEFS"]
-  add_cflag DEFAULT["CFLAGS"]
+  add_cflag Rubinius::BUILD_CONFIG[:system_cflags]
+  add_cxxflag Rubinius::BUILD_CONFIG[:system_cxxflags]
+  add_cppflag Rubinius::BUILD_CONFIG[:system_cppflags]
 
-  add_cxxflag DEFAULT["DEFS"]
-  add_cxxflag DEFAULT["CFLAGS"]
+  add_cflag DEFAULT_CONFIG["DEFS"]
+  add_cflag DEFAULT_CONFIG["CFLAGS"]
+  add_cppflag DEFAULT_CONFIG["CPPFLAGS"]
 
-  $LIBS << " #{DEFAULT["LIBS"]}"
-  $LIBS << " #{DEFAULT["DLDLIBS"]}"
+  $LIBS << " #{DEFAULT_CONFIG["LIBS"]}"
+  $LIBS << " #{DEFAULT_CONFIG["DLDLIBS"]}"
 
-  unless RUBY_PLATFORM =~ /mingw/
-    add_ldflag DEFAULT["LDSHARED"].split[1..-1].join(' ')
+  ldshared = DEFAULT_CONFIG["LDSHARED"]
+  if ldshared[0...DEFAULT_CONFIG["CC"].size] == DEFAULT_CONFIG["CC"]
+    ldshared = ldshared[DEFAULT_CONFIG["CC"].size..-1].strip
+  else
+    ldshared = DEFAULT_CONFIG["LDSHARED"].split[1..-1].join(' ')
   end
 
-  add_ldflag DEFAULT["LDFLAGS"]
-  rubyhdrdir = DEFAULT["rubyhdrdir"]
-  if RUBY_VERSION =~ /\A1\.9\./
-    arch_hdrdir = "#{rubyhdrdir}/#{DEFAULT['arch']}"
+  case RUBY_PLATFORM
+  when /mingw/
+    # do nothing
+  when /darwin/
+    # necessary to avoid problems with RVM injecting flags into the MRI build
+    # process.
+    add_ldflag ldshared.gsub(/-dynamiclib/, "")
+  else
+    add_ldflag ldshared
+  end
+
+  add_ldflag DEFAULT_CONFIG["LDFLAGS"]
+  rubyhdrdir = DEFAULT_CONFIG["rubyhdrdir"]
+  if rubyhdrdir
+    arch_hdrdir = "#{rubyhdrdir}/#{DEFAULT_CONFIG['arch']}"
     add_include_dir rubyhdrdir
     add_include_dir arch_hdrdir
-    add_link_dir DEFAULT["archdir"]
+    add_link_dir DEFAULT_CONFIG["archdir"]
   else
-    add_include_dir DEFAULT["archdir"]
+    add_include_dir DEFAULT_CONFIG["archdir"]
   end
 end
 
@@ -123,18 +135,30 @@ def include19_dir
   File.expand_path("../../vm/capi/19/include", __FILE__)
 end
 
+def include20_dir
+  File.expand_path("../../vm/capi/20/include", __FILE__)
+end
+
 def add_rbx_capi
-  add_cflag "-ggdb3"
-  add_cxxflag "-ggdb3"
+  add_cflag Rubinius::BUILD_CONFIG[:system_cflags]
+  add_cxxflag Rubinius::BUILD_CONFIG[:system_cxxflags]
+  add_cppflag Rubinius::BUILD_CONFIG[:system_cppflags]
+  add_cflag "-g"
+  add_cxxflag "-fno-rtti"
   if ENV['DEV']
     add_cflag "-O0"
-    add_cxxflag "-O0"
   else
     add_cflag "-O2"
-    add_cxxflag "-O2"
   end
-  add_include_dir include18_dir
-  add_include_dir include19_dir
+
+  case ENV['BUILD_VERSION']
+  when "18"
+    add_include_dir include18_dir
+  when "19"
+    add_include_dir include19_dir
+  when "20"
+    add_include_dir include20_dir
+  end
 end
 
 # Setup some initial computed values
@@ -142,57 +166,7 @@ end
 add_include_dir "."
 add_link_dir "."
 
-# Setup platform-specific values
-#
-# (Adapted from EventMachine. Thank you EventMachine and tmm1 !)
-#
-case RUBY_PLATFORM
-when /mswin/, /mingw/, /bccwin32/
-  # TODO: discovery helpers
-  #check_heads(%w[windows.h winsock.h], true)
-  #check_libs(%w[kernel32 rpcrt4 gdi32], true)
-
-  if RUBY_PLATFORM =~ /mingw/
-    $LDSHARED = "#{$CXX} -shared -lstdc++"
-  else
-    add_define "-EHs", "-GR"
-  end
-
-when /solaris/
-  add_define "OS_SOLARIS8"
-
-  if $CC == "cc" and `cc -flags 2>&1` =~ /Sun/ # detect SUNWspro compiler
-    # SUN CHAIN
-    add_define "CC_SUNWspro", "-KPIC"
-    $CXX = $CC
-    $LDSHARED = "#{$CXX} -G -KPIC -lCstd"
-  else
-    # GNU CHAIN
-    # on Unix we need a g++ link, not gcc.
-    $LDSHARED = "#{$CXX} -shared"
-  end
-
-when /openbsd/
-  # OpenBSD branch contributed by Guillaume Sellier.
-
-  # on Unix we need a g++ link, not gcc. On OpenBSD, linking against
-  # libstdc++ have to be explicitly done for shared libs
-  $LDSHARED = "#{$CXX} -shared -lstdc++ -fPIC"
-  add_flag "-fPIC"
-
-when /darwin/
-  # on Unix we need a g++ link, not gcc.
-  # Ff line contributed by Daniel Harple.
-  $LDSHARED = "#{$CXX} -dynamic -bundle -undefined suppress -flat_namespace -lstdc++"
-
-when /aix/
-  $LDSHARED = "#{$CXX} -shared -Wl,-G -Wl,-brtl"
-
-else
-  # on Unix we need a g++ link, not gcc.
-  $LDSHARED = "#{$CXX} -shared -lstdc++"
-  add_flag "-fPIC"
-end
+add_define *Rubinius::BUILD_CONFIG[:defines]
 
 # To quiet MRI's warnings about ivars being uninitialized.
 # Doesn't need to be a method, but it's nicely encapsulated.
@@ -212,6 +186,7 @@ def common_headers(*extra)
   @common_headers ||= FileList[
     include18_dir + "/*.h",
     include19_dir + "/*.h",
+    include20_dir + "/*.h",
     *extra
   ].existing
 end
@@ -234,9 +209,9 @@ end
 
 def graph_dependencies(sources, directories=[], objects_dir=nil)
   directories = Array(directories)
-  directories.concat [".", include18_dir, include19_dir]
+  directories.concat [".", include18_dir, include19_dir, include20_dir]
 
-  grapher = DependencyGrapher.new sources, directories
+  grapher = DependencyGrapher.new $CC, sources, directories
   grapher.objects_dir = objects_dir
   grapher.process
 
@@ -256,7 +231,7 @@ end
 def qsh(cmd)
   cmd << " > #{DEV_NULL}" unless $verbose
   puts cmd if $verbose
-  unless result = rake_system(cmd)
+  unless result = system(cmd)
     fail "Command failed with status (#{$?.exitstatus}): [#{cmd}]"
   end
   result
@@ -512,12 +487,12 @@ end
 
 rule ".o" => ".c" do |t|
   report_command "CC #{t.source}"
-  qsh "#{$CC} -c -o #{t.name} #{$CFLAGS} #{$DEBUGFLAGS} #{t.source}"
+  qsh "#{$CC} -c -o #{t.name} #{$CPPFLAGS} #{$CFLAGS} #{$DEBUGFLAGS} #{t.source}"
 end
 
 rule ".o" => ".cpp" do |t|
   report_command "CXX #{t.source}"
-  qsh "#{$CXX} -c -o #{t.name} #{$CXXFLAGS} #{$DEBUGFLAGS} #{t.source}"
+  qsh "#{$CXX} -c -o #{t.name} #{$CPPFLAGS} #{$CFLAGS} #{$CXXFLAGS} #{$DEBUGFLAGS} #{t.source}"
 end
 
 rule ".#{$DLEXT}" do |t|

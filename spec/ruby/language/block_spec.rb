@@ -11,6 +11,16 @@ describe "A block" do
     @y.z { var }.should == 1
   end
 
+  it "allows for a leading space before the arguments" do
+    res = @y.s (:a){ 1 }
+    res.should == 1
+  end
+
+  it "allows to define a block variable with the same name as the enclosing block" do
+    o = BlockSpecs::OverwriteBlockVariable.new
+    o.z { 1 }.should == 1
+  end
+
   ruby_version_is ""..."1.9" do
     it "overwrites a captured local when used as an argument" do
       var = 1
@@ -145,12 +155,20 @@ describe "A block" do
       @y.s(obj) { |a, b| [a, b] }.should == [obj, nil]
     end
 
-    it "raises an TypeError if #to_ary does not return an Array" do
+    it "raises a TypeError if #to_ary does not return an Array" do
       obj = mock("block yield to_ary invalid")
       obj.should_receive(:to_ary).and_return(1)
 
       lambda { @y.s(obj) { |a, b| } }.should raise_error(TypeError)
     end
+
+    it "raises the original exception if #to_ary raises an exception" do
+      obj = mock("block yield to_ary raising an exception")
+      obj.should_receive(:to_ary).and_raise(ZeroDivisionError)
+
+      lambda { @y.s(obj) { |a, b| } }.should raise_error(ZeroDivisionError)
+    end
+
   end
 
   describe "taking |a, *b| arguments" do
@@ -210,7 +228,7 @@ describe "A block" do
       @y.s(obj) { |a, *b| [a, b] }.should == [obj, []]
     end
 
-    it "raises an TypeError if #to_ary does not return an Array" do
+    it "raises a TypeError if #to_ary does not return an Array" do
       obj = mock("block yield to_ary invalid")
       obj.should_receive(:to_ary).and_return(1)
 
@@ -248,7 +266,14 @@ describe "A block" do
         @y.s(obj) { |*| 1 }.should == 1
       end
 
-      it "raises an TypeError if #to_ary does not return an Array" do
+      it "does not raise a TypeError if #to_ary returns nil" do
+        obj = mock("block yield to_ary nil")
+        obj.should_receive(:to_ary).and_return(nil)
+
+        @y.s(obj) { |*o| o }.should == [obj]
+      end
+
+      it "raises a TypeError if #to_ary does not return an Array" do
         obj = mock("block yield to_ary invalid")
         obj.should_receive(:to_ary).and_return(1)
 
@@ -301,6 +326,13 @@ describe "A block" do
     end
 
     ruby_version_is ""..."1.9" do
+      it "raises the original exception if #to_ary raises an exception" do
+        obj = mock("block yield to_ary raising an exception")
+        obj.should_receive(:to_ary).and_raise(ZeroDivisionError)
+
+        lambda { @y.s(obj) { |*a| } }.should raise_error(ZeroDivisionError)
+      end
+
       it "calls #to_ary to convert a single yielded object to an Array" do
         obj = mock("block yield to_ary")
         obj.should_receive(:to_ary).and_return([1, 2])
@@ -308,7 +340,7 @@ describe "A block" do
         @y.s(obj) { |*a| a }.should == [obj]
       end
 
-      it "raises an TypeError if #to_ary does not return an Array" do
+      it "raises a TypeError if #to_ary does not return an Array" do
         obj = mock("block yield to_ary invalid")
         obj.should_receive(:to_ary).and_return(1)
 
@@ -371,7 +403,7 @@ describe "A block" do
       @y.s(obj) { |a, | a }.should == obj
     end
 
-    it "raises an TypeError if #to_ary does not return an Array" do
+    it "raises a TypeError if #to_ary does not return an Array" do
       obj = mock("block yield to_ary invalid")
       obj.should_receive(:to_ary).and_return(1)
 
@@ -385,6 +417,11 @@ describe "A block" do
     end
 
     it "destructures a single Array value yielded" do
+      @y.s([1, 2]) { |(a, b)| [a, b] }.should == [1, 2]
+    end
+
+    it "destructures a single Array value yielded when shadowing an outer variable" do
+      a = 9
       @y.s([1, 2]) { |(a, b)| [a, b] }.should == [1, 2]
     end
 
@@ -408,7 +445,7 @@ describe "A block" do
       @y.s(obj) { |(a, b)| [a, b] }.should == [obj, nil]
     end
 
-    it "raises an TypeError if #to_ary does not return an Array" do
+    it "raises a TypeError if #to_ary does not return an Array" do
       obj = mock("block yield to_ary invalid")
       obj.should_receive(:to_ary).and_return(1)
 
@@ -449,13 +486,80 @@ describe "A block" do
       @y.s(obj) { |(a, b), c| [a, b, c] }.should == [obj, nil, nil]
     end
 
-    it "raises an TypeError if #to_ary does not return an Array" do
+    it "raises a TypeError if #to_ary does not return an Array" do
       obj = mock("block yield to_ary invalid")
       obj.should_receive(:to_ary).and_return(1)
 
       lambda { @y.s(obj) { |(a, b), c| } }.should raise_error(TypeError)
     end
   end
+
+  describe "taking nested |a, (b, (c, d))|" do
+    it "assigns nil to the arguments when yielded no values" do
+      @y.m { |a, (b, (c, d))| [a, b, c, d] }.should == [nil, nil, nil, nil]
+    end
+
+    it "destructures separate yielded values" do
+      @y.m(1, 2) { |a, (b, (c, d))| [a, b, c, d] }.should == [1, 2, nil, nil]
+    end
+
+    it "destructures a single multi-level Array value yielded" do
+      @y.m(1, [2, 3]) { |a, (b, (c, d))| [a, b, c, d] }.should == [1, 2, 3, nil]
+    end
+
+    it "destructures a single multi-level Array value yielded" do
+      @y.m(1, [2, [3, 4]]) { |a, (b, (c, d))| [a, b, c, d] }.should == [1, 2, 3, 4]
+    end
+  end
+
+  describe "taking nested |a, ((b, c), d)|" do
+    it "assigns nil to the arguments when yielded no values" do
+      @y.m { |a, ((b, c), d)| [a, b, c, d] }.should == [nil, nil, nil, nil]
+    end
+
+    it "destructures separate yielded values" do
+      @y.m(1, 2) { |a, ((b, c), d)| [a, b, c, d] }.should == [1, 2, nil, nil]
+    end
+
+    it "destructures a single multi-level Array value yielded" do
+      @y.m(1, [2, 3]) { |a, ((b, c), d)| [a, b, c, d] }.should == [1, 2, nil, 3]
+    end
+
+    it "destructures a single multi-level Array value yielded" do
+      @y.m(1, [[2, 3], 4]) { |a, ((b, c), d)| [a, b, c, d] }.should == [1, 2, 3, 4]
+    end
+  end
+
+  describe "arguments with _" do
+
+    ruby_version_is ""..."1.9" do
+      it "extracts arguments with _" do
+        @y.m([[1, 2, 3], 4]) { |(_, a, _), _| a }.should == 4
+      end
+
+      it "assigns the last variable named" do
+        @y.m(1, 2) { |_, _| _ }.should == 2
+      end
+    end
+
+    ruby_version_is "1.9" do
+      it "extracts arguments with _" do
+        @y.m([[1, 2, 3], 4]) { |(_, a, _), _| a }.should == 2
+      end
+
+      it "assigns the first variable named" do
+        @y.m(1, 2) { |_, _| _ }.should == 1
+      end
+    end
+
+  end
+
 end
 
-language_version __FILE__, "block"
+ruby_version_is "1.8"..."1.9" do
+  require File.expand_path("../versions/block_1.8", __FILE__)
+end
+
+ruby_version_is "1.9" do
+  require File.expand_path("../versions/block_1.9", __FILE__)
+end

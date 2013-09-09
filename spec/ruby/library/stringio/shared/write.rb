@@ -1,3 +1,5 @@
+# -*- encoding: utf-8 -*-
+
 describe :stringio_write, :shared => true do
   before(:each) do
     @io = StringIO.new('12345')
@@ -8,6 +10,13 @@ describe :stringio_write, :shared => true do
     obj.should_receive(:to_s).and_return("to_s")
     @io.send(@method, obj)
     @io.string.should == "to_s5"
+  end
+
+  it "raises an IOError if the data String is frozen after creating the StringIO instance" do
+    s = "abcdef"
+    io = StringIO.new s, "w"
+    s.freeze
+    lambda { io.write "xyz" }.should raise_error(IOError)
   end
 end
 
@@ -54,6 +63,62 @@ describe :stringio_write_string, :shared => true do
     @io.send(@method, "test".taint)
     @io.tainted?.should be_false
   end
+
+
+  with_feature :encoding do
+
+    before :each do
+      @enc_io = StringIO.new("Hëllø")
+    end
+
+    it "writes binary data into the io" do
+      data = "Hëll\xFF"
+      data.force_encoding("ASCII-8BIT")
+      @enc_io.send(@method, data)
+      @enc_io.string.should == "Hëll\xFF\xB8"
+    end
+
+    it "writes binary data in different encodings" do
+      data = "Hëllø"
+      @enc_io.send(@method, data)
+      @enc_io.string.should == "Hëllø"
+      data = "Hëll\xFF"
+      data.force_encoding("ASCII-8BIT")
+      @enc_io.send(@method, data)
+      @enc_io.string.should == "HëlløHëll\xFF"
+    end
+
+    it "retains the original encoding" do
+      data = "Hëll\xFF"
+      data.force_encoding("ASCII-8BIT")
+      @enc_io.send(@method, data)
+      @enc_io.string.encoding.should == Encoding::UTF_8
+    end
+
+    it "returns the number of bytes written" do
+      data = "Hëll\xFF"
+      data.force_encoding("ASCII-8BIT")
+      @enc_io.send(@method, data).should == 6
+    end
+
+    it "pads multibyte characters properly" do
+      @enc_io.pos = 8
+      @enc_io.send(@method, 'x')
+      @enc_io.string.should == "Hëllø\000x"
+      @enc_io.send(@method, 9)
+      @enc_io.string.should == "Hëllø\000x9"
+    end
+
+    it "updates ascii_only status" do
+      io = StringIO.new("")
+      io.string.ascii_only?.should be_true
+      data = "hellö"
+      io.send(@method, data)
+      io.string.ascii_only?.should be_false
+    end
+
+  end
+
 end
 
 describe :stringio_write_not_writable, :shared => true do

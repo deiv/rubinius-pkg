@@ -1,5 +1,6 @@
 #include "builtin/object.hpp"
 #include "gc/write_barrier.hpp"
+#include "object_utils.hpp"
 
 namespace rubinius {
 namespace gc {
@@ -9,6 +10,7 @@ namespace gc {
    */
   WriteBarrier::WriteBarrier()
     : remember_set_(new ObjectArray(0))
+    , marked_set_(new ObjectArray(0))
   {}
 
   /**
@@ -16,6 +18,7 @@ namespace gc {
    */
   WriteBarrier::~WriteBarrier() {
     delete remember_set_;
+    delete marked_set_;
   }
 
   /**
@@ -26,9 +29,7 @@ namespace gc {
    * @param target The mature object to be added to the remember set.
    */
   void WriteBarrier::remember_object(Object* target) {
-    thread::SpinLock::LockGuard lg(lock_);
-
-    assert(target->zone() == MatureObjectZone);
+    utilities::thread::SpinLock::LockGuard lg(lock_);
 
     // If it's already remembered, ignore this request
     if(target->remembered_p()) return;
@@ -54,7 +55,7 @@ namespace gc {
    * to be removed from the remember set.
    */
   void WriteBarrier::unremember_object(Object* target) {
-    thread::SpinLock::LockGuard lg(lock_);
+    utilities::thread::SpinLock::LockGuard lg(lock_);
 
     for(ObjectArray::iterator oi = remember_set_->begin();
         oi != remember_set_->end();
@@ -72,27 +73,33 @@ namespace gc {
    * @param mark The mark bit pattern used on the last trace of live objects.
    */
   int WriteBarrier::unremember_objects(unsigned int mark) {
-    thread::SpinLock::LockGuard lg(lock_);
+    utilities::thread::SpinLock::LockGuard lg(lock_);
     int cleared = 0;
-    Object* tmp;
 
     for(ObjectArray::iterator oi = remember_set_->begin();
         oi != remember_set_->end();
-        oi++) {
-      tmp = *oi;
+        ++oi) {
+      Object* tmp = *oi;
       // unremember_object throws a NULL in to remove an object
       // so we don't have to compact the set in unremember
-      if(tmp) {
-        assert(tmp->zone() == MatureObjectZone);
-        assert(!tmp->forwarded_p());
-
-        if(!tmp->marked_p(mark)) {
-          cleared++;
-          *oi = NULL;
-        }
+      if(tmp && !tmp->marked_p(mark)) {
+        cleared++;
+        *oi = NULL;
       }
     }
     return cleared;
+  }
+
+  /**
+   * Store the object in the set to be marked.
+   * Called when it is determined (elsewhere) that the value is stored
+   * in a target object that is already scanned.
+   *
+   * @param target The object to be added to the mark set.
+   */
+  void WriteBarrier::mark_object(Object* val) {
+    utilities::thread::SpinLock::LockGuard lg(lock_);
+    marked_set_->push_back(val);
   }
 
   /**
@@ -105,10 +112,27 @@ namespace gc {
    * prior to this method being called.
    */
   ObjectArray* WriteBarrier::swap_remember_set() {
-    thread::SpinLock::LockGuard lg(lock_);
+    utilities::thread::SpinLock::LockGuard lg(lock_);
 
     ObjectArray* cur = remember_set_;
     remember_set_ = new ObjectArray(0);
+    return cur;
+  }
+
+  /**
+   * Returns the current contents of the remember set, and then sets up a new,
+   * empty remember set.
+   * Note: It is the responsibility of the caller to dispose of the returned
+   * ObjectArray.
+   *
+   * @returns an ObjectArray instance containing the remember set contents
+   * prior to this method being called.
+   */
+  ObjectArray* WriteBarrier::swap_marked_set() {
+    utilities::thread::SpinLock::LockGuard lg(lock_);
+
+    ObjectArray* cur = marked_set_;
+    marked_set_ = new ObjectArray(0);
     return cur;
   }
 

@@ -36,6 +36,7 @@ namespace rubinius {
   class Class;
   class Symbol;
   class Exception;
+  class Encoding;
 
   struct Globals {
 
@@ -46,52 +47,52 @@ namespace rubinius {
      * the constructor for Globals, again, at the END of the list. */
 
     /* classes for the core 'types' */
-    TypedRoot<Class*> blokctx, cmethod, tuple, module, basicobject, object, array;
-    TypedRoot<Class*> klass, methtbl, bytearray, chararray, methctx, blank;
+    TypedRoot<Class*> compiled_code, tuple, module, basicobject, object, array;
+    TypedRoot<Class*> klass, methtbl, bytearray;
     TypedRoot<Class*> blokenv, bignum, regexp, matchdata;
-    TypedRoot<Class*> string, symbol, io;
+    TypedRoot<Class*> string, character, symbol, io;
     TypedRoot<Class*> nil_class, true_class, false_class, fixnum_class, undef_class;
-    TypedRoot<Class*> floatpoint, fastctx, nmc, task, list, list_node;
-    TypedRoot<Class*> channel, thread, staticscope, send_site, selector, lookuptable;
+    TypedRoot<Class*> floatpoint, nmc, list, list_node;
+    TypedRoot<Class*> channel, thread, thread_state, constantscope, constant_table, lookuptable;
     TypedRoot<Class*> iseq, executable, native_function, iobuffer;
-    TypedRoot<Class*> cmethod_vis, included_module;
+    TypedRoot<Class*> included_module;
 
     /* the primary symbol table */
     TypedRoot<Symbol*> sym_method_missing;
+    TypedRoot<Symbol*> sym_respond_to_missing;
     TypedRoot<Symbol*> sym_inherited;
     TypedRoot<Symbol*> sym_from_literal, sym_method_added, sym_s_method_added, sym_init_copy;
     TypedRoot<Symbol*> sym_plus, sym_minus, sym_equal, sym_nequal, sym_tequal, sym_lt, sym_gt;
     TypedRoot<Symbol*> sym_initialize;
-    TypedRoot<Symbol*> sym_coerce_into_array;
+    TypedRoot<Symbol*> sym_coerce_to_array, sym_to_ary;
+    TypedRoot<Symbol*> sym_allocation_site;
 
     TypedRoot<Class*> exception;
     TypedRoot<Class*> exc_arg, exc_segfault;
     TypedRoot<Class*> exc_loe, exc_type, exc_rex, exc_rte;
-    TypedRoot<Class*> exc_stack_explosion;
     TypedRoot<Class*> exc_primitive_failure;
 
     TypedRoot<LookupTable*> external_ivars;
     TypedRoot<LookupTable*> errno_mapping;
-    TypedRoot<LookupTable*> selectors;
     TypedRoot<Object*> config;
     TypedRoot<Symbol*> sym_send;
     TypedRoot<Symbol*> sym_public, sym_private, sym_protected, sym_const_missing;
     TypedRoot<Symbol*> sym_object_id, sym_call, sym_undef;
-    TypedRoot<Object*> top_scope, on_gc_channel;
 
-    TypedRoot<Module*> vm;
-    TypedRoot<Thread*> current_thread;
     TypedRoot<Object*> main, undefined;
     TypedRoot<Class*> dir;
     TypedRoot<Class*> compactlookuptable;
     TypedRoot<Class*> lookuptablebucket;
+    TypedRoot<Class*> constant_table_bucket;
     TypedRoot<Class*> methtblbucket;
     TypedRoot<Class*> access_variable;
     TypedRoot<Module*> rubinius;
     TypedRoot<Class*> time_class;
+    TypedRoot<Class*> stat_class;
     TypedRoot<Class*> integer;
     TypedRoot<Class*> numeric;
     TypedRoot<Class*> memory_pointer;
+    TypedRoot<Module*> ffi;
     TypedRoot<Class*> ffi_pointer;
     TypedRoot<Class*> taskprobe;
     TypedRoot<Class*> randomizer;
@@ -104,16 +105,28 @@ namespace rubinius {
     TypedRoot<Class*> proc; /**< Proc class */
     TypedRoot<Class*> variable_scope;
     TypedRoot<Class*> location;
-    TypedRoot<Exception*> stack_error;
+    TypedRoot<Class*> stack_error;
     TypedRoot<Class*> jump_error;
     TypedRoot<Class*> exc_vm_internal;
     TypedRoot<Class*> exc_vm_bad_bytecode;
-    TypedRoot<Class*> global_cache_entry;
+    TypedRoot<Class*> call_site;
+    TypedRoot<Class*> mono_inline_cache;
+    TypedRoot<Class*> poly_inline_cache;
+    TypedRoot<Class*> inline_cache_entry;
+    TypedRoot<Class*> call_custom_cache;
+    TypedRoot<Class*> respond_to_cache;
+    TypedRoot<Class*> constant_cache;
     TypedRoot<Class*> cls_weakref;
     TypedRoot<Class*> fiber;
     TypedRoot<Class*> alias;
     TypedRoot<Class*> encoding;
+    TypedRoot<Object*> encoding_list;
     TypedRoot<Module*> type;
+    TypedRoot<Class*> vm_class;
+    TypedRoot<Class*> atomic_ref;
+    TypedRoot<Class*> mirror;
+
+    TypedRoot<Encoding*> usascii_encoding, utf8_encoding, ascii8bit_encoding;
 
     /* Add new globals above this line. */
 
@@ -121,8 +134,7 @@ namespace rubinius {
     TypedRoot<Class*> special_classes[SPECIAL_CLASS_SIZE];
 
     Globals() :
-      blokctx(&roots),
-      cmethod(&roots),
+      compiled_code(&roots),
       tuple(&roots),
       module(&roots),
       basicobject(&roots),
@@ -131,14 +143,12 @@ namespace rubinius {
       klass(&roots),
       methtbl(&roots),
       bytearray(&roots),
-      chararray(&roots),
-      methctx(&roots),
-      blank(&roots),
       blokenv(&roots),
       bignum(&roots),
       regexp(&roots),
       matchdata(&roots),
       string(&roots),
+      character(&roots),
       symbol(&roots),
       io(&roots),
       nil_class(&roots),
@@ -147,23 +157,22 @@ namespace rubinius {
       fixnum_class(&roots),
       undef_class(&roots),
       floatpoint(&roots),
-      fastctx(&roots),
       nmc(&roots),
       list(&roots),
       list_node(&roots),
       channel(&roots),
       thread(&roots),
-      staticscope(&roots),
-      send_site(&roots),
-      selector(&roots),
+      thread_state(&roots),
+      constantscope(&roots),
+      constant_table(&roots),
       lookuptable(&roots),
       iseq(&roots),
       executable(&roots),
       native_function(&roots),
       iobuffer(&roots),
-      cmethod_vis(&roots),
       included_module(&roots),
       sym_method_missing(&roots),
+      sym_respond_to_missing(&roots),
       sym_inherited(&roots),
       sym_from_literal(&roots),
       sym_method_added(&roots),
@@ -177,7 +186,9 @@ namespace rubinius {
       sym_lt(&roots),
       sym_gt(&roots),
       sym_initialize(&roots),
-      sym_coerce_into_array(&roots),
+      sym_coerce_to_array(&roots),
+      sym_to_ary(&roots),
+      sym_allocation_site(&roots),
       exception(&roots),
       exc_arg(&roots),
       exc_segfault(&roots),
@@ -185,11 +196,9 @@ namespace rubinius {
       exc_type(&roots),
       exc_rex(&roots),
       exc_rte(&roots),
-      exc_stack_explosion(&roots),
       exc_primitive_failure(&roots),
       external_ivars(&roots),
       errno_mapping(&roots),
-      selectors(&roots),
       config(&roots),
       sym_send(&roots),
       sym_public(&roots),
@@ -199,22 +208,21 @@ namespace rubinius {
       sym_object_id(&roots),
       sym_call(&roots),
       sym_undef(&roots),
-      top_scope(&roots),
-      on_gc_channel(&roots),
-      vm(&roots),
-      current_thread(&roots),
       main(&roots),
       undefined(&roots),
       dir(&roots),
       compactlookuptable(&roots),
       lookuptablebucket(&roots),
+      constant_table_bucket(&roots),
       methtblbucket(&roots),
       access_variable(&roots),
       rubinius(&roots),
       time_class(&roots),
+      stat_class(&roots),
       integer(&roots),
       numeric(&roots),
       memory_pointer(&roots),
+      ffi(&roots),
       ffi_pointer(&roots),
       taskprobe(&roots),
       randomizer(&roots),
@@ -229,12 +237,25 @@ namespace rubinius {
       jump_error(&roots),
       exc_vm_internal(&roots),
       exc_vm_bad_bytecode(&roots),
-      global_cache_entry(&roots),
+      call_site(&roots),
+      mono_inline_cache(&roots),
+      poly_inline_cache(&roots),
+      inline_cache_entry(&roots),
+      call_custom_cache(&roots),
+      respond_to_cache(&roots),
+      constant_cache(&roots),
       cls_weakref(&roots),
       fiber(&roots),
       alias(&roots),
       encoding(&roots),
-      type(&roots)
+      encoding_list(&roots),
+      type(&roots),
+      vm_class(&roots),
+      atomic_ref(&roots),
+      mirror(&roots),
+      usascii_encoding(&roots),
+      utf8_encoding(&roots),
+      ascii8bit_encoding(&roots)
 
       /* Add initialize of globals above this line. */
     { }

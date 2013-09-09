@@ -36,8 +36,20 @@ static VALUE numeric_spec_rb_num2dbl(VALUE self, VALUE num) {
 #endif
 
 #ifdef HAVE_RB_NUM2LONG
+static VALUE numeric_spec_rb_num2int(VALUE self, VALUE num) {
+  return LONG2NUM(rb_num2int(num));
+}
+#endif
+
+#ifdef HAVE_RB_NUM2LONG
 static VALUE numeric_spec_rb_num2long(VALUE self, VALUE num) {
   return LONG2NUM(rb_num2long(num));
+}
+#endif
+
+#ifdef HAVE_RB_NUM2UINT
+static VALUE numeric_spec_rb_num2uint(VALUE self, VALUE num) {
+  return ULONG2NUM(rb_num2uint(num));
 }
 #endif
 
@@ -50,12 +62,31 @@ static VALUE numeric_spec_rb_num2ulong(VALUE self, VALUE num) {
 #ifdef HAVE_RB_NUM_ZERODIV
 static VALUE numeric_spec_rb_num_zerodiv(VALUE self) {
   rb_num_zerodiv();
+  return Qnil;
 }
 #endif
 
 #ifdef HAVE_RB_CMPINT
 static VALUE numeric_spec_rb_cmpint(VALUE self, VALUE val, VALUE b) {
   return INT2FIX(rb_cmpint(val, val, b));
+}
+#endif
+
+#ifdef HAVE_RB_NUM_COERCE_BIN
+static VALUE numeric_spec_rb_num_coerce_bin(VALUE self, VALUE x, VALUE y, VALUE op) {
+  return rb_num_coerce_bin(x, y, SYM2ID(op));
+}
+#endif
+
+#ifdef HAVE_RB_NUM_COERCE_CMP
+static VALUE numeric_spec_rb_num_coerce_cmp(VALUE self, VALUE x, VALUE y, VALUE op) {
+  return rb_num_coerce_cmp(x, y, SYM2ID(op));
+}
+#endif
+
+#ifdef HAVE_RB_NUM_COERCE_RELOP
+static VALUE numeric_spec_rb_num_coerce_relop(VALUE self, VALUE x, VALUE y, VALUE op) {
+  return rb_num_coerce_relop(x, y, SYM2ID(op));
 }
 #endif
 
@@ -83,8 +114,16 @@ void Init_numeric_spec() {
   rb_define_method(cls, "rb_num2dbl", numeric_spec_rb_num2dbl, 1);
 #endif
 
+#ifdef HAVE_RB_NUM2INT
+  rb_define_method(cls, "rb_num2int", numeric_spec_rb_num2int, 1);
+#endif
+
 #ifdef HAVE_RB_NUM2LONG
   rb_define_method(cls, "rb_num2long", numeric_spec_rb_num2long, 1);
+#endif
+
+#ifdef HAVE_RB_NUM2UINT
+  rb_define_method(cls, "rb_num2uint", numeric_spec_rb_num2uint, 1);
 #endif
 
 #ifdef HAVE_RB_NUM2ULONG
@@ -97,6 +136,18 @@ void Init_numeric_spec() {
 
 #ifdef HAVE_RB_CMPINT
   rb_define_method(cls, "rb_cmpint", numeric_spec_rb_cmpint, 2);
+#endif
+
+#ifdef HAVE_RB_NUM_COERCE_BIN
+  rb_define_method(cls, "rb_num_coerce_bin", numeric_spec_rb_num_coerce_bin, 3);
+#endif
+
+#ifdef HAVE_RB_NUM_COERCE_CMP
+  rb_define_method(cls, "rb_num_coerce_cmp", numeric_spec_rb_num_coerce_cmp, 3);
+#endif
+
+#ifdef HAVE_RB_NUM_COERCE_RELOP
+  rb_define_method(cls, "rb_num_coerce_relop", numeric_spec_rb_num_coerce_relop, 3);
 #endif
 }
 

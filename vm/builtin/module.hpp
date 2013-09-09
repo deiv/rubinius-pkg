@@ -2,11 +2,9 @@
 #define RBX_BUILTIN_MODULE_HPP
 
 #include "builtin/object.hpp"
-#include "builtin/fixnum.hpp"
-#include "type_info.hpp"
 
 namespace rubinius {
-  class LookupTable;
+  class ConstantTable;
   class MethodTable;
 
   class Module : public Object {
@@ -14,29 +12,26 @@ namespace rubinius {
     const static object_type type = ModuleType;
 
   private:
-    MethodTable* method_table_; // slot
-    Symbol* module_name_;       // slot
-    LookupTable* constant_table_;    // slot
-    Module* superclass_;        // slot
-    Array* seen_ivars_;         // slot
+    MethodTable* method_table_;     // slot
+    Symbol* module_name_;           // slot
+    ConstantTable* constant_table_; // slot
+    Module* superclass_;            // slot
+    Module* origin_;                // slot
+    Array* seen_ivars_;             // slot
+    Class* mirror_;                 // slot
+    Array* hierarchy_subclasses_;   // slot
 
   public:
     /* accessors */
 
     attr_accessor(method_table, MethodTable);
     attr_accessor(module_name, Symbol);
-    attr_accessor(constant_table, LookupTable);
+    attr_accessor(constant_table, ConstantTable);
     attr_accessor(superclass, Module);
+    attr_accessor(origin, Module);
     attr_accessor(seen_ivars, Array);
-
-    LookupTable* constants() {
-      return constant_table();
-    }
-
-    Symbol* name() { return module_name_; }
-    void name(STATE, Symbol* sym) {
-      module_name(state, sym);
-    }
+    attr_accessor(mirror, Class);
+    attr_accessor(hierarchy_subclasses, Array);
 
     /* interface */
     static Module* create(STATE);
@@ -46,11 +41,13 @@ namespace rubinius {
     // Rubinius.primitive :module_allocate
     static Module* allocate(STATE, Object* self);
 
-    // Rubinius.primitive :module_case_compare
-    Object* case_compare(STATE, Object* obj);
+    void set_name(STATE, Symbol* name, Module* under);
+    void set_name(STATE, std::string name, Module* under);
+
+    String* get_name(STATE);
 
     // Rubinius.primitive :module_const_set
-    Object* const_set(STATE, Object* name, Object* value);
+    Object* const_set(STATE, Symbol* name, Object* value);
 
     // Rubinius.primitive :module_class_variables
     Array* class_variables(STATE);
@@ -70,27 +67,35 @@ namespace rubinius {
     // Rubinius.primitive :module_cvar_remove
     Object* cvar_remove(STATE, Symbol* name);
 
+    // Rubinius.primitive :module_mirror
+    static Class* mirror(STATE, Object* obj);
+
+    // Rubinius.primitive :module_track_subclass
+    Object* track_subclass(STATE, Module* mod);
+
     void setup(STATE);
-    void setup(STATE, const char* name, Module* under = NULL);
-    void setup(STATE, Symbol* name, Module* under = NULL);
-    void set_const(STATE, Object* sym, Object* val);
-    void set_const(STATE, const char* name, Object* val);
+    void setup(STATE, std::string name, Module* under = NULL);
+    void set_const(STATE, Symbol* sym, Object* val);
+    void set_const(STATE, std::string name, Object* val);
     Object* get_const(STATE, Symbol* sym);
-    Object* get_const(STATE, Symbol* sym, bool* found, bool check_super=false);
-    Object* get_const(STATE, const char* sym);
+    Object* get_const(STATE, Symbol* sym, Symbol* min_vis, ConstantMissingReason* reason, bool check_super=false, bool replace_autoload=false);
+    Object* get_const(STATE, std::string sym);
 
     void del_const(STATE, Symbol* sym);
 
-    void set_name(STATE, Module* under, Symbol* name);
-
     void add_method(STATE, Symbol* name, Executable* exec, Symbol* vis = 0);
 
+    Object* reset_method_cache(STATE, Symbol* name);
+
     Executable* find_method(Symbol* name, Module** defined_in = 0);
+
+    std::string debug_str(STATE);
 
     class Info : public TypeInfo {
     public:
       BASIC_TYPEINFO(TypeInfo)
       virtual void show(STATE, Object* self, int level);
+      virtual void mark(Object* obj, ObjectMark& mark);
     };
   };
 

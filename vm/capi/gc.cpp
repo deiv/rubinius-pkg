@@ -9,7 +9,7 @@ using namespace rubinius;
 using namespace rubinius::capi;
 
 
-static thread::ThreadData<ObjectMark*> _current_mark;
+static utilities::thread::ThreadData<ObjectMark*> _current_mark;
 
 namespace rubinius {
   namespace capi {
@@ -25,20 +25,13 @@ namespace rubinius {
 
 extern "C" {
   VALUE rb_gc_start() {
-    VALUE gc_class_handle = rb_const_get(rb_cObject, rb_intern("GC"));
-    rb_funcall(gc_class_handle, rb_intern("start"), 0);
+    rb_gc();
     return Qnil;
   }
 
   void rb_gc() {
-    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
-
-    // Normally ignore this. It's almost always a hack.
-    if(getenv("RBX_RESPECT_RB_GC")) {
-      env->state()->om->collect_young_now = true;
-      env->state()->om->collect_mature_now = true;
-      env->state()->interrupts.set_perform_gc();
-    }
+    VALUE gc_class_handle = rb_const_get(rb_cObject, rb_intern("GC"));
+    rb_funcall(gc_class_handle, rb_intern("start"), 0);
   }
 
   void rb_gc_force_recycle(VALUE val) {
@@ -47,11 +40,18 @@ extern "C" {
 
   void rb_gc_mark(VALUE ptr) {
     Handle* handle = Handle::from(ptr);
-    if(CAPI_REFERENCE_P(handle) && handle->object()->reference_p()) {
+    if(REFERENCE_P(handle) && handle->object()->reference_p()) {
       Object* res = capi::current_mark()->call(handle->object());
       if(res) {
         handle->set_object(res);
       }
+    }
+  }
+
+  void rb_gc_mark_locations(VALUE *start, VALUE *end) {
+    VALUE *v = start;
+    while (v < end) {
+      rb_gc_mark(*v++);
     }
   }
 
@@ -72,5 +72,15 @@ extern "C" {
     // print out and error and exit.
     std::cerr << "[FATAL] Out of memory. Game Over." << std::endl;
     exit(EXIT_FAILURE);
+  }
+
+  VALUE rb_gc_enable() {
+    VALUE gc_class_handle = rb_const_get(rb_cObject, rb_intern("GC"));
+    return rb_funcall(gc_class_handle, rb_intern("enable"), 0);
+  }
+
+  VALUE rb_gc_disable() {
+    VALUE gc_class_handle = rb_const_get(rb_cObject, rb_intern("GC"));
+    return rb_funcall(gc_class_handle, rb_intern("disable"), 0);
   }
 }

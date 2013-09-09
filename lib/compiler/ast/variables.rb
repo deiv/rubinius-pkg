@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   module AST
     class BackRef < Node
@@ -43,10 +45,10 @@ module Rubinius
         g.is_nil
         g.git f
 
-        if Rubinius.ruby19?
-          g.push_literal "global-variable"
-        else
+        if Rubinius.ruby18?
           g.push_literal "$#{@kind}"
+        else
+          g.push_literal "global-variable"
         end
         g.string_dup
 
@@ -89,10 +91,10 @@ module Rubinius
         g.is_nil
         g.git f
 
-        if Rubinius.ruby19?
-          g.push_literal "global-variable"
-        else
+        if Rubinius.ruby18?
           g.push_literal "$#{@which}"
+        else
+          g.push_literal "global-variable"
         end
         g.string_dup
 
@@ -324,13 +326,6 @@ module Rubinius
           @value.bytecode(g) if @value
           pos(g)
           g.send :raise, 1, true
-        elsif @name == :$~
-          pos(g)
-          # this is a noop for now, but we need to run the
-          # value anyway because it might have side-effects
-          @value.bytecode(g) if @value
-          g.pop
-          g.push :nil
         else
           pos(g)
           g.push_rubinius
@@ -554,7 +549,7 @@ module Rubinius
     end
 
     class MultipleAssignment < Node
-      attr_accessor :left, :right, :splat, :block
+      attr_accessor :left, :right, :splat, :block, :post
 
       def initialize(line, left, right, splat)
         @line = line
@@ -615,6 +610,17 @@ module Rubinius
         g.make_array size if size >= 0
       end
 
+      def make_retval(g)
+        size = @right.body.size
+        if @left and !@splat
+          lhs = @left.body.size
+          size = lhs if lhs > size
+        end
+        g.dup_many @right.body.size
+        g.make_array @right.body.size
+        g.move_down size
+      end
+
       def rotate(g)
         if @splat
           size = @left.body.size + 1
@@ -661,10 +667,15 @@ module Rubinius
         if @fixed
           pad_short(g) if @left and !@splat
           @right.body.each { |x| x.bytecode(g) }
-          pad_short(g) if @left and @splat
 
           if @left
-            make_array(g) if @splat
+            make_retval(g)
+
+            if @splat
+              pad_short(g)
+              make_array(g)
+            end
+
             rotate(g)
 
             g.state.push_masgn
@@ -686,6 +697,7 @@ module Rubinius
             end
 
             g.cast_array unless @right.kind_of? ToArray
+            g.dup # Use the array as the return value
           end
 
           if @left
@@ -715,13 +727,14 @@ module Rubinius
         if @splat
           g.state.push_masgn
           @splat.bytecode(g)
+
+          # Use the array as the return value
+          g.dup if @fixed and !@left
+
           g.state.pop_masgn
         end
 
-        if @right
-          g.pop if !@fixed or @splat
-          g.push :true
-        end
+        g.pop if @right and (!@fixed or @splat)
       end
 
       def defined(g)
@@ -739,7 +752,7 @@ module Rubinius
       end
     end
 
-    class PatternVariable < Node
+    class LeftPatternVariable < Node
       include LocalVariable
 
       attr_accessor :name, :value
@@ -763,6 +776,82 @@ module Rubinius
         end
 
         g.shift_array
+        @variable.set_bytecode(g)
+        g.pop
+      end
+    end
+
+    class SplatPatternVariable < Node
+      include LocalVariable
+
+      attr_accessor :name, :value
+
+      def initialize(line, name)
+        @line = line
+        @name = name
+        @variable = nil
+      end
+
+      def position_bytecode(g)
+        @variable.get_bytecode(g)
+        g.cast_array
+      end
+
+      def bytecode(g)
+        pos(g)
+
+        unless @variable
+          g.state.scope.assign_local_reference self
+        end
+
+        g.dup
+        @variable.set_bytecode(g)
+        g.pop
+      end
+    end
+
+    class PostPatternVariable < Node
+      include LocalVariable
+
+      attr_accessor :name, :value
+
+      def initialize(line, name, idx)
+        @line = line
+        @name = name
+        @pos  = idx
+        @variable = nil
+      end
+
+      def position_bytecode(g)
+        @variable.get_bytecode(g)
+        g.cast_array
+      end
+
+      def bytecode(g)
+        pos(g)
+
+        unless @variable
+          g.state.scope.assign_local_reference self
+        end
+
+        too_big = g.new_label
+        done    = g.new_label
+
+        g.dup
+        g.send :size, 0
+        g.push_int @pos
+        g.send :>, 1
+        g.gif too_big
+        g.dup
+        g.send :pop, 0
+
+        g.goto done
+        too_big.set!
+        g.push_nil
+        @variable.set_bytecode(g)
+        g.goto done
+
+        done.set!
         @variable.set_bytecode(g)
         g.pop
       end

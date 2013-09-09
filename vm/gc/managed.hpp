@@ -7,12 +7,15 @@
 #include "gc/root.hpp"
 #include "lock.hpp"
 
-#include <list>
+#include <algorithm>
+#include <vector>
 
 namespace rubinius {
   class SharedState;
   class VM;
   class WorldState;
+
+  typedef std::vector<ObjectHeader*> LockedObjects;
 
   class ManagedThread : public Lockable {
   public:
@@ -33,12 +36,12 @@ namespace rubinius {
   private:
     SharedState& shared_;
     Roots roots_;
-    Kind kind_;
-    const char* name_;
+    std::string name_;
     VariableRootBuffers variable_root_buffers_;
     RootBuffers root_buffers_;
+    LockedObjects locked_objects_;
     RunState run_state_;
-    std::list<ObjectHeader*> locked_objects_;
+    Kind kind_;
 
   protected:
     gc::Slab local_slab_;
@@ -64,7 +67,7 @@ namespace rubinius {
       return local_slab_;
     }
 
-    std::list<ObjectHeader*>& locked_objects() {
+    LockedObjects& locked_objects() {
       return locked_objects_;
     }
 
@@ -73,10 +76,22 @@ namespace rubinius {
     }
 
     void del_locked_object(ObjectHeader* obj) {
-      locked_objects_.remove(obj);
+      // Often we will remove the last locked object
+      // because how locks are used in a stack wise manner.
+      // Therefore we optimize here for this case and have a fast path
+      if(locked_objects_.size() == 0) return;
+      ObjectHeader* last = locked_objects_.back();
+      if(obj == last) {
+        locked_objects_.pop_back();
+      } else {
+        LockedObjects::iterator f = std::find(locked_objects_.begin(), locked_objects_.end(), obj);
+        if(f != locked_objects_.end()) {
+          locked_objects_.erase(f);
+        }
+      }
     }
 
-    Kind kind() {
+    Kind kind() const {
       return kind_;
     }
 
@@ -85,15 +100,16 @@ namespace rubinius {
       return 0;
     }
 
-    const char* name() {
+    std::string name() const {
       return name_;
     }
 
-    void set_name(const char* name) {
+    void set_name(std::string name) {
       name_ = name;
+      utilities::thread::Thread::set_os_name(name.c_str());
     }
 
-    uint32_t thread_id() {
+    uint32_t thread_id() const {
       return id_;
     }
 
@@ -105,13 +121,13 @@ namespace rubinius {
       run_state_ = s;
     }
 
-    RunState run_state() {
+    RunState run_state() const {
       return run_state_;
     }
 
   public:
     static ManagedThread* current();
-    static void set_current(ManagedThread* vm);
+    static void set_current(ManagedThread* vm, std::string name);
   };
 }
 

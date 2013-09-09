@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   ##
   # A decode for the .rbc file format.
@@ -35,10 +37,10 @@ module Rubinius
     end
 
     ##
-    # Writes the CompiledFile +cm+ to +file+.
-    def self.dump(cm, file, signature, version)
+    # Writes the CompiledFile +code+ to +file+.
+    def self.dump(code, file, signature, version)
       File.open(file, "wb") do |f|
-        new("!RBIX", signature, version).encode_to(f, cm)
+        new("!RBIX", signature, version).encode_to(f, code)
       end
     rescue SystemCallError
       # just skip writing the compiled file if we don't have permissions
@@ -68,7 +70,7 @@ module Rubinius
     end
 
     ##
-    # A class used to convert an CompiledMethod to and from
+    # A class used to convert an CompiledCode to and from
     # a String.
 
     class Marshal
@@ -97,15 +99,15 @@ module Rubinius
       def unmarshal_data
         kind = next_type
         case kind
-        when ?t
+        when 116 # ?t
           return true
-        when ?f
+        when 102 # ?f
           return false
-        when ?n
+        when 110 # ?n
           return nil
-        when ?I
+        when 73  # ?I
           return next_string.to_i(16)
-        when ?d
+        when 100 # ?d
           str = next_string.chop
 
           # handle the special NaN, Infinity and -Infinity differently
@@ -131,17 +133,23 @@ module Rubinius
               raise TypeError, "Invalid Float format: #{str}"
             end
           end
-        when ?s
+        when 115 # ?s
+          enc = unmarshal_data
           count = next_string.to_i
           str = next_bytes count
-          discard # remove the \n
+          str.force_encoding enc if enc and defined?(Encoding)
           return str
-        when ?x
+        when 120 # ?x
+          enc = unmarshal_data
           count = next_string.to_i
           str = next_bytes count
-          discard # remove the \n
+          str.force_encoding enc if enc and defined?(Encoding)
           return str.to_sym
-        when ?p
+        when 99  # ?c
+          count = next_string.to_i
+          str = next_bytes count
+          return str.split("::").inject(Object) { |a,n| a.const_get(n) }
+        when 112 # ?p
           count = next_string.to_i
           obj = Tuple.new(count)
           i = 0
@@ -150,7 +158,7 @@ module Rubinius
             i += 1
           end
           return obj
-        when ?i
+        when 105 # ?i
           count = next_string.to_i
           seq = InstructionSequence.new(count)
           i = 0
@@ -159,27 +167,31 @@ module Rubinius
             i += 1
           end
           return seq
-        when ?M
+        when 69  # ?E
+          count = next_string.to_i
+          name = next_bytes count
+          return Encoding.find(name) if defined?(Encoding)
+        when 77  # ?M
           version = next_string.to_i
           if version != 1
-            raise "Unknown CompiledMethod version #{version}"
+            raise "Unknown CompiledCode version #{version}"
           end
-          cm = CompiledMethod.new
-          cm.metadata      = unmarshal_data
-          cm.primitive     = unmarshal_data
-          cm.name          = unmarshal_data
-          cm.iseq          = unmarshal_data
-          cm.stack_size    = unmarshal_data
-          cm.local_count   = unmarshal_data
-          cm.required_args = unmarshal_data
-          cm.post_args     = unmarshal_data
-          cm.total_args    = unmarshal_data
-          cm.splat         = unmarshal_data
-          cm.literals      = unmarshal_data
-          cm.lines         = unmarshal_data
-          cm.file          = unmarshal_data
-          cm.local_names   = unmarshal_data
-          return cm
+          code = CompiledCode.new
+          code.metadata      = unmarshal_data
+          code.primitive     = unmarshal_data
+          code.name          = unmarshal_data
+          code.iseq          = unmarshal_data
+          code.stack_size    = unmarshal_data
+          code.local_count   = unmarshal_data
+          code.required_args = unmarshal_data
+          code.post_args     = unmarshal_data
+          code.total_args    = unmarshal_data
+          code.splat         = unmarshal_data
+          code.literals      = unmarshal_data
+          code.lines         = unmarshal_data
+          code.file          = unmarshal_data
+          code.local_names   = unmarshal_data
+          return code
         else
           raise "Unknown type '#{kind.chr}'"
         end
@@ -206,9 +218,9 @@ module Rubinius
       # Returns the next string in _@data_ including the trailing
       # "\n" character.
       def next_string
-        count = @data.locate "\n", @start
+        count = @data.locate "\n", @start, @size
         count = @size unless count
-        str = String.from_chararray @data, @start, count - @start
+        str = String.from_bytearray @data, @start, count - @start
         @start = count
         str
       end
@@ -216,32 +228,15 @@ module Rubinius
       private :next_string
 
       ##
-      # Returns the next _count_ bytes in _@data_.
+      # Returns the next _count_ bytes in _@data_, skipping the
+      # trailing "\n" character.
       def next_bytes(count)
-        str = String.from_chararray @data, @start, count
-        @start += count
+        str = String.from_bytearray @data, @start, count
+        @start += count + 1
         str
       end
 
       private :next_bytes
-
-      ##
-      # Returns the next byte in _@data_.
-      def next_byte
-        byte = @data[@start]
-        @start += 1
-        byte
-      end
-
-      private :next_byte
-
-      ##
-      # Moves the next read pointer ahead by one character.
-      def discard
-        @start += 1
-      end
-
-      private :discard
 
       ##
       # For object +val+, return a String represetation.
@@ -257,14 +252,38 @@ module Rubinius
         when Fixnum, Bignum
           "I\n#{val.to_s(16)}\n"
         when String
-          "s\n#{val.size}\n#{val}\n"
+          if defined?(Encoding)
+            # We manually construct the Encoding data to avoid recursion
+            # marshaling an Encoding name as a String.
+            name = val.encoding.name
+            enc_name = "E\n#{name.bytesize}\n#{name}\n"
+          else
+            # The kernel code is all US-ASCII. When building melbourne for 1.8
+            # Ruby, we fake a bunch of encoding stuff so force US-ASCII here.
+            enc_name = "E\n8\nUS-ASCII\n"
+          end
+
+          "s\n#{enc_name}#{val.bytesize}\n#{val}\n"
         when Symbol
           s = val.to_s
-          "x\n#{s.size}\n#{s}\n"
+          if defined?(Encoding)
+            # We manually construct the Encoding data to avoid recursion
+            # marshaling an Encoding name as a String.
+            name = s.encoding.name
+            enc_name = "E\n#{name.bytesize}\n#{name}\n"
+          else
+            # The kernel code is all US-ASCII. When building melbourne for 1.8
+            # Ruby, we fake a bunch of encoding stuff so force US-ASCII here.
+            enc_name = "E\n8\nUS-ASCII\n"
+          end
+
+          "x\n#{enc_name}#{s.bytesize}\n#{s}\n"
         when Tuple
           str = "p\n#{val.size}\n"
           val.each do |ele|
-            str.append marshal(ele)
+            data = marshal(ele)
+            data.force_encoding(str.encoding) if defined?(Encoding)
+            str.append data
           end
           str
         when Float
@@ -287,7 +306,7 @@ module Rubinius
             str.append "#{op}\n"
           end
           str
-        when CompiledMethod
+        when CompiledCode
           str = "M\n1\n"
           str.append marshal(val.metadata)
           str.append marshal(val.primitive)
@@ -305,7 +324,12 @@ module Rubinius
           str.append marshal(val.local_names)
           str
         else
-          raise ArgumentError, "Unknown type #{val.class}: #{val.inspect}"
+          if val.respond_to? :rbx_marshal_constant
+            name = StringValue(val.rbx_marshal_constant)
+            "c\n#{name.size}\n#{name}\n"
+          else
+            raise ArgumentError, "Unknown type #{val.class}: #{val.inspect}"
+          end
         end
       end
     end

@@ -1,19 +1,15 @@
 #include "builtin/call_unit_adapter.hpp"
-#include "builtin/system.hpp"
+#include "builtin/call_unit.hpp"
 #include "builtin/class.hpp"
-#include "builtin/location.hpp"
-
-#include "dispatch.hpp"
-#include "call_frame.hpp"
-#include "arguments.hpp"
-
 #include "object_utils.hpp"
 
 namespace rubinius {
   CallUnitAdapter* CallUnitAdapter::create(STATE, Object* self, CallUnit* unit) {
     CallUnitAdapter* pe = state->new_object<CallUnitAdapter>(as<Class>(self));
     pe->unit(state, unit);
-
+    pe->inliners_ = 0;
+    pe->prim_index_ = -1;
+    pe->custom_call_site_ = false;
     pe->execute = adapter_executor;
     return pe;
   }

@@ -1,6 +1,7 @@
+#include "builtin/class.hpp"
 #include "builtin/exception.hpp"
-#include "builtin/array.hpp"
 #include "builtin/proc.hpp"
+#include "builtin/string.hpp"
 
 #include "exception_point.hpp"
 
@@ -20,20 +21,30 @@ extern "C" {
     vsnprintf(reason, RB_EXC_BUFSIZE, format_string, args);
     va_end(args);
 
-    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
-    Exception* exc = Exception::make_exception(
-          env->state(), as<Class>(env->get_object(error_handle)), reason);
-    capi::capi_raise_backend(exc);
+    capi::capi_raise_backend(error_handle, reason);
 
     rubinius::bug("rb_raise failed");
     exit(1);  // compiler snack.
   }
 
-  void rb_throw(const char* symbol, VALUE result) {
-    rb_funcall(rb_mKernel, rb_intern("throw"), 2, ID2SYM(rb_intern(symbol)), result);
-
+  void rb_throw_obj(VALUE obj, VALUE result) {
+    rb_funcall(rb_mKernel, rb_intern("throw"), 2, obj, result);
     rubinius::bug("rb_throw failed");
     exit(1);  // compiler snack.
+  }
+
+  void rb_throw(const char* symbol, VALUE result) {
+    rb_throw_obj(ID2SYM(rb_intern(symbol)), result);
+    exit(1);  // compiler snack.
+  }
+
+  VALUE rb_catch_obj(VALUE tag, VALUE (*func)(ANYARGS), VALUE data) {
+    VALUE proc = rb_proc_new(func, data);
+    return rb_funcall2b(rb_mKernel, rb_intern("catch"), 1, &tag, proc);
+  }
+
+  VALUE rb_catch(const char* tag, VALUE(*func)(ANYARGS), VALUE data) {
+    return rb_catch_obj(ID2SYM(rb_intern(tag)), func, data);
   }
 
   VALUE rb_rescue2(VALUE (*func)(ANYARGS), VALUE arg1,
@@ -175,6 +186,13 @@ extern "C" {
     rb_fatal("not implemented");
   }
 
+  // TODO: Since in 1.9 #respond_to? returns false if the MRI version of this
+  // method is in a method table, we'll probably need to get the Rubinius
+  // special version of this method and call it rather than just raising here.
+  VALUE rb_f_notimplement(int argc, VALUE *argv, VALUE obj) {
+    rb_fatal("not implemented");
+  }
+
   /* rb_warn and rb_warning don't factor out creating the string for the
    * message because it is just as much work preparing the va_list to
    * pass to another variadic function.
@@ -214,6 +232,15 @@ extern "C" {
     rb_funcall(rb_mErrno, rb_intern("handle"), 1, rb_str_new2(mesg));
 
     rubinius::bug("rb_sys_fail failed");
+    exit(1);  // compiler snack.
+  }
+
+  void rb_syserr_fail(int err, const char* mesg) {
+    if(!mesg) mesg = "system failure";
+
+    VALUE exc = rb_funcall(rb_eSystemCallError, rb_intern("new"), 2, rb_str_new2(mesg), INT2NUM(err));
+    rb_exc_raise(exc);
+    rubinius::bug("rb_syserr_fail failed");
     exit(1);  // compiler snack.
   }
 
@@ -333,4 +360,13 @@ extern "C" {
     VALUE ary = rb_ary_new4(argc-1, argv+1);
     return rb_funcall(rb_mCAPI, rb_intern("sprintf"), 2, argv[0], ary);
   }
+
+  VALUE rb_make_backtrace() {
+    return rb_funcall(rb_mKernel, rb_intern("caller"), 0);
+  }
+
+  VALUE rb_obj_method(VALUE self, VALUE method) {
+    return rb_funcall(self, rb_intern("method"), 1, method);
+  }
+
 }

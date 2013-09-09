@@ -1,6 +1,10 @@
+# -*- encoding: us-ascii -*-
+
 class Float < Numeric
 
   include Precision
+
+  FFI = Rubinius::FFI
 
   def self.induced_from(obj)
     case obj
@@ -19,6 +23,15 @@ class Float < Numeric
   def -@
     Rubinius.primitive :float_neg
     raise PrimitiveFailure, "Float#-@ primitive failed"
+  end
+
+  def abs
+    FFI::Platform::Math.fabs(self)
+  end
+
+  def negative?
+    Rubinius.primitive :float_negative
+    raise PrimitiveFailure, "Float#negative primitive failed"
   end
 
   def +(other)
@@ -59,12 +72,6 @@ class Float < Numeric
     a.divmod b
   end
 
-  def **(other)
-    Rubinius.primitive :float_pow
-    b, a = math_coerce other
-    a ** b
-  end
-
   def %(other)
     return 0 / 0.to_f if other == 0
     Rubinius.primitive :float_mod
@@ -102,6 +109,8 @@ class Float < Numeric
     Rubinius.primitive :float_compare
     b, a = math_coerce other, :compare_error
     a <=> b
+  rescue ArgumentError
+    nil
   end
 
   def ==(other)
@@ -116,7 +125,7 @@ class Float < Numeric
 
   def eql?(other)
     Rubinius.primitive :float_eql
-    raise PrimitiveFailure, "Float#eql? primitive failed"
+    false
   end
 
   def nan?
@@ -153,23 +162,23 @@ class Float < Numeric
 
   def to_s_minimal
     Rubinius.primitive :float_to_s_minimal
-    raise PrimitiveFailure, "minimally formatted string exceeds character buffer size"
+    raise PrimitiveFailure, "Float#to_s_minimal primitive failed: output exceeds buffer size"
   end
 
   def to_s_formatted(fmt)
     Rubinius.primitive :float_to_s_formatted
-    raise PrimitiveFailure, "String#to_s_formatted output exceeds buffer size"
+    raise PrimitiveFailure, "Float#to_s_formatted primitive failed: output exceeds buffer size"
   end
   private :to_s_formatted
 
-  def to_packed(size)
-    Rubinius.primitive :float_to_packed
-    raise PrimitiveFailure, "float_to_packed failed"
+  def dtoa
+    Rubinius.primitive :float_dtoa
+    raise PrimitiveFailure, "Fload#dtoa primitive failed"
   end
 
-  def round
-    Rubinius.primitive :float_round
-    raise PrimitiveFailure, "float_round failed"
+  def to_packed(size)
+    Rubinius.primitive :float_to_packed
+    raise PrimitiveFailure, "Float#to_packed primitive failed"
   end
 
   def ceil

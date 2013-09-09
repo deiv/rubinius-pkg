@@ -1,17 +1,28 @@
 #ifdef ENABLE_LLVM
 
 #include "llvm/passes.hpp"
+#include "config.h"
 
+#if RBX_LLVM_API_VER >= 303
+#include <llvm/IR/Attributes.h>
+#include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/Function.h>
+#include <llvm/IR/Instructions.h>
+#include <llvm/IR/Constants.h>
+#include <llvm/IR/Module.h>
+#include <llvm/IR/Intrinsics.h>
+#else
 #include <llvm/Attributes.h>
 #include <llvm/BasicBlock.h>
 #include <llvm/Function.h>
 #include <llvm/Instructions.h>
-#include <llvm/Transforms/Utils/Cloning.h>
-#include <llvm/Support/CallSite.h>
-#include <llvm/ADT/APInt.h>
 #include <llvm/Constants.h>
 #include <llvm/Module.h>
 #include <llvm/Intrinsics.h>
+#endif
+#include <llvm/Transforms/Utils/Cloning.h>
+#include <llvm/Support/CallSite.h>
+#include <llvm/ADT/APInt.h>
 #include <llvm/Analysis/SparsePropagation.h>
 #include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Support/raw_ostream.h>
@@ -22,12 +33,13 @@ namespace {
   using namespace llvm;
 
   class GuardEliminator : public FunctionPass {
-    const Type* float_type_;
+    Type* float_type_;
 
   public:
     static char ID;
     GuardEliminator()
       : FunctionPass(ID)
+      , float_type_(0)
     {}
 
     virtual bool doInitialization(Module& mod) {
@@ -301,16 +313,19 @@ namespace {
 
 
   class RubiniusAliasAnalysis : public FunctionPass, public AliasAnalysis {
-    const Type* class_type_;
-    const Type* object_type_;
-    const Type* args_type_;
-    const Type* float_type_;
+    Type* class_type_;
+    Type* object_type_;
+    Type* args_type_;
+    Type* float_type_;
 
   public:
     static char ID;
     RubiniusAliasAnalysis()
       : FunctionPass(ID)
       , class_type_(0)
+      , object_type_(0)
+      , args_type_(0)
+      , float_type_(0)
     {}
 
     virtual void getAnalysisUsage(llvm::AnalysisUsage& usage) const {
@@ -348,11 +363,10 @@ namespace {
     }
 
     virtual
-    AliasAnalysis::AliasResult alias(const Value *V1, unsigned V1Size,
-                                     const Value *V2, unsigned V2Size)
+    AliasAnalysis::AliasResult alias(const Location &LocA, const Location &LocB)
     {
       // Indicate that tagged fixnums can't alias anything.
-      if(const IntToPtrInst* ip = dyn_cast<IntToPtrInst>(V1)) {
+      if(const IntToPtrInst* ip = dyn_cast<IntToPtrInst>(LocA.Ptr)) {
         if(ip->getType() == object_type_) {
           if(const ConstantInt* ci = dyn_cast<ConstantInt>(ip->getOperand(0))) {
             const APInt& cv = ci->getValue();
@@ -363,20 +377,19 @@ namespace {
         }
       }
 
-      return AliasAnalysis::alias(V1, V1Size, V2, V2Size);
+      return AliasAnalysis::alias(LocA, LocB);
     }
 
 
     virtual
-    AliasAnalysis::ModRefResult getModRefInfo(ImmutableCallSite cs,
-        const Value* val, unsigned size) {
+    AliasAnalysis::ModRefResult getModRefInfo(ImmutableCallSite cs, const Location &Loc) {
       if(const Function* func = cs.getCalledFunction()) {
         if(func->getName() == "rbx_float_allocate") {
           return NoModRef;
         }
       }
 
-      return AliasAnalysis::getModRefInfo(cs, val, size);
+      return AliasAnalysis::getModRefInfo(cs, Loc);
     }
 
     // This method only exists to appease -Woverloaded-virtual. It's dumb
@@ -389,10 +402,10 @@ namespace {
       return AliasAnalysis::getModRefInfo(CS1, CS2);
     }
 
-    virtual bool pointsToConstantMemory(const Value* val) {
-      LLVMContext& ctx = val->getContext();
+    virtual bool pointsToConstantMemory(const Location &Loc, bool OrLocal = false) {
+      LLVMContext& ctx = Loc.Ptr->getContext();
 
-      if(const GetElementPtrInst* gep = dyn_cast<GetElementPtrInst>(val)) {
+      if(const GetElementPtrInst* gep = dyn_cast<GetElementPtrInst>(Loc.Ptr)) {
         if(gep->getPointerOperand()->getType() == class_type_) {
           // Indicate that the class_id field is constant
           if(gep->getNumIndices() == 2
@@ -411,12 +424,12 @@ namespace {
         } else if(gep->getPointerOperand()->getType() == float_type_) {
           return true;
         }
-      } else if(const BitCastInst* bc = dyn_cast<BitCastInst>(val)) {
+      } else if(const BitCastInst* bc = dyn_cast<BitCastInst>(Loc.Ptr)) {
         if(bc->getType() == PointerType::getUnqual(Type::getDoubleTy(ctx))) {
           return true;
         }
       }
-      return AliasAnalysis::pointsToConstantMemory(val);
+      return AliasAnalysis::pointsToConstantMemory(Loc, OrLocal);
     }
   };
 

@@ -171,6 +171,14 @@ describe "C-API Array function" do
     end
   end
 
+  describe "rb_ary_concat" do
+    it "concats two arrays" do
+      a = [5, 1, 1, 5, 4]
+      b = [2, 3]
+      @s.rb_ary_concat(a, b).should == [5, 1, 1, 5, 4, 2, 3]
+    end
+  end
+
   ruby_version_is ""..."1.9" do
     describe "RARRAY" do
       before :each do
@@ -355,6 +363,22 @@ describe "C-API Array function" do
       h = {:a => 1, :b => 2}
 
       @s.rb_iterate_each_pair(h).sort.should == [1,2]
+    end
+
+    it "calls a function which can yield into the original block" do
+      s2 = []
+
+      o = Object.new
+      def o.each
+        yield 1
+        yield 2
+        yield 3
+        yield 4
+      end
+
+      @s.rb_iterate_then_yield(o) { |x| s2 << x }
+
+      s2.should == [1,2,3,4]
     end
   end
 

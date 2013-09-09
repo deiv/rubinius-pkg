@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module GC
   def self.start
     run(false)
@@ -40,12 +42,5 @@ module GC
 
   def garbage_collect
     GC.start
-  end
-end
-
-module ObjectSpace
-  def self.find_object(query, callable)
-    Rubinius.primitive :vm_find_object
-    raise PrimitiveFailure, "vm_each_object failed"
   end
 end

@@ -1,15 +1,18 @@
 #include "vm.hpp"
-#include "vm/object_utils.hpp"
+#include "object_utils.hpp"
 
 #include "builtin/array.hpp"
 #include "builtin/fixnum.hpp"
 #include "builtin/io.hpp"
 #include "builtin/regexp.hpp"
+#include "builtin/string.hpp"
 #include "objectmemory.hpp"
 #include "primitives.hpp"
 
 #include "capi/capi.hpp"
 #include "capi/18/include/ruby.h"
+
+#include "util/spinlock.hpp"
 
 using namespace rubinius;
 using namespace rubinius::capi;
@@ -23,7 +26,7 @@ extern "C" {
   }
 
   VALUE rb_reg_nth_match(long nth, VALUE match_data) {
-    if (NIL_P(match_data)) {
+    if(NIL_P(match_data)) {
       return Qnil;
     }
     return rb_funcall(match_data, rb_intern("[]"), 1, Fixnum::from(nth));
@@ -47,5 +50,15 @@ extern "C" {
 
   VALUE rb_backref_get(void) {
     return rb_gv_get("$~");
+  }
+
+  static int onig_lock = RBX_SPINLOCK_UNLOCKED;
+
+  void capi_reg_lock() {
+    rbx_spinlock_lock(&onig_lock);
+  }
+
+  void capi_reg_unlock() {
+    rbx_spinlock_unlock(&onig_lock);
   }
 }

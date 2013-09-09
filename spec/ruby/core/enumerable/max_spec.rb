@@ -13,7 +13,7 @@ describe "Enumerable#max" do
     EnumerableSpecs::Numerous.new.max.should == 6
   end
 
-  it "return the maximum element (basics cases)" do
+  it "returns the maximum element (basics cases)" do
     EnumerableSpecs::EachDefiner.new(55).max.should == 55
 
     EnumerableSpecs::EachDefiner.new(11,99).max.should == 99
@@ -33,7 +33,7 @@ describe "Enumerable#max" do
     @e_ints.max.should == 1010101010
   end
 
-  it "returns nil for an empty Enumerable " do
+  it "returns nil for an empty Enumerable" do
     EnumerableSpecs::EachDefiner.new.max.should == nil
   end
 
@@ -62,7 +62,7 @@ describe "Enumerable#max" do
     end.should raise_error(ArgumentError)
   end
 
-  it "return the maximum element (with block" do
+  it "returns the maximum element (with block" do
     # with a block
     EnumerableSpecs::EachDefiner.new("2","33","4","11").max {|a,b| a <=> b }.should == "4"
     EnumerableSpecs::EachDefiner.new( 2 , 33 , 4 , 11 ).max {|a,b| a <=> b }.should == 33
@@ -87,4 +87,10 @@ describe "Enumerable#max" do
       x <=> y
     }.should == nil
   end
+
+  it "gathers whole arrays as elements when each yields multiple" do
+    multi = EnumerableSpecs::YieldsMulti.new
+    multi.max.should == [6, 7, 8, 9]
+  end
+
 end

@@ -13,7 +13,14 @@ describe "A For node" do
 
       d = new_block_generator(g)
 
-      d.cast_for_single_block_arg
+      ruby_version_is ""..."1.9" do
+        d.cast_for_single_block_arg
+      end
+
+      ruby_version_is "1.9" do
+        d.push_local 0
+      end
+
       d.set_local_depth 1, 0
 
       d.pop
@@ -42,14 +49,24 @@ describe "A For node" do
     compile do |g|
       g.push_cpath_top
       g.find_const :Range
+      g.send :allocate, 0, true
+      g.dup
       g.push 0
       g.push :self
       g.send :max, 0, true
-      g.send :new, 2
+      g.send :initialize, 2, true
+      g.pop
 
       d = new_block_generator(g)
 
-      d.cast_for_single_block_arg
+      ruby_version_is ""..."1.9" do
+        d.cast_for_single_block_arg
+      end
+
+      ruby_version_is "1.9" do
+        d.push_local 0
+      end
+
       d.set_local_depth 1, 0
 
       d.pop
@@ -76,7 +93,17 @@ describe "A For node" do
     compile do |g|
       d = new_block_generator(g)
 
-      d.cast_for_multi_block_arg
+      ruby_version_is ""..."1.9" do
+        d.cast_for_multi_block_arg
+      end
+
+      ruby_version_is "1.9" do
+        d.push_literal Rubinius::Compiler::Runtime
+        d.push_local 0
+        d.send :unwrap_block_arg, 1
+        d.cast_array
+      end
+
       d.shift_array
       d.set_local_depth 1, 0
       d.pop
@@ -109,7 +136,14 @@ describe "A For node" do
 
       d = new_block_generator(g)
 
-      d.cast_for_single_block_arg
+      ruby_version_is ""..."1.9" do
+        d.cast_for_single_block_arg
+      end
+
+      ruby_version_is "1.9" do
+        d.push_local 0
+      end
+
       d.set_local_depth 1, 0
 
       d.pop
@@ -147,7 +181,14 @@ describe "A For node" do
       # outer for
       d = new_block_generator(g)
 
-      d.cast_for_single_block_arg
+      ruby_version_is ""..."1.9" do
+        d.cast_for_single_block_arg
+      end
+
+      ruby_version_is "1.9" do
+        d.push_local 0
+      end
+
       d.set_local_depth 1, 1
       d.pop
 
@@ -160,7 +201,14 @@ describe "A For node" do
       # inner for
       e = new_block_generator(g)
 
-      e.cast_for_single_block_arg
+      ruby_version_is ""..."1.9" do
+        e.cast_for_single_block_arg
+      end
+
+      ruby_version_is "1.9" do
+        e.push_local 0
+      end
+
       e.set_local_depth 2, 2
       e.pop
 

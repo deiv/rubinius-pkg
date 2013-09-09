@@ -1,20 +1,19 @@
-
-#include "prelude.hpp"
+#include "builtin/array.hpp"
+#include "builtin/class.hpp"
+#include "builtin/encoding.hpp"
 #include "builtin/exception.hpp"
 #include "builtin/fixnum.hpp"
 #include "builtin/float.hpp"
-#include "builtin/array.hpp"
 #include "builtin/string.hpp"
-
-#include "primitives.hpp"
-#include "vm/object_utils.hpp"
-
-#include <iostream>
+#include "configuration.hpp"
+#include "object_utils.hpp"
+#include "ontology.hpp"
+#include "version.h"
 
 namespace rubinius {
 
   void Fixnum::init(STATE) {
-    GO(fixnum_class).set(state->new_class("Fixnum", G(integer)));
+    GO(fixnum_class).set(ontology::new_class(state, "Fixnum", G(integer)));
     G(fixnum_class)->set_object_type(state, FixnumType);
 
     G(fixnum_class)->set_const(state, "MIN", Fixnum::from(FIXNUM_MIN));
@@ -68,6 +67,9 @@ namespace rubinius {
 #define SQRT_LONG_MAX ((native_int)1<<((sizeof(native_int)*CHAR_BIT-1)/2))
 /*tests if N*N would overflow*/
 #define FIT_SQRT(n) (((n)<SQRT_LONG_MAX)&&((n)>-SQRT_LONG_MAX))
+// Adapted from the logic in 1.9
+#define NO_OVERFLOW_MUL(a,b) (FIT_SQRT(a)&&FIT_SQRT(b))
+#define OVERFLOW_MUL(a,b) (!(NO_OVERFLOW_MUL(a,b)))
 
   Integer* Fixnum::mul(STATE, Fixnum* other) {
     native_int a  = to_native();
@@ -75,8 +77,7 @@ namespace rubinius {
 
     if(a == 0 || b == 0) return Fixnum::from(0);
 
-    // Adapted from the logic in 1.9
-    if(FIT_SQRT(a) & FIT_SQRT(b)) {
+    if(NO_OVERFLOW_MUL(a, b)) {
       return Fixnum::from(a * b);
     }
 
@@ -125,12 +126,16 @@ namespace rubinius {
     return Bignum::from(state, to_native())->div(state, other);
   }
 
+  Float* Fixnum::div(STATE, Float* other) {
+    return Float::create(state, to_native())->div(state, other);
+  }
+
   Integer* Fixnum::mod(STATE, Fixnum* other) {
     native_int numerator = to_native();
     native_int denominator = other->to_native();
     native_int quotient = div(state, other)->to_native();
     native_int modulo = numerator - denominator * quotient;
-    
+
     if((modulo < 0 && denominator > 0) || (modulo > 0 && denominator < 0)) {
       return Fixnum::from(modulo + denominator);
     } else {
@@ -175,6 +180,10 @@ namespace rubinius {
     native_int base = to_native();
     native_int exp = exponent->to_native();
 
+    if(!LANGUAGE_18_ENABLED && exp < 0) {
+      return Primitives::failure();
+    }
+
     if(exp == 0) return Fixnum::from(1);
     if(base == 1) return this;
 
@@ -197,15 +206,10 @@ namespace rubinius {
      */
     while(exp > 0) {
       if(exp & 1) {
-        native_int intermediate = result * base;
-        // Overflow check when we grow out of the Fixnum range
-        // The division check is for when we overflow a native_int
-        if(intermediate > FIXNUM_MAX ||
-           intermediate < FIXNUM_MIN ||
-           intermediate / result != base) {
+        if(OVERFLOW_MUL(result, base)) {
           return Bignum::from(state, to_native())->pow(state, exponent);
         }
-        result = intermediate;
+        result *= base;
       }
       // The exp > 1 check is to not overflow unnecessary if this is the
       // last iteration of the algorithm
@@ -221,17 +225,22 @@ namespace rubinius {
   }
 
   Object* Fixnum::pow(STATE, Bignum* exponent) {
+    if(!LANGUAGE_18_ENABLED && CBOOL(exponent->lt(state, Fixnum::from(0)))) {
+      return Primitives::failure();
+    }
+
     native_int i = to_native();
     if(i == 0 || i == 1) return this;
+    if(i == -1) return Fixnum::from(exponent->even_p() ? 1 : -1);
     return Bignum::from(state, to_native())->pow(state, exponent);
   }
 
-  Float* Fixnum::pow(STATE, Float* exponent) {
+  Object* Fixnum::pow(STATE, Float* exponent) {
     return this->to_f(state)->fpow(state, exponent);
   }
 
   Object* Fixnum::equal(STATE, Fixnum* other) {
-    return to_native() == other->to_native() ? Qtrue : Qfalse;
+    return RBOOL(to_native() == other->to_native());
   }
 
   Object* Fixnum::equal(STATE, Bignum* other) {
@@ -239,7 +248,7 @@ namespace rubinius {
   }
 
   Object* Fixnum::equal(STATE, Float* other) {
-    return (double)to_native() == other->val ? Qtrue : Qfalse;
+    return RBOOL((double)to_native() == other->val);
   }
 
   Object* Fixnum::compare(STATE, Fixnum* other) {
@@ -282,11 +291,11 @@ namespace rubinius {
   }
 
   Object* Fixnum::gt(STATE, Float* other) {
-    return (double) to_native() > other->val ? Qtrue : Qfalse;
+    return RBOOL((double) to_native() > other->val);
   }
 
   Object* Fixnum::ge(STATE, Fixnum* other) {
-    return to_native() >= other->to_native() ? Qtrue : Qfalse;
+    return RBOOL(to_native() >= other->to_native());
   }
 
   Object* Fixnum::ge(STATE, Bignum* other) {
@@ -294,7 +303,7 @@ namespace rubinius {
   }
 
   Object* Fixnum::ge(STATE, Float* other) {
-    return (double) to_native() >= other->val ? Qtrue : Qfalse;
+    return RBOOL((double) to_native() >= other->val);
   }
 
   Object* Fixnum::lt(STATE, Bignum* other) {
@@ -302,11 +311,11 @@ namespace rubinius {
   }
 
   Object* Fixnum::lt(STATE, Float* other) {
-    return (double) to_native() < other->val ? Qtrue : Qfalse;
+    return RBOOL((double) to_native() < other->val);
   }
 
   Object* Fixnum::le(STATE, Fixnum* other) {
-    return to_native() <= other->to_native() ? Qtrue : Qfalse;
+    return RBOOL(to_native() <= other->to_native());
   }
 
   Object* Fixnum::le(STATE, Bignum* other) {
@@ -314,7 +323,7 @@ namespace rubinius {
   }
 
   Object* Fixnum::le(STATE, Float* other) {
-    return (double) to_native() <= other->val ? Qtrue : Qfalse;
+    return RBOOL((double) to_native() <= other->val);
   }
 
   Integer* Fixnum::left_shift(STATE, Fixnum* bits) {
@@ -324,14 +333,22 @@ namespace rubinius {
     }
 
     native_int self = to_native();
-    native_int check = self < 0 ? -self : self;
-
-    if(shift >= (native_int)FIXNUM_WIDTH
-        || check >> ((native_int)FIXNUM_WIDTH - shift) > 0) {
+    if(shift >= (native_int)FIXNUM_WIDTH) {
       return Bignum::from(state, self)->left_shift(state, bits);
     }
 
-    return Fixnum::from(self << shift);
+    native_int answer = self << shift;
+    native_int check = answer >> shift;
+
+    if(self != check) {
+      return Bignum::from(state, self)->left_shift(state, bits);
+    }
+
+    if(answer > FIXNUM_MAX || answer < FIXNUM_MIN) {
+      return Bignum::from(state, answer);
+    } else {
+      return Fixnum::from(answer);
+    }
   }
 
   Integer* Fixnum::right_shift(STATE, Fixnum* bits) {
@@ -342,7 +359,7 @@ namespace rubinius {
 
     // boundary case. Don't overflow the bits back to their original
     // value like C does, just say it's 0.
-    if(shift >= (native_int)((sizeof(native_int)*CHAR_BIT)-1)) {
+    if(shift > (native_int)FIXNUM_WIDTH) {
       if(to_native() >= 0) return Fixnum::from(0);
       return Fixnum::from(-1);
     }
@@ -363,6 +380,9 @@ namespace rubinius {
   }
 
   Integer* Fixnum::bit_and(STATE, Float* other) {
+    if(!LANGUAGE_18_ENABLED) {
+      Exception::type_error(state, "can't convert Float into Integer for bitwise arithmetic");
+    }
     return Fixnum::from(to_native() & (native_int)other->val);
   }
 
@@ -375,6 +395,9 @@ namespace rubinius {
   }
 
   Integer* Fixnum::bit_or(STATE, Float* other) {
+    if(!LANGUAGE_18_ENABLED) {
+      Exception::type_error(state, "can't convert Float into Integer for bitwise arithmetic");
+    }
     return Fixnum::from(to_native() | (native_int)other->val);
   }
 
@@ -387,6 +410,9 @@ namespace rubinius {
   }
 
   Integer* Fixnum::bit_xor(STATE, Float* other) {
+    if(!LANGUAGE_18_ENABLED) {
+      Exception::type_error(state, "can't convert Float into Integer for bitwise arithmetic");
+    }
     return Fixnum::from(to_native() ^ (native_int)other->val);
   }
 
@@ -402,9 +428,9 @@ namespace rubinius {
     return to_s(state, Fixnum::from(10));
   }
 
+  static const char digitmap[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+
   String* Fixnum::to_s(STATE, Fixnum* base) {
-    // algorithm adapted from shotgun
-    static const char digitmap[] = "0123456789abcdefghijklmnopqrstuvwxyz";
     // Base 2 fixnum with a minus sign and null byte is the maximum length
     char buf[FIXNUM_WIDTH + 2];
     char *b = buf + sizeof(buf);
@@ -418,7 +444,7 @@ namespace rubinius {
     }
 
     /* Algorithm taken from 1.8.4 rb_fix2str */
-    if(k == 0) return String::create(state, "0");
+    if(k == 0) return String::create(state, "0", 1);
 
     m = 0;
     if(k < 0) {
@@ -427,14 +453,17 @@ namespace rubinius {
     }
     *--b = 0;
     do {
-      *--b = digitmap[(int)(k % j)];
+      *--b = digitmap[k % j];
     } while(k /= j);
 
     if(m) {
       *--b = '-';
     }
 
-    return String::create(state, b);
+    String* str = String::create(state, b, buf + sizeof(buf) - b - 1);
+    str->encoding(state, Encoding::usascii_encoding(state));
+
+    return str;
   }
 
   Array* Fixnum::coerce(STATE, Bignum* other) {

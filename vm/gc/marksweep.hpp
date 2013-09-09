@@ -7,12 +7,6 @@
 
 #include <list>
 
-#include "call_frame_list.hpp"
-
-#ifdef USE_DLMALLOC
-#include "util/dlmalloc_cpp.hpp"
-#endif
-
 namespace rubinius {
 
   /* Forwards */
@@ -26,10 +20,6 @@ namespace rubinius {
 
   private:
       MarkStack mark_stack_;
-
-#ifdef USE_DLMALLOC
-      DLMalloc malloc_;
-#endif
 
   public:
     /* Data members */
@@ -53,10 +43,10 @@ namespace rubinius {
     void   sweep_objects();
     void   free_object(Object* obj, bool fast = false);
     virtual Object* saw_object(Object* obj);
-    void   collect(Roots &roots, CallFrameLocationList& call_frame);
+    virtual void scanned_object(Object* obj) {}
     void after_marked();
 
-    void profile();
+    void profile(STATE);
 
     ObjectPosition validate_object(Object* obj);
   };

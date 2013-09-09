@@ -1,3 +1,4 @@
+module Rubinius
 module FFI
   module Generators
     ##
@@ -111,8 +112,7 @@ module FFI
       end
 
       def prepare(name, target)
-        include_dirs = @include_dirs.map { |i| "-I#{i}" }.join(" ")
-        "gcc #{@platform.defines} -x c #{include_dirs} -Wall -Werror #{name} -o #{target} 2>&1"
+        @platform.compile(@include_dirs, name, target)
       end
 
       def prepare_failed
@@ -176,4 +176,5 @@ module FFI
   end
 
   ConstGenerator = Generators::Constants
+end
 end

@@ -2,8 +2,6 @@
 #define RBX_BUILTIN_DIR_HPP
 
 #include "builtin/object.hpp"
-#include "type_info.hpp"
-
 #include <dirent.h>
 
 namespace rubinius {
@@ -25,7 +23,6 @@ namespace rubinius {
 
     static void init(STATE);
 
-
     static Dir* create(STATE);
 
     static void finalize(STATE, Dir* dir);
@@ -39,7 +36,7 @@ namespace rubinius {
     // Rubinius.primitive :dir_close
     Object* close(STATE);
 
-    // Rubinius.primitive :dir_closed_p
+    // Rubinius.primitive+ :dir_closed_p
     Object* closed_p(STATE);
 
     // Rubinius.primitive :dir_read

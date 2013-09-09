@@ -1,21 +1,16 @@
 #include "builtin/dir.hpp"
-#include "ffi.hpp"
-#include "vm.hpp"
-#include "objectmemory.hpp"
 #include "builtin/array.hpp"
 #include "builtin/class.hpp"
 #include "builtin/exception.hpp"
 #include "builtin/fixnum.hpp"
 #include "builtin/string.hpp"
-
 #include "object_utils.hpp"
-
-#include <sys/types.h>
-#include <dirent.h>
+#include "objectmemory.hpp"
+#include "ontology.hpp"
 
 namespace rubinius {
   void Dir::init(STATE) {
-    GO(dir).set(state->new_class("Dir", G(object)));
+    GO(dir).set(ontology::new_class(state, "Dir", G(object)));
     G(dir)->set_object_type(state, DirType);
   }
 
@@ -23,7 +18,7 @@ namespace rubinius {
     Dir* d = state->new_object<Dir>(G(dir));
     d->os_ = 0;
 
-    state->om->needs_finalization(d, (FinalizerFunction)&Dir::finalize);
+    state->memory()->needs_finalization(d, (FinalizerFunction)&Dir::finalize);
 
     return d;
   }
@@ -54,16 +49,16 @@ namespace rubinius {
   Object* Dir::open(STATE, String* path) {
     if(os_) closedir(os_);
 
-    os_ = opendir(path->c_str(state));
+    os_ = opendir(path->c_str_null_safe(state));
 
     if(!os_) {
-      Exception::errno_error(state, "Unable to open directory", errno, path->c_str(state));
+      Exception::errno_error(state, "Unable to open directory", errno, path->c_str_null_safe(state));
       return 0;
     }
 
     this->path(state, path);
 
-    return Qtrue;
+    return cTrue;
   }
 
   Object* Dir::close(STATE) {
@@ -74,21 +69,22 @@ namespace rubinius {
       os_ = 0;
     }
 
-    return Qnil;
+    return cNil;
   }
 
   Object* Dir::closed_p(STATE) {
-    return os_ ? Qfalse : Qtrue;
+    return RBOOL(!os_);
   }
 
   Object* Dir::read(STATE) {
     guard(state);
 
-    struct dirent *ent = readdir(os_);
+    struct dirent ent;
+    struct dirent* entp = &ent;
+    readdir_r(os_, entp, &entp);
 
-    if(!ent) return Qnil;
-
-    return String::create(state, ent->d_name);
+    if(!entp) return cNil;
+    return String::create(state, ent.d_name);
   }
 
   Object* Dir::control(STATE, Fixnum* kind, Integer* pos) {
@@ -97,13 +93,13 @@ namespace rubinius {
     switch(kind->to_native()) {
     case 0:
       seekdir(os_, pos->to_native());
-      return Qtrue;
+      return cTrue;
     case 1:
       rewinddir(os_);
-      return Qtrue;
+      return cTrue;
     case 2:
       return Integer::from(state, telldir(os_));
     }
-    return Qnil;
+    return cNil;
   }
 }

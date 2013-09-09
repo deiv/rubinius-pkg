@@ -7,7 +7,7 @@
 require 'fileutils'
 require 'rubygems'
 require 'rubygems/dependency_list'
-require 'rubygems/doc_manager'
+require 'rubygems/rdoc'
 require 'rubygems/user_interaction'
 
 ##
@@ -42,26 +42,29 @@ class Gem::Uninstaller
   # Constructs an uninstaller that will uninstall +gem+
 
   def initialize(gem, options = {})
-    @gem = gem
-    @version = options[:version] || Gem::Requirement.default
-    gem_home = options[:install_dir] || Gem.dir
-    @gem_home = File.expand_path gem_home
+    # TODO document the valid options
+    @gem               = gem
+    @version           = options[:version] || Gem::Requirement.default
+    @gem_home          = File.expand_path(options[:install_dir] || Gem.dir)
     @force_executables = options[:executables]
-    @force_all = options[:all]
-    @force_ignore = options[:ignore]
-    @bin_dir = options[:bin_dir]
+    @force_all         = options[:all]
+    @force_ignore      = options[:ignore]
+    @bin_dir           = options[:bin_dir]
+    @format_executable = options[:format_executable]
+
+    # Indicate if development dependencies should be checked when
+    # uninstalling. (default: false)
+    #
+    @check_dev         = options[:check_dev]
+
+    if options[:force]
+      @force_all = true
+      @force_ignore = true
+    end
 
     # only add user directory if install_dir is not set
     @user_install = false
     @user_install = options[:user_install] unless options[:install_dir]
-
-    spec_dir = File.join @gem_home, 'specifications'
-    @source_index = Gem::SourceIndex.from_gems_in spec_dir
-
-    if @user_install then
-      user_dir = File.join Gem.user_dir, 'specifications'
-      @user_index = Gem::SourceIndex.from_gems_in user_dir
-    end
   end
 
   ##
@@ -69,14 +72,51 @@ class Gem::Uninstaller
   # directory, and the cached .gem file.
 
   def uninstall
-    list = @source_index.find_name @gem, @version
-    list += @user_index.find_name @gem, @version if @user_install
+    dependency = Gem::Dependency.new @gem, @version
+
+    list = []
+
+    dirs =
+      Gem::Specification.dirs +
+      [Gem::Specification.default_specifications_dir]
+
+    Gem::Specification.each_spec dirs do |spec|
+      next unless dependency.matches_spec? spec
+
+      list << spec
+    end
+
+    default_specs, list = list.partition do |spec|
+      spec.default_gem?
+    end
+
+    list, other_repo_specs = list.partition do |spec|
+      @gem_home == spec.base_dir or
+        (@user_install and spec.base_dir == Gem.user_dir)
+    end
 
     if list.empty? then
-      raise Gem::InstallError, "cannot uninstall, check `gem list -d #{@gem}`"
+      if other_repo_specs.empty?
+        if default_specs.empty?
+          raise Gem::InstallError, "gem #{@gem.inspect} is not installed"
+        else
+          message =
+            "gem #{@gem.inspect} cannot be uninstalled " +
+            "because it is a default gem"
+          raise Gem::InstallError, message
+        end
+      end
 
-    elsif list.size > 1 and @force_all then
-      remove_all list.dup
+      other_repos = other_repo_specs.map { |spec| spec.base_dir }.uniq
+
+      message = ["#{@gem} is not installed in GEM_HOME, try:"]
+      message.concat other_repos.map { |repo|
+        "\tgem uninstall -i #{repo} #{@gem}"
+      }
+
+      raise Gem::InstallError, message.join("\n")
+    elsif @force_all then
+      remove_all list
 
     elsif list.size > 1 then
       gem_names = list.collect {|gem| gem.full_name} + ["All versions"]
@@ -85,29 +125,36 @@ class Gem::Uninstaller
       _, index = choose_from_list "Select gem to uninstall:", gem_names
 
       if index == list.size then
-        remove_all list.dup
+        remove_all list
       elsif index >= 0 && index < list.size then
-        uninstall_gem list[index], list.dup
+        uninstall_gem list[index]
       else
         say "Error: must enter a number [1-#{list.size+1}]"
       end
     else
-      uninstall_gem list.first, list.dup
+      uninstall_gem list.first
     end
   end
 
   ##
   # Uninstalls gem +spec+
 
-  def uninstall_gem(spec, specs)
+  def uninstall_gem(spec)
     @spec = spec
+
+    unless dependencies_ok? spec
+      unless ask_if_ok(spec)
+        raise Gem::DependencyRemovalException,
+          "Uninstallation aborted due to dependent gem(s)"
+      end
+    end
 
     Gem.pre_uninstall_hooks.each do |hook|
       hook.call self
     end
 
     remove_executables @spec
-    remove @spec, specs
+    remove @spec
 
     Gem.post_uninstall_hooks.each do |hook|
       hook.call self
@@ -123,13 +170,14 @@ class Gem::Uninstaller
   def remove_executables(spec)
     return if spec.nil? or spec.executables.empty?
 
-    bindir = @bin_dir ? @bin_dir : Gem.bindir(spec.installation_path)
-
-    list = @source_index.find_name(spec.name).delete_if { |s|
-      s.version == spec.version
-    }
-
     executables = spec.executables.clone
+
+    # Leave any executables created by other installed versions
+    # of this gem installed.
+
+    list = Gem::Specification.find_all { |s|
+      s.name == spec.name && s.version != spec.version
+    }
 
     list.each do |s|
       s.executables.each do |exe_name|
@@ -139,25 +187,32 @@ class Gem::Uninstaller
 
     return if executables.empty?
 
+    executables = executables.map { |exec| formatted_program_filename exec }
+
     remove = if @force_executables.nil? then
-               ask_yes_no("Remove executables:\n" \
-                          "\t#{spec.executables.join ', '}\n\n" \
+               ask_yes_no("Remove executables:\n" +
+                          "\t#{executables.join ', '}\n\n" +
                           "in addition to the gem?",
                           true)
              else
                @force_executables
              end
 
-    unless remove then
-      say "Executables and scripts will remain installed."
-    else
-      raise Gem::FilePermissionError, bindir unless File.writable? bindir
+    if remove then
+      bin_dir = @bin_dir || Gem.bindir(spec.base_dir)
 
-      spec.executables.each do |exe_name|
+      raise Gem::FilePermissionError, bin_dir unless File.writable? bin_dir
+
+      executables.each do |exe_name|
         say "Removing #{exe_name}"
-        FileUtils.rm_f File.join(bindir, exe_name)
-        FileUtils.rm_f File.join(bindir, "#{exe_name}.bat")
+
+        exe_file = File.join bin_dir, exe_name
+
+        FileUtils.rm_f exe_file
+        FileUtils.rm_f "#{exe_file}.bat"
       end
+    else
+      say "Executables and scripts will remain installed."
     end
   end
 
@@ -167,7 +222,7 @@ class Gem::Uninstaller
   # NOTE: removes uninstalled gems from +list+.
 
   def remove_all(list)
-    list.dup.each { |spec| uninstall_gem spec, list }
+    list.each { |spec| uninstall_gem spec }
   end
 
   ##
@@ -177,12 +232,7 @@ class Gem::Uninstaller
   # Warning: this method modifies the +list+ parameter.  Once it has
   # uninstalled a gem, it is removed from that list.
 
-  def remove(spec, list)
-    unless dependencies_ok? spec then
-      raise Gem::DependencyRemovalException,
-            "Uninstallation aborted due to dependent gem(s)"
-    end
-
+  def remove(spec)
     unless path_ok?(@gem_home, spec) or
            (@user_install and path_ok?(Gem.user_dir, spec)) then
       e = Gem::GemNotInHomeException.new \
@@ -192,44 +242,42 @@ class Gem::Uninstaller
       raise e
     end
 
-    raise Gem::FilePermissionError, spec.installation_path unless
-      File.writable?(spec.installation_path)
+    raise Gem::FilePermissionError, spec.base_dir unless
+      File.writable?(spec.base_dir)
 
     FileUtils.rm_rf spec.full_gem_path
 
-    original_platform_name = [
-      spec.name, spec.version, spec.original_platform].join '-'
+    # TODO: should this be moved to spec?... I vote eww (also exists in docmgr)
+    old_platform_name = [spec.name,
+                         spec.version,
+                         spec.original_platform].join '-'
 
-    spec_dir = File.join spec.installation_path, 'specifications'
-    gemspec = File.join spec_dir, spec.spec_name
+    gemspec = spec.spec_file
 
     unless File.exist? gemspec then
-      gemspec = File.join spec_dir, "#{original_platform_name}.gemspec"
+      gemspec = File.join(File.dirname(gemspec), "#{old_platform_name}.gemspec")
     end
 
     FileUtils.rm_rf gemspec
 
-    cache_dir = File.join spec.installation_path, 'cache'
-    gem = File.join cache_dir, spec.file_name
-
-    unless File.exist? gem then
-      gem = File.join cache_dir, "#{original_platform_name}.gem"
-    end
+    gem = spec.cache_file
+    gem = File.join(spec.cache_dir, "#{old_platform_name}.gem") unless
+      File.exist? gem
 
     FileUtils.rm_rf gem
 
-    Gem::DocManager.new(spec).uninstall_doc
+    Gem::RDoc.new(spec).remove
 
     say "Successfully uninstalled #{spec.full_name}"
 
-    list.delete spec
+    Gem::Specification.remove_spec spec
   end
 
   ##
   # Is +spec+ in +gem_dir+?
 
   def path_ok?(gem_dir, spec)
-    full_path = File.join gem_dir, 'gems', spec.full_name
+    full_path     = File.join gem_dir, 'gems', spec.full_name
     original_path = File.join gem_dir, 'gems', spec.original_name
 
     full_path == spec.full_gem_path || original_path == spec.full_gem_path
@@ -238,24 +286,40 @@ class Gem::Uninstaller
   def dependencies_ok?(spec)
     return true if @force_ignore
 
-    deplist = Gem::DependencyList.from_source_index @source_index
-    deplist.add(*@user_index.gems.values) if @user_install
-    deplist.ok_to_remove?(spec.full_name) || ask_if_ok(spec)
+    deplist = Gem::DependencyList.from_specs
+    deplist.ok_to_remove?(spec.full_name, @check_dev)
   end
 
   def ask_if_ok(spec)
     msg = ['']
     msg << 'You have requested to uninstall the gem:'
     msg << "\t#{spec.full_name}"
-    spec.dependent_gems.each do |gem,dep,satlist|
-      msg <<
-        ("#{gem.name}-#{gem.version} depends on " +
-        "[#{dep.name} (#{dep.requirement})]")
+    msg << ''
+
+    siblings = Gem::Specification.select do |s|
+                 s.name == spec.name && s.full_name != spec.full_name
+               end
+
+    spec.dependent_gems.each do |dep_spec, dep, satlist|
+      unless siblings.any? { |s| s.satisfies_requirement? dep }
+        msg << "#{dep_spec.name}-#{dep_spec.version} depends on #{dep}"
+      end
     end
-    msg << 'If you remove this gems, one or more dependencies will not be met.'
+
+    msg << 'If you remove this gem, these dependencies will not be met.'
     msg << 'Continue with Uninstall?'
-    return ask_yes_no(msg.join("\n"), true)
+    return ask_yes_no(msg.join("\n"), false)
   end
 
+  def formatted_program_filename(filename)
+    # TODO perhaps the installer should leave a small manifest
+    # of what it did for us to find rather than trying to recreate
+    # it again.
+    if @format_executable then
+      require 'rubygems/installer'
+      Gem::Installer.exec_format % File.basename(filename)
+    else
+      filename
+    end
+  end
 end
-

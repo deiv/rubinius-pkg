@@ -7,18 +7,25 @@
 #include "capi/capi.hpp"
 #include "capi/18/include/ruby.h"
 
+#include "configuration.hpp"
+#include "version.h"
+
 using namespace rubinius;
 using namespace rubinius::capi;
 
 extern "C" {
 
   void rb_error_frozen(const char* what) {
-    rb_raise(rb_eTypeError, "can't modify frozen %s", what);
+    if(LANGUAGE_18_ENABLED){
+      rb_raise(rb_eTypeError, "can't modify frozen %s", what);
+    } else {
+      rb_raise(rb_eRuntimeError, "can't modify frozen %s", what);
+    }
   }
 
   VALUE rb_obj_frozen_p(VALUE obj) {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
-    if(env->get_object(obj)->frozen_p(env->state()) == RBX_Qtrue) {
+    if(CBOOL(env->get_object(obj)->frozen_p(env->state()))) {
       return Qtrue;
     }
 
@@ -66,6 +73,8 @@ extern "C" {
     {T_SCOPE,   "Scope"},     /* internal use: variable scope */
     {T_NODE,    "Node"},      /* internal use: syntax tree node */
     {T_UNDEF,   "undef"},     /* internal use: #undef; should not happen */
+    {T_RATIONAL, "Rational" },
+    {T_COMPLEX,  "Complex" },
     {-1,  0}
   };
 
@@ -73,22 +82,22 @@ extern "C" {
   void rb_check_type(VALUE x, int t) {
     struct types *type = builtin_types;
 
-    if (x == Qundef) {
+    if(x == Qundef) {
       rb_bug("undef leaked to the Ruby space");
     }
 
-    if (TYPE(x) != t) {
+    if(TYPE(x) != t) {
       while (type->type >= 0) {
-        if (type->type == t) {
+        if(type->type == t) {
           const char *etype;
 
-          if (NIL_P(x)) {
+          if(NIL_P(x)) {
             etype = "nil";
-          } else if (FIXNUM_P(x)) {
+          } else if(FIXNUM_P(x)) {
             etype = "Fixnum";
-          } else if (SYMBOL_P(x)) {
+          } else if(SYMBOL_P(x)) {
             etype = "Symbol";
-          } else if (rb_special_const_p(x)) {
+          } else if(rb_special_const_p(x)) {
             etype = RSTRING_PTR(rb_obj_as_string(x));
           } else {
             etype = rb_obj_classname(x);
@@ -105,11 +114,13 @@ extern "C" {
   }
 
   VALUE rb_check_array_type(VALUE object_handle) {
-    return rb_check_convert_type(object_handle, 0, "Array", "to_ary");
+    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+    return rb_funcall(env->get_handle(env->state()->globals().type.get()), rb_intern("try_convert"), 3, object_handle, rb_cArray, rb_intern("to_ary"));
   }
 
   VALUE rb_check_string_type(VALUE object_handle) {
-    return rb_check_convert_type(object_handle, 0, "String", "to_str");
+    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+    return rb_funcall(env->get_handle(env->state()->globals().type.get()), rb_intern("try_convert"), 3, object_handle, rb_cString, rb_intern("to_str"));
   }
 
   VALUE rb_check_convert_type(VALUE object_handle, int /*type*/,
@@ -145,9 +156,9 @@ extern "C" {
 
     if(NIL_P(return_handle)) {
       rb_raise(rb_eTypeError, "can't convert %s into %s",
-               RBX_NIL_P(object_handle) ? "nil" :
-                RBX_TRUE_P(object_handle) ? "true" :
-                  RBX_FALSE_P(object_handle) ? "false" :
+               NIL_P(object_handle) ? "nil" :
+                TRUE_P(object_handle) ? "true" :
+                  FALSE_P(object_handle) ? "false" :
                     rb_obj_classname(object_handle),
                type_name);
     }
@@ -163,15 +174,15 @@ extern "C" {
   }
 
   int rb_type(VALUE obj) {
-    if (FIXNUM_P(obj)) return T_FIXNUM;
-    if (obj == Qnil) return T_NIL;
-    if (obj == Qfalse) return T_FALSE;
-    if (obj == Qtrue) return T_TRUE;
-    if (obj == Qundef) return T_UNDEF;
-    if (SYMBOL_P(obj)) return T_SYMBOL;
+    if(FIXNUM_P(obj)) return T_FIXNUM;
+    if(obj == Qnil) return T_NIL;
+    if(obj == Qfalse) return T_FALSE;
+    if(obj == Qtrue) return T_TRUE;
+    if(obj == Qundef) return T_UNDEF;
+    if(SYMBOL_P(obj)) return T_SYMBOL;
 
-    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
-    Object* object = env->get_object(obj);
+    capi::Handle* handle = capi::Handle::from(obj);
+    Object* object = handle->object();
     switch(object->type_id()) {
     case ArrayType:
       return T_ARRAY;
@@ -198,6 +209,11 @@ extern "C" {
       if(rb_obj_is_kind_of(obj, rb_cStruct)) return T_STRUCT;
       if(rb_obj_is_kind_of(obj, rb_cIO)) return T_FILE;
       if(rb_obj_is_kind_of(obj, rb_cMatch)) return T_MATCH;
+      if(!LANGUAGE_18_ENABLED) {
+        if(rb_obj_is_kind_of(obj, rb_cRational)) return T_RATIONAL;
+        if(rb_obj_is_kind_of(obj, rb_cComplex)) return T_COMPLEX;
+        if(rb_obj_is_kind_of(obj, rb_cEncoding)) return T_ENCODING;
+      }
     }
 
     return T_OBJECT;
@@ -223,7 +239,7 @@ extern "C" {
 
     Object* object = env->get_object(obj_handle);
 
-    if (kind_of<String>(object)) {
+    if(kind_of<String>(object)) {
       return obj_handle;
     }
 
@@ -261,6 +277,12 @@ extern "C" {
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
 
     return reinterpret_cast<ID>(env->state()->symbol(string));
+  }
+
+  ID rb_intern2(const char* string, long len) {
+    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+
+    return reinterpret_cast<ID>(env->state()->symbol(string, len));
   }
 
   VALUE rb_iv_get(VALUE self_handle, const char* name) {
@@ -304,6 +326,10 @@ extern "C" {
 
   VALUE rb_attr_get(VALUE obj_handle, ID attr_name) {
     return rb_ivar_get(obj_handle, attr_name);
+  }
+
+  VALUE rb_obj_instance_variables(VALUE obj_handle) {
+    return rb_funcall(obj_handle, rb_intern("instance_variables"), 0);
   }
 
   int rb_respond_to(VALUE obj_handle, ID method_name) {
@@ -388,5 +414,14 @@ extern "C" {
   int rb_obj_respond_to(VALUE obj, ID method_name, int priv) {
     VALUE include_private = priv == 1 ? Qtrue : Qfalse;
     return RTEST(rb_funcall(obj, rb_intern("respond_to?"), 2, ID2SYM(method_name), include_private));
+  }
+
+  int rb_method_boundp(VALUE cls, ID method_name, int exclude_priv) {
+    VALUE public_defined = rb_funcall(cls, rb_intern("method_defined?"), 1, ID2SYM(method_name));
+    if(RTEST(public_defined)) return 1;
+    if(!exclude_priv) {
+      return RTEST(rb_funcall(cls, rb_intern("private_method_defined?"), 1, ID2SYM(method_name)));
+    }
+    return 0;
   }
 }

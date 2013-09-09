@@ -6,6 +6,7 @@ require base + '/generators/structures'
 require base + '/generators/constants'
 require base + '/generators/types'
 
+module Rubinius
 module FFI
   module Generators
 
@@ -117,12 +118,42 @@ module FFI
       end
 
       def defines
-        "-D_DARWIN_USE_64_BIT_INODE -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64"
+        Rubinius::BUILD_CONFIG[:defines].map{|f| "-D#{f}" }.join(" ")
       end
 
       def windows?
         RUBY_PLATFORM =~ /mswin|mingw/
       end
+
+      def compiler
+        case @kind
+        when :c
+          Rubinius::BUILD_CONFIG[:cc]
+        when :cpp, :cxx
+          Rubinius::BUILD_CONFIG[:cxx]
+        else
+          Rubinius::BUILD_CONFIG[:cc]
+        end
+      end
+
+      def language
+        case @kind
+        when :c
+          "c"
+        when :cpp, :cxx
+          "c++"
+        else
+          "c"
+        end
+      end
+
+      def compile(include_dirs, source, target)
+        includes = include_dirs.map { |i| "-I#{i}" }.join(" ")
+        compile_options = "#{defines} -x #{language} #{includes} -Wall -Werror"
+
+        "#{compiler} #{compile_options} #{source} -o #{target} 2>&1"
+      end
     end
   end
+end
 end

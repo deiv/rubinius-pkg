@@ -305,6 +305,21 @@ describe "Executing break from within a block" do
     ScratchPad.recorded.should == [:two_ensure]
   end
 
+  it "runs ensures when breaking from a loop" do
+    ScratchPad.record []
+
+    while true
+      begin
+        ScratchPad << :begin
+        break if true
+      ensure
+        ScratchPad << :ensure
+      end
+    end
+
+    ScratchPad.recorded.should == [:begin, :ensure]
+  end
+
   it "doesn't run ensures in the destination method" do
     ScratchPad.record []
 
@@ -314,4 +329,6 @@ describe "Executing break from within a block" do
   end
 end
 
-language_version __FILE__, "break"
+ruby_version_is "1.8"..."1.9" do
+  require File.expand_path("../versions/break_1.8", __FILE__)
+end

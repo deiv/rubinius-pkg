@@ -1,3 +1,4 @@
+# -*- encoding: US-ASCII -*-
 require File.expand_path('../../../spec_helper', __FILE__)
 require File.expand_path('../fixtures/classes.rb', __FILE__)
 
@@ -91,7 +92,7 @@ describe "String#delete" do
   end
 
   it "returns subclass instances when called on a subclass" do
-    StringSpecs::MyString.new("oh no!!!").delete("!").should be_kind_of(StringSpecs::MyString)
+    StringSpecs::MyString.new("oh no!!!").delete("!").should be_an_instance_of(StringSpecs::MyString)
   end
 end
 

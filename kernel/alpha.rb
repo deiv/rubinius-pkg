@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 #
 # This is the beginning of loading Ruby code. At this point, the VM
 # is bootstrapped and the fundamental data structures, primitive
@@ -48,7 +50,7 @@ class Rubinius::VM
 
   # Reset the method cache globally for given method name.
   #
-  def self.reset_method_cache(sym)
+  def self.reset_method_cache(mod, sym)
     Rubinius.primitive :vm_reset_method_cache
     raise PrimitiveFailure, "Rubinius::VM.reset_method_cache primitive failed"
   end
@@ -100,7 +102,7 @@ class Class
       # allowed to leak a stack value
     end
 
-    return obj
+    obj
   end
 end
 
@@ -158,7 +160,7 @@ module Kernel
   #
   def kind_of?(cls)
     Rubinius.primitive :object_kind_of
-    raise TypeError, 'kind_of? requires a Class or Module argument'
+    raise TypeError, "Kernel#kind_of? requires a Class or Module argument"
   end
 
   # Hook method invoked when object is sent a message it cannot handle.
@@ -169,7 +171,7 @@ module Kernel
   # This method may be overridden, and is often used to provide dynamic
   # behaviour. An overriding version should call super if it fails to
   # resolve the message. This practice ensures that the default version
-  # will called if all else fails.
+  # will be called if all else fails.
   #
   def method_missing(meth, *args)
     raise NoMethodError, "Unable to send '#{meth}' on '#{self}' (#{self.class})"
@@ -200,13 +202,11 @@ module Kernel
   # if defined.
   #
   def dup
-    copy = Rubinius.invoke_primitive(:object_class, self).allocate
+    copy = Rubinius::Type.object_class(self).allocate
 
     Rubinius.invoke_primitive :object_copy_object, copy, self
 
-    Rubinius.privately do
-      copy.initialize_copy self
-    end
+    Rubinius::Type.object_initialize_dup self, copy
     copy
   end
 
@@ -228,15 +228,12 @@ module Kernel
   def clone
     # Do not implement in terms of dup. It breaks rails.
     #
-    cls = Rubinius.invoke_primitive :object_class, self
-    copy = cls.allocate
+    copy = Rubinius::Type.object_class(self).allocate
 
     Rubinius.invoke_primitive :object_copy_object, copy, self
     Rubinius.invoke_primitive :object_copy_singleton_class, copy, self
 
-    Rubinius.privately do
-      copy.initialize_copy self
-    end
+    Rubinius::Type.object_initialize_clone self, copy
 
     copy.freeze if frozen?
     copy
@@ -314,6 +311,28 @@ module Rubinius
     end
   end
 
+  # Constant table for storing methods.
+  #
+  # See kernel/bootstrap/constant_table.rb and
+  #     kernel/common/constant_table.rb
+  #
+  class ConstantTable
+
+    # Perform lookup for constant name.
+    #
+    def lookup(name)
+      Rubinius.primitive :constant_table_lookup
+      raise PrimitiveFailure, "ConstantTable#lookup primitive failed"
+    end
+
+    # Store Constant under name, with given visibility.
+    #
+    def store(name, constant, visibility)
+      Rubinius.primitive :constant_table_store
+      raise PrimitiveFailure, "ConstantTable#store primitive failed"
+    end
+  end
+
   # Lookup table for storing methods.
   #
   # See kernel/bootstrap/methodtable.rb and
@@ -350,7 +369,7 @@ class Symbol
   #
   def to_s
     Rubinius.primitive :symbol_to_s
-    raise PrimitiveFailure, "Symbol#to_s primitive failed."
+    raise PrimitiveFailure, "Symbol#to_s primitive failed"
   end
 
   # For completeness, returns self.
@@ -380,7 +399,7 @@ class String
   #++
   def to_sym
     Rubinius.primitive :symbol_lookup
-    raise PrimitiveFailure, "Unable to symbolize: #{self.dump}"
+    raise PrimitiveFailure, "String#to_sym primitive failed: #{self.dump}"
   end
 
   # For completeness, returns self.
@@ -424,8 +443,9 @@ end
 
 class Module
   def method_table   ; @method_table ; end
-  def constant_table; @constant_table ; end
+  def constant_table ; @constant_table ; end
   def name           ; @module_name.to_s ; end
+  def origin         ; @origin ; end
 
   # Specialised allocator.
   #
@@ -451,11 +471,12 @@ class Module
 
   # Set Module's direct superclass.
   #
-  # The corresponding 'getter' #superclass method defined
+  # The corresponding 'getter' #superclass method is defined
   # in class.rb, because it is more complex than a mere
   # accessor
   #
   def superclass=(other)
+    Rubinius.check_frozen
     @superclass = other
   end
 
@@ -488,7 +509,7 @@ class Module
   #
   # Basic version of .include used in kernel code.
   #
-  # Redefined in kernel/common/module.rb.
+  # Redefined in kernel/delta/module.rb.
   #
   def include(mod)
     mod.append_features(self)
@@ -507,14 +528,14 @@ class Module
   def attr_reader(name)
     meth = Rubinius::AccessVariable.get_ivar name
     @method_table.store name, meth, :public
-    Rubinius::VM.reset_method_cache name
+    Rubinius::VM.reset_method_cache self, name
     nil
   end
 
   def attr_reader_specific(name, method_name)
     meth = Rubinius::AccessVariable.get_ivar name
     @method_table.store method_name, meth, :public
-    Rubinius::VM.reset_method_cache method_name
+    Rubinius::VM.reset_method_cache self, method_name
     nil
   end
 
@@ -526,8 +547,9 @@ class Module
   #
   def attr_writer(name)
     meth = Rubinius::AccessVariable.set_ivar name
-    @method_table.store "#{name}=".to_sym, meth, :public
-    Rubinius::VM.reset_method_cache name
+    writer_name = "#{name}=".to_sym
+    @method_table.store writer_name, meth, :public
+    Rubinius::VM.reset_method_cache self, writer_name
     nil
   end
 
@@ -549,7 +571,7 @@ class Module
   # Cannot be used as a toggle, and only
   # takes a single method name.
   #
-  # Redefined in kernel/common/module.rb.
+  # Redefined in kernel/delta/module.rb.
   #
   def private(name)
     if entry = @method_table.lookup(name)
@@ -577,7 +599,7 @@ class Module
   # of current method and stores it under the new name.
   # The two are independent.
   #
-  # Redefined in kernel/common/module.rb.
+  # Redefined in kernel/delta/module.rb.
   #
   def alias_method(new_name, current_name)
     # If we're aliasing a method we contain, just reference it directly, no
@@ -600,7 +622,7 @@ class Module
                           entry.method, mod
     end
 
-    Rubinius::VM.reset_method_cache(new_name)
+    Rubinius::VM.reset_method_cache self, new_name
   end
 
   # :internal:
@@ -614,9 +636,14 @@ class Module
     if entry = @method_table.lookup(name)
       sc = class << self; self; end
       sc.method_table.store name, entry.method, :public
-      Rubinius::VM.reset_method_cache name
+      Rubinius::VM.reset_method_cache self, name
       private name
     end
+  end
+
+  def track_subclass(cls)
+    Rubinius.primitive :module_track_subclass
+    raise PrimitiveFailure, "Module.track_subclass primitive failed"
   end
 end
 
@@ -694,6 +721,8 @@ module Rubinius
     def attach_to(cls)
       @superclass = cls.direct_superclass
       cls.superclass = self
+      @module.track_subclass(cls)
+      self
     end
 
     # :internal:

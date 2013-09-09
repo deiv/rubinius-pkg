@@ -1,22 +1,19 @@
-class Regexp
-  ValidKcode    = [110, 101, 115, 117]  # [?n,?e,?s,?u]
-  KcodeValue    = [16, 32, 48, 64]
+# -*- encoding: us-ascii -*-
 
+class Regexp
   IGNORECASE         = 1
   EXTENDED           = 2
   MULTILINE          = 4
   DONT_CAPTURE_GROUP = 128
   CAPTURE_GROUP      = 256
-  OPTION_MASK        = IGNORECASE | EXTENDED | MULTILINE | DONT_CAPTURE_GROUP | CAPTURE_GROUP
 
-  KCODE_ASCII   = 0
-  KCODE_NONE    = 16
-  KCODE_EUC     = 32
-  KCODE_SJIS    = 48
-  KCODE_UTF8    = 64
-  KCODE_MASK    = 112
+  KCODE_NONE = (1 << 9)
+  KCODE_EUC  = (2 << 9)
+  KCODE_SJIS = (3 << 9)
+  KCODE_UTF8 = (4 << 9)
+  KCODE_MASK = KCODE_NONE | KCODE_EUC | KCODE_SJIS | KCODE_UTF8
 
-  ESCAPE_TABLE  = Rubinius::Tuple.new(256)
+  ESCAPE_TABLE = Rubinius::Tuple.new(256)
 
   # Seed it with direct replacements
   i = 0
@@ -50,103 +47,8 @@ class Regexp
   ESCAPE_TABLE[124] = '\\|'
   ESCAPE_TABLE[125] = '\\}'
 
-  ##
-  # Constructs a new regular expression from the given pattern. The pattern
-  # may either be a String or a Regexp. If given a Regexp, options are copied
-  # from the pattern and any options given are not honoured. If the pattern is
-  # a String, additional options may be given.
-  #
-  # The first optional argument can either be a Fixnum representing one or
-  # more of the Regexp options ORed together (Regexp::IGNORECASE, EXTENDED and
-  # MULTILINE) or a flag to toggle case sensitivity. If opts is nil or false,
-  # the match is case sensitive. If opts is any non-nil, non-false and
-  # non-Fixnum object, its presence makes the regexp case insensitive (the obj
-  # is not used in any way.)
-  #
-  # The second optional argument can be used to enable multibyte support
-  # (which is disabled by default.) The flag must be one of the following
-  # strings in any combination of upper- and lowercase:
-  #
-  # * 'e', 'euc'  for EUC
-  # * 's', 'sjis' for SJIS
-  # * 'u', 'utf8' for UTF-8
-  #
-  # You may also explicitly pass in 'n', 'N' or 'none' to disable multibyte
-  # support. Any other values are ignored.
-
-  def initialize(pattern, opts=nil, lang=nil)
-    if pattern.kind_of?(Regexp)
-      opts = pattern.options
-      pattern  = pattern.source
-    elsif opts.kind_of?(Fixnum)
-      opts = opts & (OPTION_MASK | KCODE_MASK) if opts > 0
-    elsif opts
-      opts = IGNORECASE
-    else
-      opts = 0
-    end
-
-    if opts and lang and lang.kind_of?(String)
-      opts &= OPTION_MASK
-      idx   = ValidKcode.index(lang.downcase[0])
-      opts |= KcodeValue[idx] if idx
-    end
-
-    compile pattern, opts
-  end
-
-  def self.escape(str)
-    StringValue(str).transform(ESCAPE_TABLE, true)
-  end
-
   class << self
     alias_method :compile, :new
-    alias_method :quote, :escape
-  end
-
-  def initialize_copy(other)
-    initialize other.source, other.options, other.kcode
-  end
-
-  def self.union(*patterns)
-    case patterns.size
-    when 0
-      return %r/(?!)/
-    when 1
-      pat = patterns.first
-      case pat
-      when Array
-        return union(*pat)
-      when Regexp
-        return pat
-      else
-        return Regexp.new(Regexp.quote(StringValue(pat)))
-      end
-    end
-
-    kcode = nil
-    str = ""
-    patterns.each_with_index do |pat, idx|
-      str << "|" if idx != 0
-
-      if pat.kind_of? Regexp
-        if pat_kcode = pat.kcode
-          if kcode
-            if kcode != pat_kcode
-              raise ArgumentError, "Conflict kcodes: #{kcode} != #{pat_kcode}"
-            end
-          else
-            kcode = pat_kcode
-          end
-        end
-
-        str << pat.to_s
-      else
-        str << Regexp.quote(StringValue(pat))
-      end
-    end
-
-    Regexp.new(str, nil, kcode)
   end
 
   def source
@@ -165,23 +67,6 @@ class Regexp
     return res ? res.begin(0) : nil
   end
 
-  # Returns the index of the first character in the region that
-  # matched or nil if there was no match. See #match for returning
-  # the MatchData instead.
-  def =~(str)
-    # unless str.nil? because it's nil and only nil, not false.
-    str = StringValue(str) unless str.nil?
-
-    match = match_from(str, 0)
-    if match
-      Regexp.last_match = match
-      return match.begin(0)
-    else
-      Regexp.last_match = nil
-      return nil
-    end
-  end
-
   def match_all(str)
     start = 0
     arr = []
@@ -190,7 +75,7 @@ class Regexp
       if match.collapsing?
         start += 1
       else
-        start = match.end(0)
+        start = match.full.at(1)
       end
     end
     arr
@@ -200,70 +85,9 @@ class Regexp
     (options & IGNORECASE) > 0 ? true : false
   end
 
-  def eql?(other)
-    return false unless other.kind_of?(Regexp)
-    return false unless source == other.source
-
-    # Ruby 1.8 doesn't destinguish between KCODE_NONE (16) & not specified (0) for eql?
-    o1 = options
-    if o1 & KCODE_MASK == 0
-      o1 += KCODE_NONE
-    end
-
-    o2 = other.options
-    if o2 & KCODE_MASK == 0
-      o2 += KCODE_NONE
-    end
-
-    o1 == o2
-  end
-
-  alias_method :==, :eql?
-
-  def hash
-    str = '/' << source << '/' << option_to_string(options)
-    if options & KCODE_MASK == 0
-      str << 'n'
-    else
-      str << kcode[0,1]
-    end
-    str.hash
-  end
-
-  def inspect
-    # the regexp matches any / that is after anything except for a \
-    escape = source.gsub(%r!(\\.)|/!) { $1 || '\/' }
-
-    str = "/#{escape}/#{option_to_string(options)}"
-    k = kcode()
-    str << k[0,1] if k and k != "none"
-    return str
-  end
-
-  def kcode
-    lang = options & KCODE_MASK
-    return "none" if lang == KCODE_NONE
-    return "euc"  if lang == KCODE_EUC
-    return 'sjis' if lang == KCODE_SJIS
-    return 'utf8' if lang == KCODE_UTF8
-    return nil
-  end
-
-  # Performs normal match and returns MatchData object from $~ or nil.
-  def match(str)
-    unless str
-      Regexp.last_match = nil
-      return nil
-    end
-
-    str = StringValue(str)
-
-    Regexp.last_match = search_region(str, 0, str.size, true)
-  end
-
   def match_from(str, count)
     return nil unless str
-    search_region(str, count, str.size, true)
+    search_region(str, count, str.bytesize, true)
   end
 
   class SourceParser
@@ -369,11 +193,11 @@ class Regexp
     # TODO: audit specs for this method when specs are running
     def create_parts
       return unless @index < @source.size
-      char =  @source.getbyte(@index).chr
+      char =  @source[@index].chr
       case char
       when '('
         idx = @index + 1
-        if idx < @source.size and @source.getbyte(idx).chr == '?'
+        if idx < @source.size and @source[idx].chr == '?'
           process_group
         else
           push_current_character!
@@ -427,7 +251,7 @@ class Regexp
 
     def process_group_options
       @parts.last.has_options!
-      case @source.getbyte(@index).chr
+      case @source[@index].chr
       when ')'
         return
       when ':'
@@ -440,7 +264,7 @@ class Regexp
     end
 
     def process_until_group_finished
-      if @source.getbyte(@index).chr == ")"
+      if @source[@index].chr == ")"
         @index += 1
         return
       else
@@ -450,12 +274,12 @@ class Regexp
     end
 
     def push_current_character!
-      @parts.last << @source.getbyte(@index).chr
+      @parts.last << @source[@index].chr
       @index += 1
     end
 
     def push_option!
-      @parts.last.push_option!(@source.getbyte(@index).chr)
+      @parts.last.push_option!(@source[@index].chr)
       @index += 1
     end
 
@@ -529,8 +353,8 @@ class Regexp
     hash = {}
 
     if @names
-      @names.each do |k,v|
-        hash[k.to_s] = [v + 1] # we only have one location currently for a key
+      @names.sort_by { |a,b| b.first }.each do |k, v| # LookupTable is unordered
+        hash[k.to_s] = v
       end
     end
 
@@ -554,16 +378,12 @@ class Regexp
   #
   def names
     if @names
-      ary = Array.new(@names.size)
-      @names.each do |k,v|
-        ary[v] = k.to_s
-      end
-
-      return ary
+      @names.sort_by { |a,b| b.first }.map { |x| x.first.to_s } # LookupTable is unordered
     else
       []
     end
   end
+
 end
 
 class MatchData
@@ -578,23 +398,6 @@ class MatchData
 
   def full
     @full
-  end
-
-  def begin(idx)
-    return @full.at(0) if idx == 0
-    return @region.at(idx - 1).at(0)
-  end
-
-  def end(idx)
-    return @full.at(1) if idx == 0
-    @region.at(idx - 1).at(1)
-  end
-
-  def offset(idx)
-    out = []
-    out << self.begin(idx)
-    out << self.end(idx)
-    return out
   end
 
   def length
@@ -612,7 +415,7 @@ class MatchData
         val = nil
       else
         y = tup.at(1)
-        val = @source.substring(x, y-x)
+        val = @source.byteslice(x, y-x)
       end
 
       out[idx] = val
@@ -621,21 +424,21 @@ class MatchData
 
     return out
   end
-  
+
   def names
     @regexp.names
   end
 
   def pre_match
-    return @source.substring(0, 0) if @full.at(0) == 0
+    return @source.byteslice(0, 0) if @full.at(0) == 0
     nd = @full.at(0) - 1
-    @source.substring(0, nd+1)
+    @source.byteslice(0, nd+1)
   end
 
   def pre_match_from(idx)
-    return @source.substring(0, 0) if @full.at(0) == 0
+    return @source.byteslice(0, 0) if @full.at(0) == 0
     nd = @full.at(0) - 1
-    @source.substring(idx, nd-idx+1)
+    @source.byteslice(idx, nd-idx+1)
   end
 
   def collapsing?
@@ -643,39 +446,9 @@ class MatchData
   end
 
   def post_match
-    nd = @source.size - 1
+    nd = @source.bytesize - 1
     st = @full.at(1)
-    @source.substring(st, nd-st+1)
-  end
-
-  def [](idx, len = nil)
-    return to_a[idx, len] if len
-
-    case idx
-    when Fixnum
-      if idx <= 0
-        return matched_area() if idx == 0
-        return to_a[idx]
-      elsif idx <= @region.size
-        tup = @region[idx - 1]
-
-        x = tup.at(0)
-        return nil if x == -1
-
-        y = tup.at(1)
-        return @source.substring(x, y-x)
-      end
-    when Symbol
-      num = @regexp.name_table[idx]
-      raise ArgumentError, "Unknown named group '#{idx}'" unless num
-      return self[num + 1]
-    when String
-      num = @regexp.name_table[idx.to_sym]
-      raise ArgumentError, "Unknown named group '#{idx}'" unless num
-      return self[num + 1]
-    end
-
-    return to_a[idx]
+    @source.byteslice(st, nd-st+1)
   end
 
   def inspect
@@ -684,7 +457,7 @@ class MatchData
       "#<MatchData \"#{matched_area}\">"
     else
       idx = 0
-      capts.map! {|capture| "#{idx += 1}:#{capture.inspect}"}
+      capts.map! { |capture| "#{idx += 1}:#{capture.inspect}" }
       "#<MatchData \"#{matched_area}\" #{capts.join(" ")}>"
     end
   end
@@ -715,13 +488,13 @@ class MatchData
   end
 
   def values_at(*indexes)
-    indexes.map { |i| self[i] }
+    indexes.map { |i| self[i] }.flatten(1)
   end
 
   def matched_area
     x = @full.at(0)
     y = @full.at(1)
-    @source.substring(x, y-x)
+    @source.byteslice(x, y-x)
   end
 
   alias_method :to_s, :matched_area
@@ -731,7 +504,7 @@ class MatchData
     x, y = @region[num]
     return nil if !y or x == -1
 
-    return @source.substring(x, y-x)
+    return @source.byteslice(x, y-x)
   end
 
   private :get_capture
@@ -739,7 +512,7 @@ class MatchData
   def each_capture
     @region.each do |tup|
       x, y = *tup
-      yield @source.substring(x, y-x)
+      yield @source.byteslice(x, y-x)
     end
   end
 

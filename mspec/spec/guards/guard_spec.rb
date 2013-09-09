@@ -1,6 +1,5 @@
-require File.dirname(__FILE__) + '/../spec_helper'
-require 'mspec/utils/ruby_name'
-require 'mspec/guards/guard'
+require 'spec_helper'
+require 'mspec/guards'
 require 'rbconfig'
 
 describe SpecGuard, "#ruby_version_override=" do
@@ -19,7 +18,7 @@ describe SpecGuard, "#ruby_version_override=" do
 end
 
 describe SpecGuard, ".ruby_version" do
-  before :all do
+  before :each do
     @ruby_version = Object.const_get :RUBY_VERSION
     @ruby_patchlevel = Object.const_get :RUBY_PATCHLEVEL
 
@@ -27,7 +26,7 @@ describe SpecGuard, ".ruby_version" do
     Object.const_set :RUBY_PATCHLEVEL, 71
   end
 
-  after :all do
+  after :each do
     Object.const_set :RUBY_VERSION, @ruby_version
     Object.const_set :RUBY_PATCHLEVEL, @ruby_patchlevel
   end
@@ -210,6 +209,11 @@ describe SpecGuard, "#implementation?" do
   it "returns true if passed :maglev and RUBY_NAME == 'maglev'" do
     Object.const_set :RUBY_NAME, 'maglev'
     @guard.implementation?(:maglev).should == true
+  end
+
+  it "returns true if passed :topaz and RUBY_NAME == 'topaz'" do
+    Object.const_set :RUBY_NAME, 'topaz'
+    @guard.implementation?(:topaz).should == true
   end
 
   it "returns true if passed :ruby and RUBY_NAME matches /^ruby/" do

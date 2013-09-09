@@ -4,8 +4,6 @@
 #include "builtin/object.hpp"
 #include "builtin/tuple.hpp"
 #include "builtin/integer.hpp"
-
-#include "type_info.hpp"
 #include "object_utils.hpp"
 
 namespace rubinius {
@@ -65,12 +63,12 @@ namespace rubinius {
     // Rubinius.primitive :lookuptable_store
     Object* store(STATE, Object* key, Object* val);
 
-    // Rubinius.primitive :lookuptable_aref
+    // Rubinius.primitive+ :lookuptable_aref
     Object* aref(STATE, Object* key);
     /** Compatibility, this is the same as aref(). */
     Object* fetch(STATE, Object* key);
 
-    // Rubinius.primitive :lookuptable_fetch
+    // Rubinius.primitive+ :lookuptable_fetch
     Object* fetch(STATE, Object* key, Object* return_on_failure);
 
     Object* fetch(STATE, Object* key, bool* found);
@@ -90,7 +88,7 @@ namespace rubinius {
       return remove(state, key, 0);
     }
 
-    // Rubinius.primitive :lookuptable_has_key
+    // Rubinius.primitive+ :lookuptable_has_key
     Object* has_key(STATE, Object* key);
 
     static Array* collect(STATE, LookupTable* tbl,

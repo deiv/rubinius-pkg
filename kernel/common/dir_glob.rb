@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 class Dir
   module Glob
     class Node
@@ -53,25 +55,6 @@ class Dir
       end
     end
 
-    class ConstantSuffixEntry < Node
-      def initialize(nxt, flags, name, suffixes)
-        super nxt, flags
-        @name = name
-        @suffixes = suffixes
-      end
-
-      def call(env, parent)
-        stem = path_join(parent, @name)
-
-        @suffixes.each do |s|
-          path = "#{stem}#{s}"
-          if File.exists?(path)
-            env.matches << path
-          end
-        end
-      end
-    end
-
     class RootDirectory < Node
       def call(env, path)
         @next.call env, "/"
@@ -83,7 +66,7 @@ class Dir
         return unless File.exists? start
 
         # Even though the recursive entry is zero width
-        # in this case, it's left seperator is still the
+        # in this case, its left separator is still the
         # dominant one, so we fix things up to use it.
         switched = @next.dup
         switched.separator = @separator
@@ -95,12 +78,18 @@ class Dir
 
         until stack.empty?
           path = stack.pop
-          dir = Dir.new(path)
+          begin
+            dir = Dir.new(path)
+          rescue Errno::ENOTDIR
+            next
+          end
+
           while ent = dir.read
             next if ent == "." || ent == ".."
             full = path_join(path, ent)
+            stat = File::Stat.lstat full
 
-            if File.directory? full and (allow_dots or ent.getbyte(0) != 46) # ?.
+            if stat.directory? and (allow_dots or ent.getbyte(0) != 46) # ?.
               stack << full
               @next.call env, full
             end
@@ -115,7 +104,7 @@ class Dir
         raise "invalid usage" if start
 
         # Even though the recursive entry is zero width
-        # in this case, it's left seperator is still the
+        # in this case, its left separator is still the
         # dominant one, so we fix things up to use it.
         if @separator
           switched = @next.dup
@@ -132,8 +121,9 @@ class Dir
         dir = Dir.new(".")
         while ent = dir.read
           next if ent == "." || ent == ".."
+          stat = File::Stat.lstat ent
 
-          if File.directory? ent and (allow_dots or ent.getbyte(0) != 46) # ?.
+          if stat.directory? and (allow_dots or ent.getbyte(0) != 46) # ?.
             stack << ent
             @next.call env, ent
           end
@@ -146,8 +136,9 @@ class Dir
           while ent = dir.read
             next if ent == "." || ent == ".."
             full = path_join(path, ent)
+            stat = File::Stat.lstat full
 
-            if File.directory? full and ent.getbyte(0) != 46  # ?.
+            if stat.directory? and ent.getbyte(0) != 46  # ?.
               stack << full
               @next.call env, full
             end
@@ -160,7 +151,7 @@ class Dir
     class Match < Node
       def initialize(nxt, flags, glob)
         super nxt, flags
-        @glob = glob
+        @glob = glob || ""
       end
 
       def match?(str)
@@ -211,33 +202,6 @@ class Dir
       end
     end
 
-    class SuffixEntryMatch < Match
-      def initialize(nxt, flags, glob, suffixes)
-        super nxt, flags, glob
-        @suffixes = suffixes
-      end
-
-      def call(env, path)
-        return if path and !File.exists?("#{path}/.")
-
-        begin
-          dir = Dir.new(path ? path : ".")
-        rescue SystemCallError
-          return
-        end
-
-        while f = dir.read
-          @suffixes.each do |s|
-            ent = "#{f}#{s}"
-            if match? ent
-              env.matches << path_join(path, ent)
-            end
-          end
-        end
-        dir.close
-      end
-    end
-
     class DirectoriesOnly < Node
       def call(env, path)
         if path and File.exists?("#{path}/.")
@@ -262,8 +226,8 @@ class Dir
 
       while match = %r!/+!.match_from(str, start)
         cur_start, cur_end = match.full
-        ret << str.substring(start, cur_start - start)
-        ret << str.substring(cur_start, cur_end - cur_start)
+        ret << str.byteslice(start, cur_start - start)
+        ret << str.byteslice(cur_start, cur_end - cur_start)
 
         start = cur_end
 
@@ -286,7 +250,7 @@ class Dir
       ret
     end
 
-    def self.single_compile(glob, flags=0, suffixes=nil)
+    def self.single_compile(glob, flags=0)
       parts = path_split(glob)
 
       if glob.getbyte(-1) == 47 # ?/
@@ -294,17 +258,9 @@ class Dir
       else
         file = parts.pop
         if /^[a-zA-Z0-9._]+$/.match(file)
-          if suffixes
-            last = ConstantSuffixEntry.new nil, flags, file, suffixes
-          else
-            last = ConstantEntry.new nil, flags, file
-          end
+          last = ConstantEntry.new nil, flags, file
         else
-          if suffixes
-            last = SuffixEntryMatch.new nil, flags, file, suffixes
-          else
-            last = EntryMatch.new nil, flags, file
-          end
+          last = EntryMatch.new nil, flags, file
         end
       end
 
@@ -467,17 +423,6 @@ class Dir
           i += 1
         end
       end
-
-      # Detect if it's a simple suffix brace
-      # if !escapes and lbrace and rbrace == pattern.size - 1
-        # parts = pattern.substring(lbrace+1, rbrace - lbrace - 1).split(",")
-        # front = pattern.substring(0, lbrace)
-
-        # if node = single_compile(front, flags, parts)
-          # patterns << node
-          # return patterns
-        # end
-      # end
 
       # There was a full {} expression detected, expand each part of it
       # recursively.

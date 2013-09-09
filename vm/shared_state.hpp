@@ -4,13 +4,13 @@
 #include "config.h"
 
 #include "util/refcount.hpp"
-#include "call_frame_list.hpp"
 #include "gc/variable_buffer.hpp"
 #include "gc/root_buffer.hpp"
 #include "kcode.hpp"
 
 #include "stats.hpp"
 
+#include "auxiliary_threads.hpp"
 #include "globals.hpp"
 #include "symboltable.hpp"
 
@@ -18,13 +18,24 @@
 
 #include "lock.hpp"
 
+#include "util/thread.hpp"
+
+#include "capi/capi_constants.h"
+
+#include <vector>
+
+#include "missing/unordered_map.hpp"
+#include "missing/unordered_set.hpp"
+
 #ifdef RBX_WINDOWS
 #include <winsock2.h>
 #endif
 
 namespace rubinius {
   namespace capi {
+    class Handle;
     class Handles;
+    class GlobalHandle;
   }
 
   namespace tooling {
@@ -32,39 +43,25 @@ namespace rubinius {
   }
 
   class SignalHandler;
+  class FinalizerHandler;
   class ObjectMemory;
   class GlobalCache;
   class ConfigParser;
+  class State;
   class VM;
   class Configuration;
   class LLVMState;
   class WorldState;
-  class InlineCacheRegistry;
   class ManagedThread;
   class QueryAgent;
   class Environment;
 
-  struct Interrupts {
-    bool check;
-    bool perform_gc;
-    bool enable_preempt;
+  typedef std_unordered_set<std::string> CApiBlackList;
+  typedef std::vector<Mutex*> CApiLocks;
+  typedef std_unordered_map<std::string, int> CApiLockMap;
 
-    Interrupts()
-      : check(false)
-      , perform_gc(false)
-      , enable_preempt(false)
-    {}
-
-    void checked() {
-      check = false;
-    }
-
-    void set_perform_gc() {
-      perform_gc = true;
-      check = true;
-    }
-  };
-
+  typedef std::vector<std::string> CApiConstantNameMap;
+  typedef std_unordered_map<int, capi::Handle*> CApiConstantHandleMap;
 
   /**
    * SharedState represents the global shared state that needs to be shared
@@ -78,39 +75,51 @@ namespace rubinius {
 
   class SharedState : public RefCount, public Lockable {
   private:
-    bool initialized_;
+    AuxiliaryThreads* auxiliary_threads_;
     SignalHandler* signal_handler_;
+    FinalizerHandler* finalizer_handler_;
+    QueryAgent* query_agent_;
 
-    capi::Handles* global_handles_;
-    capi::Handles* cached_handles_;
-    std::list<capi::Handle**> global_handle_locations_;
+    CApiConstantNameMap capi_constant_name_map_;
+    CApiConstantHandleMap capi_constant_handle_map_;
 
-    int global_serial_;
     WorldState* world_;
-    InlineCacheRegistry* ic_registry_;
-    unsigned int class_count_;
-    uint64_t method_count_;
     std::list<ManagedThread*> threads_;
+
+    uint64_t method_count_;
+    unsigned int class_count_;
+    int global_serial_;
     int thread_ids_;
+
+    bool initialized_;
+    bool ruby_critical_set_;
+    bool check_global_interrupts_;
+    bool check_gc_;
 
     kcode::CodePage kcode_page_;
     kcode::table* kcode_table_;
 
-    int primitive_hits_[Primitives::cTotalPrimitives];
     QueryAgent* agent_;
     VM* root_vm_;
     Environment* env_;
     tooling::ToolBroker* tool_broker_;
 
-    thread::Mutex onig_lock_;
-
     // This lock is to implement Thread.critical. It is not critical as
     // the name would make it sound.
-    thread::Mutex ruby_critical_lock_;
+    utilities::thread::Mutex ruby_critical_lock_;
     pthread_t ruby_critical_thread_;
-    bool ruby_critical_set_;
 
-    Mutex capi_lock_;
+    utilities::thread::SpinLock capi_ds_lock_;
+    utilities::thread::SpinLock capi_locks_lock_;
+    utilities::thread::SpinLock capi_constant_lock_;
+    utilities::thread::SpinLock llvm_state_lock_;
+
+    CApiBlackList capi_black_list_;
+    CApiLocks capi_locks_;
+    CApiLockMap capi_lock_map_;
+
+    bool use_capi_lock_;
+    int primitive_hits_[Primitives::cTotalPrimitives];
 
   public:
     Globals globals;
@@ -118,10 +127,10 @@ namespace rubinius {
     GlobalCache* global_cache;
     Configuration& config;
     ConfigParser& user_variables;
-    Interrupts interrupts;
     SymbolTable symbols;
     LLVMState* llvm_state;
     Stats stats;
+    uint32_t hash_seed;
 
   public:
     SharedState(Environment* env, Configuration& config, ConfigParser& cp);
@@ -132,10 +141,15 @@ namespace rubinius {
     int size();
 
     void set_initialized() {
+      setup_capi_constant_names();
       initialized_ = true;
     }
 
-    SignalHandler* signal_handler() {
+    AuxiliaryThreads* auxiliary_threads() const {
+      return auxiliary_threads_;
+    }
+
+    SignalHandler* signal_handler() const {
       return signal_handler_;
     }
 
@@ -143,7 +157,22 @@ namespace rubinius {
       signal_handler_ = thr;
     }
 
-    static SharedState* standalone(VM*);
+    FinalizerHandler* finalizer_handler() const {
+      return finalizer_handler_;
+    }
+
+    void set_finalizer_handler(FinalizerHandler* thr) {
+      finalizer_handler_ = thr;
+    }
+
+    QueryAgent* query_agent() const {
+      return query_agent_;
+    }
+
+    void set_query_agent(QueryAgent* thr) {
+      query_agent_ = thr;
+    }
+
     VM* new_vm();
     void remove_vm(VM*);
 
@@ -151,59 +180,31 @@ namespace rubinius {
       return &threads_;
     }
 
+    Array* vm_threads(STATE);
+
     void add_managed_thread(ManagedThread* thr);
     void remove_managed_thread(ManagedThread* thr);
 
-    capi::Handles* global_handles() {
-      return global_handles_;
-    }
-
-    void add_global_handle(VM*, capi::Handle* handle);
-    void make_handle_cached(VM*, capi::Handle* handle);
-
-    capi::Handles* cached_handles() {
-      return cached_handles_;
-    }
-
-    std::list<capi::Handle**>* global_handle_locations() {
-      return &global_handle_locations_;
-    }
-
-    void add_global_handle_location(capi::Handle** loc) {
-      global_handle_locations_.push_back(loc);
-    }
-
-    void del_global_handle_location(capi::Handle** loc) {
-      global_handle_locations_.remove(loc);
-    }
-
-    int global_serial() {
+    int global_serial() const {
       return global_serial_;
     }
 
-    int inc_global_serial(THREAD) {
-      SYNC(state);
-      return ++global_serial_;
+    int inc_global_serial(STATE) {
+      return atomic::fetch_and_add(&global_serial_, (int)1);
     }
 
-    uint32_t new_thread_id(THREAD);
+    uint32_t new_thread_id();
 
     int* global_serial_address() {
       return &global_serial_;
     }
 
-    InlineCacheRegistry* ic_registry() {
-      return ic_registry_;
+    uint32_t inc_class_count(STATE) {
+      return atomic::fetch_and_add(&class_count_, (uint32_t)1);
     }
 
-    unsigned int inc_class_count(THREAD) {
-      SYNC(state);
-      return ++class_count_;
-    }
-
-    uint64_t inc_method_count(THREAD) {
-      SYNC(state);
-      return ++method_count_;
+    uint64_t inc_method_count(STATE) {
+      return atomic::fetch_and_add(&method_count_, (uint64_t)1);
     }
 
     int inc_primitive_hit(int primitive) {
@@ -214,11 +215,11 @@ namespace rubinius {
       return primitive_hits_[primitive];
     }
 
-    kcode::table* kcode_table() {
+    kcode::table* kcode_table() const {
       return kcode_table_;
     }
 
-    kcode::CodePage kcode_page() {
+    kcode::CodePage kcode_page() const {
       return kcode_page_;
     }
 
@@ -227,53 +228,112 @@ namespace rubinius {
       kcode_page_ = page;
     }
 
-    QueryAgent* agent() {
+    QueryAgent* agent() const {
       return agent_;
     }
 
-    void set_agent(QueryAgent* agent) {
-      agent_ = agent;
-    }
+    QueryAgent* start_agent(STATE);
 
-    QueryAgent* autostart_agent(STATE);
-
-    Environment* env() {
+    Environment* env() const {
       return env_;
     }
 
-    thread::Mutex& onig_lock() {
-      return onig_lock_;
-    }
-
-    VM* root_vm() {
+    VM* root_vm() const {
       return root_vm_;
     }
 
-    tooling::ToolBroker* tool_broker() {
+    tooling::ToolBroker* tool_broker() const {
       return tool_broker_;
     }
 
-    void scheduler_loop();
-    void enable_preemption();
+    ObjectMemory* memory() const {
+      return om;
+    }
 
-    void pre_exec();
+    bool check_gc_p() {
+      bool c = check_gc_;
+      if(unlikely(c)) {
+        check_gc_ = false;
+      }
+      return c;
+    }
+
+    void gc_soon() {
+      check_global_interrupts_ = true;
+      check_gc_ = true;
+    }
+
+    bool check_global_interrupts() const {
+      return check_global_interrupts_;
+    }
+
+    void set_check_global_interrupts() {
+      check_global_interrupts_ = true;
+    }
+
+    void clear_check_global_interrupts() {
+      check_global_interrupts_ = false;
+    }
+
+    bool* check_global_interrupts_address() {
+      return &check_global_interrupts_;
+    }
+
+    const unsigned int* object_memory_mark_address() const;
+
+    void set_use_capi_lock(bool s) {
+      use_capi_lock_ = s;
+    }
+
+    utilities::thread::SpinLock& capi_ds_lock() {
+      return capi_ds_lock_;
+    }
+
+    utilities::thread::SpinLock& capi_constant_lock() {
+      return capi_constant_lock_;
+    }
+
+    int capi_lock_index(std::string name);
+
+    utilities::thread::SpinLock& llvm_state_lock() {
+      return llvm_state_lock_;
+    }
+
+    void scheduler_loop();
+
     void reinit(STATE);
 
-    void ask_for_stopage();
-    bool should_stop();
+    bool should_stop() const;
 
-    void stop_the_world(THREAD);
+    bool stop_the_world(THREAD) WARN_UNUSED;
     void restart_world(THREAD);
 
+    void stop_threads_externally();
+    void restart_threads_externally();
+
     bool checkpoint(THREAD);
-    void gc_dependent(THREAD);
+    void gc_dependent(STATE, CallFrame* call_frame);
+    void gc_independent(STATE, CallFrame* call_frame);
+
+    void gc_dependent(THREAD, utilities::thread::Condition* = NULL);
     void gc_independent(THREAD);
 
-    void set_critical(STATE);
+    void set_critical(STATE, CallFrame* call_frame);
     void clear_critical(STATE);
 
-    void enter_capi(STATE);
+    void enter_capi(STATE, const char* file, int line);
     void leave_capi(STATE);
+
+    void setup_capi_constant_names();
+    CApiConstantNameMap& capi_constant_name_map() {
+      return capi_constant_name_map_;
+    }
+
+    CApiConstantHandleMap& capi_constant_handle_map() {
+      return capi_constant_handle_map_;
+    }
+
+    void initialize_capi_black_list();
   };
 }
 

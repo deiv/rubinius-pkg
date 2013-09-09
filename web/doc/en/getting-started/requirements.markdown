@@ -37,13 +37,23 @@ reporting at: /Developer/Applications/Utilities/CrashReporterPrefs.app
 
 ### Debian/Ubuntu
 
-  * ruby-dev or ruby1.8-dev
-  * libreadline5-dev
-  * zlib1g-dev
-  * libssl-dev
+Just run this to install required packages:
+
+    $ sudo apt-get install -y build-essential bison ruby-dev rake zlib1g-dev \
+        libyaml-dev libssl-dev libreadline-dev libncurses5-dev
+
+This is tested using fresh-installed Ubuntu 12.10. There may be minor differences with older
+Ubuntu, Debian or other Debian-based distributions.
+
+### Fedora/CentOS
+
+  * ruby-devel
+  * readline-devel
+  * zlib-devel
+  * openssl-devel
 
 ### FreeBSD
 
 Rubinius has a port in FreeBSD ports tree. It's called `lang/rubinius`. You
-can find information about this port on <http://freshports.org>. Once being
+can find information about this port on [FreshPorts](http://www.freshports.org/lang/rubinius/). Once being
 installed the port installs all the dependencies automagically.

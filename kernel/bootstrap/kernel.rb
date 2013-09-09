@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Kernel
   def equal?(other)
     Rubinius.primitive :object_equal
@@ -40,22 +42,13 @@ module Kernel
     "#<#{self.class.name}"
   end
 
-  def __id__
-    Rubinius.primitive :object_id
-    raise PrimitiveFailure, "Kernel#object_id primitive failed"
-  end
-
-  def respond_to?(meth, include_private=false)
-    Rubinius.primitive :object_respond_to_public
-    respond_to_all?(meth.to_sym, include_private);
-  end
-
-  def respond_to_all?(meth, include)
+  def respond_to_prim?(meth, visibility)
     Rubinius.primitive :object_respond_to
-    raise PrimitiveFailure, "Kernel#prim_respond_to? failed"
+    meth = Rubinius::Type.coerce_to_symbol meth
+    respond_to_prim?(meth, visibility)
   end
 
-  private :respond_to_all?
+  private :respond_to_prim?
 
   def taint
     Rubinius.primitive :object_taint

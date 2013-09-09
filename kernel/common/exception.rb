@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 class Exception
 
   attr_accessor :locations
@@ -12,11 +14,11 @@ class Exception
 
   # This is here rather than in yaml.rb because it contains "private"
   # information, ie, the list of ivars. Putting it over in the yaml
-  # sounce means it's easy to forget about.
+  # source means it's easy to forget about.
   def to_yaml_properties
     list = super
-    list.delete "@backtrace"
-    list.delete "@custom_backtrace"
+    list.delete Rubinius::Type.convert_to_name(:@backtrace)
+    list.delete Rubinius::Type.convert_to_name(:@custom_backtrace)
     return list
   end
 
@@ -48,8 +50,14 @@ class Exception
   end
 
   def render(header="An exception occurred", io=STDERR, color=true)
+    message_lines = message.to_s.split("\n")
+
     io.puts header
-    io.puts "    #{message} (#{self.class})"
+    io.puts "    #{message_lines.shift} (#{self.class})"
+
+    message_lines.each do |line|
+      io.puts "    #{line}"
+    end
 
     if @custom_backtrace
       io.puts "\nUser defined backtrace:"
@@ -101,20 +109,19 @@ class Exception
     end
   end
 
-  def to_s
-    @reason_message || self.class.to_s
-  end
-
   # This is important, because I subclass can just override #to_s and calling
   # #message will call it. Using an alias doesn't achieve that.
   def message
     to_s
   end
 
-  alias_method :to_str, :message
-
   def inspect
-    "#<#{self.class.name}: #{self.to_s}>"
+    s = self.to_s
+    if s.empty?
+      self.class.name
+    else
+      "#<#{self.class.name}: #{s}>"
+    end
   end
 
   class << self
@@ -161,12 +168,15 @@ class ZeroDivisionError < StandardError
 end
 
 class ArgumentError < StandardError
-  def message
-    return @reason_message if @reason_message
-    if @method_name
-      "method '#{@method_name}': given #{@given}, expected #{@expected}"
+  def to_s
+    if @given and @expected
+      if @method_name
+        "method '#{@method_name}': given #{@given}, expected #{@expected}"
+      else
+        "given #{@given}, expected #{@expected}"
+      end
     else
-      "given #{@given}, expected #{@expected}"
+      super
     end
   end
 end
@@ -212,9 +222,6 @@ end
 class SecurityError < StandardError
 end
 
-class SystemStackError < StandardError
-end
-
 class ThreadError < StandardError
 end
 
@@ -242,6 +249,10 @@ class NotImplementedError < ScriptError
 end
 
 class Interrupt < SignalException
+  def initialize(*args)
+    super(args.shift)
+    @name = args.shift
+  end
 end
 
 class IOError < StandardError
@@ -253,7 +264,8 @@ end
 class LocalJumpError < StandardError
 end
 
-class NotImplementedError < ScriptError
+# For libraries that Rubinius does not support
+class UnsupportedLibraryError < StandardError
 end
 
 class SyntaxError < ScriptError
@@ -264,25 +276,15 @@ class SyntaxError < ScriptError
 
   def self.from(message, column, line, code, file)
     exc = new message
-    exc.import_position column, line, code
     exc.file = file
+    exc.line = line
+    exc.column = column
+    exc.code = code
     exc
-  end
-
-  def import_position(c,l, code)
-    @column = c
-    @line = l
-    @code = code
   end
 
   def reason
     @reason_message
-  end
-
-  def message
-    msg = super
-    msg = "#{file}:#{@line}: #{msg}" if file && @line
-    msg
   end
 end
 
@@ -343,11 +345,11 @@ class SystemCallError < StandardError
     # Otherwise it's called on a Errno subclass and just helps setup
     # a instance of the subclass
     if self.equal? SystemCallError
-      if message.equal? undefined
+      if undefined.equal? message
         raise ArgumentError, "must supply at least a message/errno"
       end
 
-      if errno.equal?(undefined)
+      if undefined.equal? errno
         if message.kind_of?(Fixnum)
           if inst = SystemCallError.errno_error(nil, message)
             return inst
@@ -370,11 +372,11 @@ class SystemCallError < StandardError
 
       return super(message, errno)
     else
-      unless errno.equal? undefined
+      unless undefined.equal? errno
         raise ArgumentError, "message is the only argument"
       end
 
-      if message and !(message.equal?(undefined))
+      if message and !undefined.equal?(message)
         message = StringValue(message)
       end
 
@@ -392,7 +394,9 @@ class SystemCallError < StandardError
     alias_method :exception, :new
   end
 
-  def initialize(message, errno)
+  # Use splat args here so that arity returns -1 to match MRI.
+  def initialize(*args)
+    message, errno = args
     @errno = errno
 
     msg = "unknown error"
@@ -422,15 +426,15 @@ end
 
 # Defined by the VM itself
 class Rubinius::InvalidBytecode < Rubinius::Internal
-  attr_reader :compiled_method
+  attr_reader :compiled_code
   attr_reader :ip
 
   def message
-    if @compiled_method
+    if @compiled_code
       if @ip and @ip >= 0
-        "#{super} - at #{@compiled_method.name}+#{@ip}"
+        "#{super} - at #{@compiled_code.name}+#{@ip}"
       else
-        "#{super} - method #{@compiled_method.name}"
+        "#{super} - method #{@compiled_code.name}"
       end
     else
       super

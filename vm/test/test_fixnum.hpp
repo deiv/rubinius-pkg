@@ -1,7 +1,9 @@
 #include "vm/test/test.hpp"
 
+#include "configuration.hpp"
 #include "builtin/exception.hpp"
 #include "builtin/list.hpp"
+#include "version.h"
 
 class TestFixnum : public CxxTest::TestSuite, public VMTest {
   public:
@@ -176,7 +178,7 @@ class TestFixnum : public CxxTest::TestSuite, public VMTest {
     TS_ASSERT_EQUALS(three->class_object(state), G(bignum));
     Bignum* expected = as<Bignum>(two->mul(state, Fixnum::from(2)));
 
-    TS_ASSERT_EQUALS(Qtrue, as<Bignum>(three)->equal(state, expected));
+    TS_ASSERT_EQUALS(cTrue, as<Bignum>(three)->equal(state, expected));
   }
 
   void test_mul_a_float() {
@@ -315,8 +317,13 @@ class TestFixnum : public CxxTest::TestSuite, public VMTest {
     TS_ASSERT_EQUALS(Fixnum::from(-1)->pow(state, Fixnum::from(1)), Fixnum::from(-1));
     TS_ASSERT_EQUALS(Fixnum::from(-1)->pow(state, Fixnum::from(2)), Fixnum::from(1));
     TS_ASSERT_EQUALS(Fixnum::from(7)->pow(state, Fixnum::from(5)), Fixnum::from(16807));
-    check_float(as<Float>(Fixnum::from(100)->pow(state, Fixnum::from(-1))),
-        Float::create(state,.01));
+  }
+
+  void test_pow_with_float() {
+    if(LANGUAGE_18_ENABLED) {
+      check_float(as<Float>(Fixnum::from(100)->pow(state, Fixnum::from(-1))),
+          Float::create(state,.01));
+    }
   }
 
   void test_pow_overflows_to_bignum() {
@@ -344,24 +351,24 @@ class TestFixnum : public CxxTest::TestSuite, public VMTest {
   }
 
   void test_equal() {
-    TS_ASSERT_EQUALS(Fixnum::from(3)->equal(state, Fixnum::from(3)), Qtrue);
-    TS_ASSERT_EQUALS(Fixnum::from(4)->equal(state, Fixnum::from(3)), Qfalse);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->equal(state, Fixnum::from(3)), cTrue);
+    TS_ASSERT_EQUALS(Fixnum::from(4)->equal(state, Fixnum::from(3)), cFalse);
   }
 
   void test_equal_with_a_bignum() {
     Bignum* obj1 = Bignum::from(state, (native_int)10);
     Bignum* obj2 = Bignum::from(state, (native_int)11);
 
-    TS_ASSERT_EQUALS(Fixnum::from(10)->equal(state, obj1), Qtrue);
-    TS_ASSERT_EQUALS(Fixnum::from(10)->equal(state, obj2), Qfalse);
+    TS_ASSERT_EQUALS(Fixnum::from(10)->equal(state, obj1), cTrue);
+    TS_ASSERT_EQUALS(Fixnum::from(10)->equal(state, obj2), cFalse);
   }
 
   void test_equal_with_a_float() {
     Float* obj1 = Float::create(state, 10.0);
     Float* obj2 = Float::create(state, 10.1);
 
-    TS_ASSERT_EQUALS(Fixnum::from(10)->equal(state, obj1), Qtrue);
-    TS_ASSERT_EQUALS(Fixnum::from(10)->equal(state, obj2), Qfalse);
+    TS_ASSERT_EQUALS(Fixnum::from(10)->equal(state, obj1), cTrue);
+    TS_ASSERT_EQUALS(Fixnum::from(10)->equal(state, obj2), cFalse);
   }
 
   void test_compare() {
@@ -383,69 +390,69 @@ class TestFixnum : public CxxTest::TestSuite, public VMTest {
   }
 
   void test_gt() {
-    TS_ASSERT_EQUALS(Fixnum::from(3)->gt(state, Fixnum::from(2)), Qtrue);
-    TS_ASSERT_EQUALS(Fixnum::from(3)->gt(state, Fixnum::from(3)), Qfalse);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->gt(state, Fixnum::from(2)), cTrue);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->gt(state, Fixnum::from(3)), cFalse);
   }
 
   void test_gt_with_a_bignum() {
-    TS_ASSERT_EQUALS(Fixnum::from(3)->gt(state, Bignum::from(state, (native_int)2)), Qtrue);
-    TS_ASSERT_EQUALS(Fixnum::from(3)->gt(state, Bignum::from(state, (native_int)3)), Qfalse);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->gt(state, Bignum::from(state, (native_int)2)), cTrue);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->gt(state, Bignum::from(state, (native_int)3)), cFalse);
   }
 
   void test_gt_with_a_float() {
-    TS_ASSERT_EQUALS(Fixnum::from(3)->gt(state, Float::create(state, 2.9)), Qtrue);
-    TS_ASSERT_EQUALS(Fixnum::from(3)->gt(state, Float::create(state, 3.0)), Qfalse);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->gt(state, Float::create(state, 2.9)), cTrue);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->gt(state, Float::create(state, 3.0)), cFalse);
   }
 
   void test_ge() {
-    TS_ASSERT_EQUALS(Fixnum::from(3)->ge(state, Fixnum::from(2)), Qtrue);
-    TS_ASSERT_EQUALS(Fixnum::from(3)->ge(state, Fixnum::from(3)), Qtrue);
-    TS_ASSERT_EQUALS(Fixnum::from(3)->ge(state, Fixnum::from(4)), Qfalse);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->ge(state, Fixnum::from(2)), cTrue);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->ge(state, Fixnum::from(3)), cTrue);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->ge(state, Fixnum::from(4)), cFalse);
   }
 
   void test_ge_with_a_bignum() {
-    TS_ASSERT_EQUALS(Fixnum::from(3)->ge(state, Bignum::from(state, (native_int)2)), Qtrue);
-    TS_ASSERT_EQUALS(Fixnum::from(3)->ge(state, Bignum::from(state, (native_int)3)), Qtrue);
-    TS_ASSERT_EQUALS(Fixnum::from(3)->ge(state, Bignum::from(state, (native_int)4)), Qfalse);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->ge(state, Bignum::from(state, (native_int)2)), cTrue);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->ge(state, Bignum::from(state, (native_int)3)), cTrue);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->ge(state, Bignum::from(state, (native_int)4)), cFalse);
   }
 
   void test_ge_with_a_float() {
-    TS_ASSERT_EQUALS(Fixnum::from(3)->ge(state, Float::create(state, 2.9)), Qtrue);
-    TS_ASSERT_EQUALS(Fixnum::from(3)->ge(state, Float::create(state, 3.0)), Qtrue);
-    TS_ASSERT_EQUALS(Fixnum::from(3)->ge(state, Float::create(state, 3.1)), Qfalse);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->ge(state, Float::create(state, 2.9)), cTrue);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->ge(state, Float::create(state, 3.0)), cTrue);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->ge(state, Float::create(state, 3.1)), cFalse);
   }
 
   void test_lt() {
-    TS_ASSERT_EQUALS(Fixnum::from(3)->lt(state, Fixnum::from(4)), Qtrue);
-    TS_ASSERT_EQUALS(Fixnum::from(3)->lt(state, Fixnum::from(3)), Qfalse);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->lt(state, Fixnum::from(4)), cTrue);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->lt(state, Fixnum::from(3)), cFalse);
   }
 
   void test_lt_with_a_bignum() {
-    TS_ASSERT_EQUALS(Fixnum::from(3)->lt(state, Bignum::from(state, (native_int)4)), Qtrue);
-    TS_ASSERT_EQUALS(Fixnum::from(3)->lt(state, Bignum::from(state, (native_int)3)), Qfalse);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->lt(state, Bignum::from(state, (native_int)4)), cTrue);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->lt(state, Bignum::from(state, (native_int)3)), cFalse);
   }
 
   void test_lt_with_a_float() {
-    TS_ASSERT_EQUALS(Fixnum::from(3)->lt(state, Float::create(state, 3.1)), Qtrue);
-    TS_ASSERT_EQUALS(Fixnum::from(3)->lt(state, Float::create(state, 3.0)), Qfalse);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->lt(state, Float::create(state, 3.1)), cTrue);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->lt(state, Float::create(state, 3.0)), cFalse);
   }
 
   void test_le() {
-    TS_ASSERT_EQUALS(Fixnum::from(3)->le(state, Fixnum::from(4)), Qtrue);
-    TS_ASSERT_EQUALS(Fixnum::from(3)->le(state, Fixnum::from(3)), Qtrue);
-    TS_ASSERT_EQUALS(Fixnum::from(3)->le(state, Fixnum::from(2)), Qfalse);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->le(state, Fixnum::from(4)), cTrue);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->le(state, Fixnum::from(3)), cTrue);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->le(state, Fixnum::from(2)), cFalse);
   }
 
   void test_le_with_a_bignum() {
-    TS_ASSERT_EQUALS(Fixnum::from(3)->le(state, Bignum::from(state, (native_int)4)), Qtrue);
-    TS_ASSERT_EQUALS(Fixnum::from(3)->le(state, Bignum::from(state, (native_int)3)), Qtrue);
-    TS_ASSERT_EQUALS(Fixnum::from(3)->le(state, Bignum::from(state, (native_int)2)), Qfalse);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->le(state, Bignum::from(state, (native_int)4)), cTrue);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->le(state, Bignum::from(state, (native_int)3)), cTrue);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->le(state, Bignum::from(state, (native_int)2)), cFalse);
   }
 
   void test_le_with_a_float() {
-    TS_ASSERT_EQUALS(Fixnum::from(3)->le(state, Float::create(state, 3.1)), Qtrue);
-    TS_ASSERT_EQUALS(Fixnum::from(3)->le(state, Float::create(state, 3.0)), Qtrue);
-    TS_ASSERT_EQUALS(Fixnum::from(3)->le(state, Float::create(state, 2.9)), Qfalse);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->le(state, Float::create(state, 3.1)), cTrue);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->le(state, Float::create(state, 3.0)), cTrue);
+    TS_ASSERT_EQUALS(Fixnum::from(3)->le(state, Float::create(state, 2.9)), cFalse);
   }
 
   void test_left_shift() {
@@ -521,7 +528,7 @@ class TestFixnum : public CxxTest::TestSuite, public VMTest {
   }
 
   void test_right_shift_moves_to_zero() {
-    Integer* i = Fixnum::from(5)->right_shift(state, 
+    Integer* i = Fixnum::from(5)->right_shift(state,
                    Fixnum::from(sizeof(native_int) * 8));
     TS_ASSERT_EQUALS(i, Fixnum::from(0));
   }
@@ -545,13 +552,6 @@ class TestFixnum : public CxxTest::TestSuite, public VMTest {
     TS_ASSERT_EQUALS(Fixnum::from(-5)->bit_and(state, Bignum::from(state, (native_int)-3)), Fixnum::from(-7));
   }
 
-  void test_and_with_float() {
-    TS_ASSERT_EQUALS(Fixnum::from(5)->bit_and(state, Float::create(state,  3.1)), Fixnum::from(1));
-    TS_ASSERT_EQUALS(Fixnum::from(5)->bit_and(state, Float::create(state,  2.9)), Fixnum::from(0));
-    TS_ASSERT_EQUALS(Fixnum::from(5)->bit_and(state, Float::create(state, -3.1)), Fixnum::from(5));
-    TS_ASSERT_EQUALS(Fixnum::from(5)->bit_and(state, Float::create(state, -2.9)), Fixnum::from(4));
-  }
-
   void test_or() {
     TS_ASSERT_EQUALS(Fixnum::from( 5)->bit_or(state, Fixnum::from( 3)), Fixnum::from( 7));
     TS_ASSERT_EQUALS(Fixnum::from(-5)->bit_or(state, Fixnum::from( 3)), Fixnum::from(-5));
@@ -566,13 +566,6 @@ class TestFixnum : public CxxTest::TestSuite, public VMTest {
     TS_ASSERT_EQUALS(Fixnum::from(-5)->bit_or(state, Bignum::from(state, (native_int)-3)), Fixnum::from(-1));
   }
 
-  void test_or_with_float() {
-    TS_ASSERT_EQUALS(Fixnum::from(5)->bit_or(state, Float::create(state,  3.1)), Fixnum::from( 7));
-    TS_ASSERT_EQUALS(Fixnum::from(5)->bit_or(state, Float::create(state,  2.9)), Fixnum::from( 7));
-    TS_ASSERT_EQUALS(Fixnum::from(5)->bit_or(state, Float::create(state, -3.1)), Fixnum::from(-3));
-    TS_ASSERT_EQUALS(Fixnum::from(5)->bit_or(state, Float::create(state, -2.9)), Fixnum::from(-1));
-  }
-
   void test_xor() {
     TS_ASSERT_EQUALS(Fixnum::from( 5)->bit_xor(state, Fixnum::from( 3)), Fixnum::from( 6));
     TS_ASSERT_EQUALS(Fixnum::from(-5)->bit_xor(state, Fixnum::from( 3)), Fixnum::from(-8));
@@ -585,13 +578,6 @@ class TestFixnum : public CxxTest::TestSuite, public VMTest {
     TS_ASSERT_EQUALS(Fixnum::from(-5)->bit_xor(state, Bignum::from(state, (native_int) 3)), Fixnum::from(-8));
     TS_ASSERT_EQUALS(Fixnum::from( 5)->bit_xor(state, Bignum::from(state, (native_int)-3)), Fixnum::from(-8));
     TS_ASSERT_EQUALS(Fixnum::from(-5)->bit_xor(state, Bignum::from(state, (native_int)-3)), Fixnum::from( 6));
-  }
-
-  void test_xor_with_float() {
-    TS_ASSERT_EQUALS(Fixnum::from(5)->bit_xor(state, Float::create(state,  3.1)), Fixnum::from( 6));
-    TS_ASSERT_EQUALS(Fixnum::from(5)->bit_xor(state, Float::create(state,  2.9)), Fixnum::from( 7));
-    TS_ASSERT_EQUALS(Fixnum::from(5)->bit_xor(state, Float::create(state, -3.1)), Fixnum::from(-8));
-    TS_ASSERT_EQUALS(Fixnum::from(5)->bit_xor(state, Float::create(state, -2.9)), Fixnum::from(-5));
   }
 
   void test_invert() {
@@ -619,7 +605,7 @@ class TestFixnum : public CxxTest::TestSuite, public VMTest {
     Fixnum* a = try_as<Fixnum>(ary->get(state, 0));
     Fixnum* b = try_as<Fixnum>(ary->get(state, 1));
 
-    TS_ASSERT_EQUALS(2U, ary->size());
+    TS_ASSERT_EQUALS(2, ary->size());
     TS_ASSERT(a);
     TS_ASSERT(b);
     TS_ASSERT_EQUALS(two, a);
@@ -634,7 +620,7 @@ class TestFixnum : public CxxTest::TestSuite, public VMTest {
     Fixnum* a = try_as<Fixnum>(ary->get(state, 0));
     Fixnum* b = try_as<Fixnum>(ary->get(state, 1));
 
-    TS_ASSERT_EQUALS(2U, ary->size());
+    TS_ASSERT_EQUALS(2, ary->size());
     TS_ASSERT(a);
     TS_ASSERT(b);
     TS_ASSERT_EQUALS(one, a);
@@ -645,11 +631,11 @@ class TestFixnum : public CxxTest::TestSuite, public VMTest {
     Bignum* c = try_as<Bignum>(ary->get(state, 0));
     Bignum* d = try_as<Bignum>(ary->get(state, 1));
 
-    TS_ASSERT_EQUALS(2U, ary->size());
+    TS_ASSERT_EQUALS(2, ary->size());
     TS_ASSERT(c);
     TS_ASSERT(d);
-    TS_ASSERT_EQUALS(Qtrue, c->equal(state, f));
-    TS_ASSERT_EQUALS(Qtrue, d->equal(state, e));
+    TS_ASSERT_EQUALS(cTrue, c->equal(state, f));
+    TS_ASSERT_EQUALS(cTrue, d->equal(state, e));
   }
 
   void test_uncastable_object_throws_exception() {

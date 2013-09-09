@@ -10,7 +10,6 @@ namespace rubinius {
 
   /* Forwards */
   class Object;
-  class Message;
   class Primitives;
   class Symbol;
 
@@ -21,6 +20,7 @@ namespace rubinius {
     kPrimitiveFailed = ((unsigned int)-1) & ~TAG_REF_MASK
   };
 
+#ifdef ENABLE_LLVM
   class JITStubResults {
     int arg_count_;
     const char* name_;
@@ -39,7 +39,7 @@ namespace rubinius {
       arg_count_ = count;
     }
 
-    int arg_count() {
+    int arg_count() const {
       return arg_count_;
     }
 
@@ -47,7 +47,7 @@ namespace rubinius {
       name_ = name;
     }
 
-    const char* name() {
+    const char* name() const {
       return name_;
     }
 
@@ -55,7 +55,7 @@ namespace rubinius {
       pass_callframe_ = val;
     }
 
-    bool pass_callframe() {
+    bool pass_callframe() const {
       return pass_callframe_;
     }
 
@@ -63,11 +63,12 @@ namespace rubinius {
       can_fail_ = val;
     }
 
-    bool can_fail() {
+    bool can_fail() const {
       return can_fail_;
     }
 
   };
+#endif
 
 
   class Primitives {
@@ -76,18 +77,18 @@ namespace rubinius {
       return reinterpret_cast<Object*>(kPrimitiveFailed);
     }
 
-    static void queue_for_jit(STATE, CallFrame* call_frame, int which);
-
     /*
      * The primitive generator emits one 'executor' function per
      * primitive. This simply checks the argument types and then
      * calls the C++ code that implements the primitive.
-     * See VMMethod::execute for the version that handles 'regular'
+     * See MachineCode::execute for the version that handles 'regular'
      * Ruby code.
      */
     static executor resolve_primitive(STATE, Symbol* name, int* index = 0);
     static Object* unknown_primitive(STATE, CallFrame* call_frame, Executable* exec, Module* mod, Arguments& args);
+#ifdef ENABLE_LLVM
     static bool get_jit_stub(int index, JITStubResults& res);
+#endif
     static InvokePrimitive get_invoke_stub(STATE, Symbol* name);
 
 #include "gen/primitives_declare.hpp"

@@ -82,6 +82,7 @@ class MSpecMain < MSpecScript
     options.doc "   ci  - Run the known good specs"
     options.doc "   tag - Add or remove tags\n"
     options.doc " mspec COMMAND -h for more options\n"
+    options.doc "   example: $ mspec run -h\n"
 
     options.on_extra { |o| config[:options] << o }
     config[:options].concat options.parse(argv)
@@ -160,7 +161,9 @@ class MSpecMain < MSpecScript
       multi_exec argv
     else
       if config[:use_valgrind]
-        more = ["--db-attach=#{config[:use_gdb] ? 'yes' : 'no'}", config[:target]] + argv
+        more = ["--child-silent-after-fork=yes",
+                "--db-attach=#{config[:use_gdb] ? 'yes' : 'no'}",
+                config[:target]] + argv
         exec "valgrind", *more
       elsif config[:use_gdb]
         more = ["--args", config[:target]] + argv

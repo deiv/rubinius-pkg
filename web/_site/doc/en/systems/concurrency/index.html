@@ -26,6 +26,11 @@
     <!--[if IE]><link href="/stylesheets/blueprint/ie.css" media="screen" rel="stylesheet" type="text/css" /><![endif]-->
     <!--[if IE]><link href="/stylesheets/ie.css"           media="screen" rel="stylesheet" type="text/css" /><![endif]-->
     <link href="/stylesheets/pygments.css" media="screen" rel="stylesheet" />
+
+    <link href="/favicon.ico"                 rel="shortcut icon"    type="image/vnd.microsoft.icon" />
+    <link href="/images/apple-touch-icon.png" rel="apple-touch-icon" type="image/png" />
+    <link href="/images/apple-touch-icon.png" rel="apple-touch-icon" type="image/png" sizes="72x72"   />
+    <link href="/images/apple-touch-icon.png" rel="apple-touch-icon" type="image/png" sizes="114x114" />
   </head>
 
   <body>
@@ -87,6 +92,12 @@
     
     
     
+    <li><a href="/doc/it/systems/concurrency/"
+      
+      >it</a></li>
+    
+    
+    
     <li><a href="/doc/ja/systems/concurrency/"
       
       >ja</a></li>
@@ -143,7 +154,7 @@
 Fibers, along with a new API: Actors. Actors provide concurrency without any
 mutexes or locking inherent when sharing state between Threads.</p>
 
-<p>Actors execute concurrently but don&rsquo;t share state; instead they pass messages to
+<p>Actors execute concurrently but don’t share state; instead they pass messages to
 other actors. Here we create two actors using <code>Actor.spawn</code>, ping and pong, who
 will send messages back and forth until they have collaboratively incremented a
 variable to 1000:</p>

@@ -2,11 +2,13 @@
 #include "builtin/fixnum.hpp"
 #include "builtin/float.hpp"
 #include "builtin/object.hpp"
+#include "builtin/integer.hpp"
+#include "builtin/string.hpp"
+
+#include "object_utils.hpp"
 
 #include "capi/capi.hpp"
 #include "capi/18/include/ruby.h"
-
-#include <gdtoa.h>
 
 using namespace rubinius;
 using namespace rubinius::capi;
@@ -20,13 +22,21 @@ extern "C" {
     String* str;
     char chr;
 
-    if((str = try_as<String>(object)) && str->size() >= 1) {
+    if((str = try_as<String>(object)) && str->byte_size() >= 1) {
       chr = str->c_str(env->state())[0];
     } else {
       chr = (char)(NUM2INT(obj) & 0xff);
     }
 
     return chr;
+  }
+
+  long rb_num2int(VALUE obj) {
+    long num = rb_num2long(obj);
+    if((int)num != num) {
+      rb_raise(rb_eRangeError, "integer too big to convert into int");
+    }
+    return num;
   }
 
   long rb_num2long(VALUE obj) {
@@ -58,6 +68,14 @@ extern "C" {
     obj = rb_funcall(obj, to_int_id, 0);
 
     return rb_num2long(obj);
+  }
+
+  unsigned long rb_num2uint(VALUE obj) {
+    unsigned long num = rb_num2ulong(obj);
+    if((unsigned int)num != num) {
+      rb_raise(rb_eRangeError, "integer too big to convert into int");
+    }
+    return num;
   }
 
   unsigned long rb_num2ulong(VALUE obj) {
@@ -128,13 +146,18 @@ extern "C" {
     return capi_native2num<unsigned long>(number);
   }
 
-  VALUE rb_cstr2inum(const char* string, int base) {
-    return rb_str2inum(rb_str_new2(string), base);
+  VALUE rb_cstr2inum(const char* str, int base) {
+    return rb_cstr_to_inum(str, base, base == 0);
   }
 
   VALUE rb_cstr_to_inum(const char* str, int base, int badcheck) {
-    // TODO don't ignore badcheck
-    return rb_cstr2inum(str, base);
+    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+    Integer* i = Integer::from_cstr(env->state(), str, str + strlen(str),
+                                    base, RBOOL(badcheck));
+    if(i->nil_p()) {
+      rb_raise(rb_eArgError, "invalid string for Integer");
+    }
+    return env->get_handle(i);
   }
 
   VALUE rb_ll2inum(long long val) {
@@ -153,6 +176,10 @@ extern "C" {
 
   VALUE rb_num_coerce_cmp(VALUE x, VALUE y, ID func) {
     return rb_funcall(rb_mCAPI, rb_intern("rb_num_coerce_cmp"), 3, x, y, ID2SYM(func));
+  }
+
+  VALUE rb_num_coerce_relop(VALUE x, VALUE y, ID func) {
+    return rb_funcall(rb_mCAPI, rb_intern("rb_num_coerce_relop"), 3, x, y, ID2SYM(func));
   }
 
   double rb_num2dbl(VALUE val) {
@@ -177,27 +204,19 @@ extern "C" {
     const char *q;
     char *end;
     double d;
-    const char *ellipsis = "";
-    int w;
-#define OutOfRange() (((w = end - p) > 20) ? (w = 20, ellipsis = "...") : (ellipsis = ""))
 
-    if (!p) return 0.0;
+    if(!p) return 0.0;
     q = p;
     while (ISSPACE(*p)) p++;
-    d = ::ruby_strtod(p, &end);
-    if (errno == ERANGE) {
-      OutOfRange();
-      rb_warning("Float %.*s%s out of range", w, p, ellipsis);
-      errno = 0;
-    }
-    if (p == end) {
-      if (badcheck) {
+    d = Float::string_to_double(p, strlen(p), badcheck, &end);
+    if(p == end) {
+      if(badcheck) {
         bad:
           rb_invalid_str(q, "Float()");
       }
       return d;
     }
-    if (*end) {
+    if(*end) {
       char buf[DBL_DIG * 4 + 10];
       char *n = buf;
       char *e = buf + sizeof(buf) - 1;
@@ -205,43 +224,48 @@ extern "C" {
 
       while (p < end && n < e) prev = *n++ = *p++;
       while (*p) {
-        if (*p == '_') {
+        if(*p == '_') {
           /* remove underscores between digits */
-          if (badcheck) {
-            if (n == buf || !ISDIGIT(prev)) goto bad;
+          if(badcheck) {
+            if(n == buf || !ISDIGIT(prev)) goto bad;
             ++p;
-            if (!ISDIGIT(*p)) goto bad;
+            if(!ISDIGIT(*p)) goto bad;
           } else {
             while (*++p == '_');
             continue;
           }
         }
         prev = *p++;
-        if (n < e) *n++ = prev;
+        if(n < e) *n++ = prev;
       }
       *n = '\0';
       p = buf;
-      d = ::ruby_strtod(p, &end);
-      if (errno == ERANGE) {
-        OutOfRange();
-        rb_warning("Float %.*s%s out of range", w, p, ellipsis);
-        errno = 0;
-      }
-      if (badcheck) {
-        if (!end || p == end) goto bad;
+      d = Float::string_to_double(p, strlen(p), badcheck, &end);
+      if(badcheck) {
+        if(!end || p == end) goto bad;
         while (*end && ISSPACE(*end)) end++;
-        if (*end) goto bad;
+        if(*end) goto bad;
       }
-    }
-    if (errno == ERANGE) {
-      errno = 0;
-      OutOfRange();
-      rb_raise(rb_eArgError, "Float %.*s%s out of range", w, q, ellipsis);
     }
     return d;
   }
-  
+
   VALUE rb_Integer(VALUE object_handle) {
+    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
+
+    Object* object = env->get_object(object_handle);
+
+    if(kind_of<Fixnum>(object) || kind_of<Bignum>(object)) {
+      return object_handle;
+    } else if(String* str = try_as<String>(object)) {
+      Object* ret = str->to_i(env->state(), Fixnum::from(0), cTrue);
+      if(ret->nil_p()) {
+        rb_raise(rb_eArgError, "invalid value for Integer");
+      }
+
+      return env->get_handle(ret);
+    }
+
     return rb_convert_type(object_handle, 0, "Integer", "to_i");
   }
 

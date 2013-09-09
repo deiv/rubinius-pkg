@@ -6,15 +6,11 @@ Gem.platforms << Gem::Platform.new([cpu, 'rubinius', version])
 module Gem
 
   def self.default_bindir
-    File.join Rubinius::GEMS_PATH, "bin"
+    File.join default_dir, "bin"
   end
 
   def self.default_dir
-    File.join Rubinius::GEMS_PATH, Gem::ConfigMap[:ruby_version]
-  end
-
-  def self.default_preinstalled_dir
-    File.join Rubinius::GEMS_PATH, "rubinius", "preinstalled"
+    Rubinius::GEMS_PATH
   end
 
   def self.default_path
@@ -25,7 +21,7 @@ module Gem
   end
 
   def self.default_exec_format
-    exec_format = ConfigMap[:ruby_install_name].sub('rbx', '%s') rescue '%s'
+    exec_format = ConfigMap[:ruby_install_name].sub(/rbx|ruby/, '%s') rescue '%s'
 
     unless exec_format =~ /%s/ then
       raise Gem::Exception,

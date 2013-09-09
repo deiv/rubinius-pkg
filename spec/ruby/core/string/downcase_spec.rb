@@ -27,7 +27,7 @@ describe "String#downcase" do
   end
 
   it "returns a subclass instance for subclasses" do
-    StringSpecs::MyString.new("FOObar").downcase.should be_kind_of(StringSpecs::MyString)
+    StringSpecs::MyString.new("FOObar").downcase.should be_an_instance_of(StringSpecs::MyString)
   end
 end
 
@@ -55,6 +55,12 @@ describe "String#downcase!" do
     it "raises a RuntimeError when self is frozen" do
       lambda { "HeLlo".freeze.downcase! }.should raise_error(RuntimeError)
       lambda { "hello".freeze.downcase! }.should raise_error(RuntimeError)
+    end
+  end
+
+  with_feature :encoding do
+    it "sets the result String encoding to the source String encoding" do
+      "ABC".downcase.encoding.should equal(Encoding::UTF_8)
     end
   end
 end

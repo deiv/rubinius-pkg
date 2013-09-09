@@ -1,26 +1,32 @@
 #ifndef RBX_LLVM_TYPES_HPP
 #define RBX_LLVM_TYPES_HPP
 
+#include "prelude.hpp"
+
 namespace llvm {
   class Instruction;
   class Value;
 }
 
 namespace rubinius {
-  class LLVMState;
+  class Context;
+  class ConstantCache;
 
   namespace type {
     enum Kind {
       eUnknown = 0,
-      eTrue = 1,
-      eFalse = 2,
-      eNil = 3,
-      eFixnum = 4,
-      eStaticFixnum = 5,
-      eInstance = 6,
-      eSymbol = 7,
-      eType = 8,
-      eClassObject = 9
+      eTrue,
+      eFalse,
+      eNil,
+      eFixnum,
+      eStaticFixnum,
+      eInstance,
+      eSingletonInstance,
+      eSymbol,
+      eStaticSymbol,
+      eType,
+      eClassObject,
+      eConstantCache
     };
 
     enum Source {
@@ -30,7 +36,7 @@ namespace rubinius {
 
     class KnownType {
       Kind kind_;
-      int value_;
+      uintptr_t value_;
 
       Source source_;
       int source_id_;
@@ -43,7 +49,7 @@ namespace rubinius {
         , source_id_(0)
       {}
 
-      KnownType(Kind kind, int value=0, Source s=eUnknownSource, int sid=0)
+      KnownType(Kind kind, uintptr_t value=0, Source s=eUnknownSource, int sid=0)
         : kind_(kind)
         , value_(value)
         , source_(s)
@@ -54,8 +60,12 @@ namespace rubinius {
         return KnownType(eUnknown);
       }
 
-      static KnownType instance(int class_id) {
+      static KnownType instance(uint32_t class_id) {
         return KnownType(eInstance, class_id);
+      }
+
+      static KnownType singleton_instance(uint32_t class_id) {
+        return KnownType(eSingletonInstance, class_id);
       }
 
       static KnownType nil() {
@@ -70,7 +80,7 @@ namespace rubinius {
         return KnownType(eFalse);
       }
 
-      static KnownType fixnum(int val) {
+      static KnownType fixnum(native_int val) {
         return KnownType(eStaticFixnum, val);
       }
 
@@ -82,12 +92,20 @@ namespace rubinius {
         return KnownType(eSymbol);
       }
 
+      static KnownType symbol(native_int index) {
+        return KnownType(eStaticSymbol, index);
+      }
+
       static KnownType type() {
         return KnownType(eType);
       }
 
-      static KnownType class_object(int class_id) {
+      static KnownType class_object(uint32_t class_id) {
         return KnownType(eClassObject, class_id);
+      }
+
+      static KnownType constant_cache(ConstantCache* entry) {
+        return KnownType(eConstantCache, reinterpret_cast<uintptr_t>(entry));
       }
 
       bool known_p() {
@@ -107,16 +125,37 @@ namespace rubinius {
       }
 
       bool instance_p() {
-        return kind_ == eInstance;
+        return kind_ == eInstance || kind_ == eSingletonInstance;
+      }
+
+      bool singleton_instance_p() {
+        return kind_ == eSingletonInstance;
       }
 
       bool class_p() {
         return kind_ == eClassObject;
       }
 
-      int class_id() {
-        if(kind_ == eInstance || kind_ == eClassObject) return value_;
-        return -1;
+      bool constant_cache_p() {
+        return kind_ == eConstantCache;
+      }
+
+      uint32_t class_id() {
+        switch(kind_) {
+        case eInstance:
+        case eSingletonInstance:
+        case eClassObject:
+          return value_;
+        default:
+          return -1;
+        }
+      }
+
+      ConstantCache* constant_cache() {
+        if(constant_cache_p()) {
+          return reinterpret_cast<ConstantCache*>(value_);
+        }
+        return NULL;
       }
 
       bool fixnum_p() {
@@ -128,7 +167,11 @@ namespace rubinius {
       }
 
       bool symbol_p() {
-        return kind_ == eSymbol;
+        return kind_ == eStaticSymbol || kind_ == eSymbol;
+      }
+
+      bool static_symbol_p() {
+        return kind_ == eStaticSymbol;
       }
 
       bool type_p() {
@@ -159,15 +202,15 @@ namespace rubinius {
 
       const char* describe();
 
-      void associate(LLVMState* ls, llvm::Instruction* I);
-      void associate(LLVMState* ls, llvm::Value* V);
+      void associate(Context* ctx, llvm::Instruction* I);
+      void associate(Context* ctx, llvm::Value* V);
 
-      static KnownType extract(LLVMState* ls, llvm::Instruction* I);
-      static KnownType extract(LLVMState* ls, llvm::Value* I);
+      static KnownType extract(Context* ctx, llvm::Instruction* I);
+      static KnownType extract(Context* ctx, llvm::Value* I);
 
-      static bool has_hint(LLVMState* ls, llvm::Value* V);
+      static bool has_hint(Context* ctx, llvm::Value* V);
 
-      void inherit_source(LLVMState* ls, llvm::Value* V);
+      void inherit_source(Context* ctx, llvm::Value* V);
       void inherit_source(type::KnownType kt);
     };
   }

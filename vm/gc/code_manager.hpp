@@ -10,7 +10,7 @@ namespace rubinius {
 
   /**
    * Manages memory for code-based resources that are owned by Ruby objects,
-   * such as VMMethod instances, JIT code, FFI resources etc.
+   * such as MachineCode instances, JIT code, FFI resources etc.
    *
    * These objects are not directly accessible via Ruby code, but are used by
    * the VM to support the running of Ruby code. As such, these objects also
@@ -25,6 +25,7 @@ namespace rubinius {
 
   class CodeManager {
     const static int cDefaultChunkSize = 64;
+    const static int cGCTriggerThreshold = 64 * 1024 * 1024;
 
     /**
      * A chunk of memory used to store an array of references to CodeResource
@@ -41,7 +42,7 @@ namespace rubinius {
       ~Chunk();
     };
 
-    thread::Mutex mutex_;
+    utilities::thread::Mutex mutex_;
 
     SharedState* shared_;
 
@@ -55,27 +56,32 @@ namespace rubinius {
     int freed_resources_;
     int total_allocated_;
     int total_freed_;
+    int gc_triggered_;
 
-    int bytes_used_;
+    size_t bytes_used_;
 
   public:
-    int freed_resources() {
+    int freed_resources() const {
       return freed_resources_;
     }
 
-    int total_allocated() {
+    int total_allocated() const {
       return total_allocated_;
     }
 
-    int total_freed() {
+    int total_freed() const {
       return total_freed_;
     }
 
-    SharedState* shared() {
+    SharedState* shared() const {
       return shared_;
     }
 
-    int& size() {
+    size_t& size() {
+      return bytes_used_;
+    }
+
+    size_t size() const {
       return bytes_used_;
     }
 
@@ -83,10 +89,9 @@ namespace rubinius {
     CodeManager(SharedState* shared, int chunk_size=cDefaultChunkSize);
     ~CodeManager();
 
-    void add_resource(CodeResource* cr);
+    void add_resource(CodeResource* cr, bool* collect_now);
     void clear_marks();
     void sweep();
-    int  calculate_size();
 
   private:
     void add_chunk();

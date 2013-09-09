@@ -6,7 +6,26 @@ require 'rubygems/user_interaction'
 # retrieval during tests.
 
 class Gem::MockGemUi < Gem::StreamUI
-  class TermError < RuntimeError; end
+  ##
+  # Raised when you haven't provided enough input to your MockGemUi
+
+  class InputEOFError < RuntimeError
+
+    def initialize question
+      super "Out of input for MockGemUi on #{question.inspect}"
+    end
+
+  end
+
+  class TermError < RuntimeError
+    attr_reader :exit_code
+
+    def initialize exit_code
+      super
+      @exit_code = exit_code
+    end
+  end
+  class SystemExitException < RuntimeError; end
 
   module TTY
 
@@ -31,9 +50,15 @@ class Gem::MockGemUi < Gem::StreamUI
     outs.extend TTY
     errs.extend TTY
 
-    super ins, outs, errs
+    super ins, outs, errs, true
 
     @terminated = false
+  end
+
+  def ask question
+    raise InputEOFError, question if @ins.eof?
+
+    super
   end
 
   def input
@@ -55,8 +80,8 @@ class Gem::MockGemUi < Gem::StreamUI
   def terminate_interaction(status=0)
     @terminated = true
 
-    raise TermError unless status == 0
-    raise Gem::SystemExitException, status
+    raise TermError, status if status != 0
+    raise SystemExitException
   end
 
 end

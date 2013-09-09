@@ -2,24 +2,23 @@
 
 #include "builtin/access_variable.hpp"
 #include "builtin/iseq.hpp"
-#include "builtin/staticscope.hpp"
+#include "builtin/constantscope.hpp"
 #include "builtin/module.hpp"
 
 namespace rubinius {
 
   class NativeFunction;
-
-  namespace jit {
-    class Context;
-  }
+  class Context;
 
   class Inliner {
-    jit::Context& context_;
+    Context* ctx_;
     JITOperations& ops_;
-    InlineCache* cache_;
+    CallSite** call_site_ptr_;
+    CallSite* call_site_;
     int count_;
     int self_pos_;
-    BasicBlock* failure_;
+    BasicBlock* class_id_failure_;
+    BasicBlock* serial_id_failure_;
     Value* result_;
     bool check_for_exception_;
     JITInlineBlock* inline_block_;
@@ -36,14 +35,17 @@ namespace rubinius {
 
   public:
 
-    Inliner(jit::Context& ctx,
-            JITOperations& ops, InlineCache* cache, int count, BasicBlock* failure)
-      : context_(ctx)
+    Inliner(Context* ctx,
+            JITOperations& ops, CallSite** call_site_ptr, int count,
+            BasicBlock* class_id_failure, BasicBlock* serial_id_failure)
+      : ctx_(ctx)
       , ops_(ops)
-      , cache_(cache)
+      , call_site_ptr_(call_site_ptr)
+      , call_site_(*call_site_ptr)
       , count_(count)
       , self_pos_(count)
-      , failure_(failure)
+      , class_id_failure_(class_id_failure)
+      , serial_id_failure_(serial_id_failure)
       , result_(0)
       , check_for_exception_(true)
       , inline_block_(0)
@@ -54,12 +56,14 @@ namespace rubinius {
       , fail_to_send_(false)
     {}
 
-    Inliner(jit::Context& ctx, JITOperations& ops, int count)
-      : context_(ctx)
+    Inliner(Context* ctx, JITOperations& ops, int count)
+      : ctx_(ctx)
       , ops_(ops)
-      , cache_(0)
+      , call_site_ptr_(0)
+      , call_site_(0)
       , count_(count)
-      , failure_(0)
+      , class_id_failure_(0)
+      , serial_id_failure_(0)
       , result_(0)
       , check_for_exception_(true)
       , inline_block_(0)
@@ -69,8 +73,8 @@ namespace rubinius {
       , creator_info_(0)
     {}
 
-    jit::Context& context() {
-      return context_;
+    Context* context() {
+      return ctx_;
     }
 
     Value* recv() {
@@ -81,8 +85,12 @@ namespace rubinius {
       return ops_.stack_back(self_pos_ - (which + 1));
     }
 
-    BasicBlock* failure() {
-      return failure_;
+    BasicBlock* class_id_failure() {
+      return class_id_failure_;
+    }
+
+    BasicBlock* serial_id_failure() {
+      return serial_id_failure_;
     }
 
     Value* result() {
@@ -91,6 +99,14 @@ namespace rubinius {
 
     void set_result(Value* val) {
       result_ = val;
+    }
+
+    void set_class_id_failure(BasicBlock* class_id_failure) {
+      class_id_failure_ = class_id_failure;
+    }
+
+    void set_serial_id_failure(BasicBlock* serial_id_failure) {
+      serial_id_failure_ = serial_id_failure;
     }
 
     void exception_safe() {
@@ -138,30 +154,35 @@ namespace rubinius {
       return guarded_type_;
     }
 
-    bool consider();
+    bool consider_mono();
+
+    bool consider_poly();
+
+    bool inline_for_class(Class* klass, ClassData data, int hits);
+
     void inline_block(JITInlineBlock* ib, Value* self);
 
-    void inline_generic_method(Class* klass, Module* mod, CompiledMethod* cm, VMMethod* vmm);
+    void inline_generic_method(Class* klass, ClassData data, Module* mod, CompiledCode* code, MachineCode* mcode, int hits);
 
-    bool detect_trivial_method(VMMethod* vmm, CompiledMethod* cm = 0);
+    bool detect_trivial_method(MachineCode* mcode, CompiledCode* code = 0);
 
-    void inline_trivial_method(Class* klass, CompiledMethod* cm);
+    void inline_trivial_method(Class* klass, ClassData data, CompiledCode* code);
 
-    void inline_ivar_write(Class* klass, AccessVariable* acc);
+    void inline_ivar_write(Class* klass, ClassData data, AccessVariable* acc);
 
-    void inline_ivar_access(Class* klass, AccessVariable* acc);
+    void inline_ivar_access(Class* klass, ClassData data, AccessVariable* acc);
 
-    bool inline_primitive(Class* klass, CompiledMethod* cm, executor prim);
+    bool inline_primitive(Class* klass, ClassData data, CompiledCode* code, executor prim);
 
-    bool inline_ffi(Class* klass, NativeFunction* nf);
+    bool inline_ffi(Class* klass, ClassData data, NativeFunction* nf);
 
     void emit_inline_block(JITInlineBlock* ib, Value* val);
 
-    int detect_jit_intrinsic(Class* klass, CompiledMethod* cm);
-    void inline_intrinsic(Class* klass, CompiledMethod* cm, int which);
+    int detect_jit_intrinsic(Class* klass, ClassData data, CompiledCode* code);
+    void inline_intrinsic(Class* klass, ClassData data, CompiledCode* code, int which);
 
-    void check_class(llvm::Value* recv, Class* klass, llvm::BasicBlock* bb=0);
-    void check_recv(Class* klass, llvm::BasicBlock* bb=0);
+    void check_class(llvm::Value* recv, Class* klass, ClassData data);
+    void check_recv(Class* klass, ClassData data);
 
     void prime_info(JITMethodInfo& info);
   };

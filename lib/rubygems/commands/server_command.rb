@@ -44,7 +44,7 @@ class Gem::Commands::ServerCommand < Gem::Command
       options[:addresses].push(*address)
     end
 
-    add_option '-l', '--launch[=COMMAND]', 
+    add_option '-l', '--launch[=COMMAND]',
                'launches a browser window',
                "COMMAND defaults to 'start' on Windows",
                "and 'open' on all other platforms" do |launch, options|
@@ -78,7 +78,7 @@ You can set up a shortcut to gem server documentation using the URL:
   end
 
   def execute
-    options[:gemdir] << Gem.dir if options[:gemdir].empty?
+    options[:gemdir] = Gem.path if options[:gemdir].empty?
     Gem::Server.run options
   end
 

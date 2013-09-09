@@ -13,8 +13,8 @@ describe "Hash#default_proc" do
   end
 end
 
-describe "Hash#default_proc=" do
-  ruby_version_is "1.8.8" do
+ruby_version_is "1.9" do
+  describe "Hash#default_proc=" do
     it "replaces the block passed to Hash.new" do
       h = new_hash { |i| 'Paris' }
       h.default_proc = Proc.new { 'Montreal' }
@@ -38,8 +38,31 @@ describe "Hash#default_proc=" do
     end
 
     it "raises an error if passed stuff not convertible to procs" do
-      lambda{new_hash.default_proc = nil}.should raise_error(TypeError)
       lambda{new_hash.default_proc = 42}.should raise_error(TypeError)
+    end
+
+    it "returns the passed Proc" do
+      new_proc = Proc.new {}
+      (new_hash.default_proc = new_proc).should equal(new_proc)
+    end
+
+    ruby_version_is "1.9"..."2.0" do
+      it "raises an error if passed nil" do
+        lambda{new_hash.default_proc = nil}.should raise_error(TypeError)
+      end
+    end
+
+    ruby_version_is "2.0" do
+      it "clears the default proc if passed nil" do
+        h = new_hash { |i| 'Paris' }
+        h.default_proc = nil
+        h.default_proc.should == nil
+        h[:city].should == nil
+      end
+
+      it "returns nil if passed nil" do
+        (new_hash.default_proc = nil).should be_nil
+      end
     end
 
     it "accepts a lambda with an arity of 2" do
@@ -49,17 +72,19 @@ describe "Hash#default_proc=" do
       end.should_not raise_error(TypeError)
     end
 
-    ruby_version_is "1.9" do
-      it "raises a TypeError if passed a lambda with an arity other than 2" do
-        h = new_hash
-        lambda do
-          h.default_proc = lambda {|a| }
-        end.should raise_error(TypeError)
-        lambda do
-          h.default_proc = lambda {|a,b,c| }
-        end.should raise_error(TypeError)
-      end
+    it "raises a TypeError if passed a lambda with an arity other than 2" do
+      h = new_hash
+      lambda do
+        h.default_proc = lambda {|a| }
+      end.should raise_error(TypeError)
+      lambda do
+        h.default_proc = lambda {|a,b,c| }
+      end.should raise_error(TypeError)
     end
 
+    it "raises a RuntimeError if self is frozen" do
+      lambda { new_hash.freeze.default_proc = Proc.new {} }.should raise_error(RuntimeError)
+      lambda { new_hash.freeze.default_proc = nil }.should raise_error(RuntimeError)
+    end
   end
 end

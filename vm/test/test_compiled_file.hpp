@@ -2,9 +2,9 @@
 
 #include "compiled_file.hpp"
 #include "builtin/class.hpp"
-#include "builtin/compiledmethod.hpp"
+#include "builtin/compiledcode.hpp"
 #include "builtin/lookuptable.hpp"
-#include "builtin/staticscope.hpp"
+#include "builtin/constantscope.hpp"
 #include "builtin/symbol.hpp"
 
 #include <cxxtest/TestSuite.h>
@@ -42,7 +42,7 @@ public:
     stream.str("!RBIX\n1\n42\nt");
 
     CompiledFile* cf = CompiledFile::load(stream);
-    TS_ASSERT_EQUALS(cf->body(state), Qtrue);
+    TS_ASSERT_EQUALS(cf->body(state), cTrue);
   }
 
   void test_load_file() {
@@ -52,7 +52,7 @@ public:
     CompiledFile* cf = CompiledFile::load(stream);
     TS_ASSERT_EQUALS(cf->magic, "!RBIX");
 
-    CompiledMethod* cm = try_as<CompiledMethod>(cf->body(state));
-    TS_ASSERT(cm);
+    CompiledCode* code = try_as<CompiledCode>(cf->body(state));
+    TS_ASSERT(code);
   }
 };

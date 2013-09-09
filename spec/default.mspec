@@ -1,4 +1,6 @@
 # vim: filetype=ruby
+
+$:.unshift "."
 require 'spec/custom/mspec'
 
 class MSpecScript
@@ -25,6 +27,16 @@ class MSpecScript
 
   # Enable language features
   MSpec.enable_feature :fork
+
+  rbx = defined?(RUBY_ENGINE) and RUBY_ENGINE == "rbx"
+
+  if RUBY_VERSION >= "1.9" or rbx
+    MSpec.enable_feature :require_19
+  end
+
+  if RUBY_VERSION >= "1.9"
+    MSpec.enable_feature :encoding
+  end
 
   if Object.const_defined?(:Rubinius) && Rubinius.const_get(:Fiber)
     if Rubinius::Fiber::ENABLED

@@ -1,12 +1,13 @@
 #ifndef RBX_CALL_FRAME_HPP
 #define RBX_CALL_FRAME_HPP
 
-#include "vmmethod.hpp"
+#include "machine_code.hpp"
 #include "unwind_info.hpp"
 #include "stack_variables.hpp"
-#include "builtin/variable_scope.hpp"
 #include "dispatch.hpp"
 #include "arguments.hpp"
+#include "object_utils.hpp"
+#include "builtin/symbol.hpp"
 
 #include <ostream>
 
@@ -15,12 +16,10 @@
 #endif
 
 namespace rubinius {
-  class Object;
-  class Symbol;
   class Module;
-  class VMMethod;
   class VariableScope;
   class NativeMethodFrame;
+  class BlockEnvironment;
 
   namespace jit {
     class RuntimeData;
@@ -30,22 +29,24 @@ namespace rubinius {
   struct CallFrame {
     enum Flags {
       cIsLambda =           1 << 0,
-      cCustomStaticScope =  1 << 1,
-      cMultipleScopes =     1 << 2,
-      cInlineFrame =        1 << 3,
-      cClosedScope =        1 << 4,
-      cBlockAsMethod =      1 << 5,
-      cJITed =              1 << 6,
-      cBlock =              1 << 7,
-      cInlineBlock =        1 << 8,
-      cNativeMethod =       1 << 9
+      cMultipleScopes =     1 << 1,
+      cInlineFrame =        1 << 2,
+      cClosedScope =        1 << 3,
+      cBlockAsMethod =      1 << 4,
+      cJITed =              1 << 5,
+      cBlock =              1 << 6,
+      cInlineBlock =        1 << 7,
+      cNativeMethod =       1 << 8,
+      cTopLevelVisibility = 1 << 9,
+      cScript =             1 << 10,
+      cScopeLocked =        1 << 11
     };
 
     CallFrame* previous;
-    StaticScope* static_scope_;
+    ConstantScope* constant_scope_;
 
     void* dispatch_data;
-    CompiledMethod* cm;
+    CompiledCode* compiled_code;
 
     int flags;
     int ip_;
@@ -61,11 +62,11 @@ namespace rubinius {
 
     // ACCESS
 
-    int ip() {
+    int ip() const {
       return ip_;
     }
 
-    bool block_as_method_p() {
+    bool block_as_method_p() const {
       return flags & cBlockAsMethod;
     }
 
@@ -84,29 +85,29 @@ namespace rubinius {
     }
 
 #ifdef ENABLE_LLVM
-    Symbol* name() {
+    Symbol* name() const {
       if(inline_method_p() && dispatch_data) {
         return reinterpret_cast<jit::RuntimeData*>(dispatch_data)->name();
       } else if(block_p()) {
-        return reinterpret_cast<Symbol*>(Qnil);
+        return nil<Symbol>();
       } else if(arguments) {
         return arguments->name();
       }
 
-      return reinterpret_cast<Symbol*>(Qnil);
+      return nil<Symbol>();
     }
 #else
-    Symbol* name() {
+    Symbol* name() const {
       if(arguments && !block_p()) {
         return arguments->name();
       }
 
-      return reinterpret_cast<Symbol*>(Qnil);
+      return nil<Symbol>();
     }
 #endif
 
 #ifdef ENABLE_LLVM
-    jit::RuntimeData* runtime_data() {
+    jit::RuntimeData* runtime_data() const {
       if(dispatch_data) {
         if(inline_method_p()) {
           return reinterpret_cast<jit::RuntimeData*>(dispatch_data);
@@ -116,7 +117,7 @@ namespace rubinius {
       return NULL;
     }
 
-    jit::RuntimeDataHolder* jit_data() {
+    jit::RuntimeDataHolder* jit_data() const {
       if(jitted_p()) {
         return reinterpret_cast<jit::RuntimeDataHolder*>(optional_jit_data);
       }
@@ -124,49 +125,44 @@ namespace rubinius {
       return NULL;
     }
 #else
-    jit::RuntimeData* runtime_data() {
+    jit::RuntimeData* runtime_data() const {
       return NULL;
     }
 
-    jit::RuntimeDataHolder* jit_data() {
+    jit::RuntimeDataHolder* jit_data() const {
       return NULL;
     }
 #endif
 
-    Symbol* original_name() {
-      return cm->name();
+    Symbol* original_name() const {
+      return compiled_code->name();
     }
 
-    bool custom_static_scope_p() {
-      return flags & cCustomStaticScope;
-    }
-
-    bool inline_method_p() {
+    bool inline_method_p() const {
       return flags & cInlineFrame;
     }
 
-    bool jitted_p() {
+    bool jitted_p() const {
       return flags & cJITed;
     }
 
-    bool block_p() {
+    bool block_p() const {
       return flags & cBlock;
     }
 
-    StaticScope* static_scope() {
-      if(custom_static_scope_p()) return static_scope_;
-      return cm->scope();
+    ConstantScope* constant_scope() const {
+      return constant_scope_;
     }
 
-    bool is_block_p(STATE) {
+    bool is_block_p(STATE) const {
       return block_p();
     }
 
-    Object* self() {
+    Object* self() const {
       return scope->self();
     }
 
-    bool multiple_scopes_p() {
+    bool multiple_scopes_p() const {
       return flags & cMultipleScopes;
     }
 
@@ -175,24 +171,24 @@ namespace rubinius {
       return promote_scope(state);
     }
 
-    bool is_inline_frame() {
+    bool is_inline_frame() const {
       return flags & cInlineFrame;
     }
 
-    bool is_inline_block() {
+    bool is_inline_block() const {
       return flags & cInlineBlock;
     }
 
-    bool has_closed_scope_p() {
+    bool has_closed_scope_p() const {
       return flags & cClosedScope;
     }
 
-    bool native_method_p() {
+    bool native_method_p() const {
       return flags & cNativeMethod;
     }
 
-    NativeMethodFrame* native_method_frame() {
-      if(native_method_p()) return (NativeMethodFrame*)dispatch_data;
+    NativeMethodFrame* native_method_frame() const {
+      if(native_method_p()) return reinterpret_cast<NativeMethodFrame*>(dispatch_data);
       return 0;
     }
 
@@ -207,10 +203,12 @@ namespace rubinius {
       return cf;
     }
 
+    void jit_fixup(STATE, CallFrame* creator);
+
     Object* last_match(STATE);
     void set_last_match(STATE, Object* obj);
 
-    Module* module() {
+    Module* module() const {
       return scope->module();
     }
 
@@ -226,22 +224,19 @@ namespace rubinius {
       return ip_++;
     }
 
-    void calculate_ip(void** pos) {
-      ip_ = pos - cm->backend_method()->addresses;
-    }
-
     VariableScope* promote_scope_full(STATE);
 
     VariableScope* promote_scope(STATE) {
-      if(!scope) rubinius::bug("bad CallFrame to promote");
       if(VariableScope* vs = scope->on_heap()) return vs;
       return promote_scope_full(state);
     }
 
     VariableScope* method_scope(STATE);
 
-    void print_backtrace(STATE, int count=0);
-    void print_backtrace(STATE, std::ostream& stream, int count=0);
+    void print_backtrace(STATE, int count=0, bool filter=false);
+    void print_backtrace(STATE, std::ostream& stream, int count=0, bool filter=false);
+
+    Symbol* file(STATE);
     int line(STATE);
 
     bool scope_still_valid(VariableScope* scope);
@@ -262,13 +257,13 @@ namespace rubinius {
       ip_ = 0;
 
       for(int i = 0; i < stack; i++) {
-        stk[i] = Qnil;
+        stk[i] = cNil;
       }
     }
   };
 
 #define ALLOCA_CALLFRAME(stack_size) \
-  (InterpreterCallFrame*)alloca(sizeof(InterpreterCallFrame) + (sizeof(Object*) * stack_size))
+  reinterpret_cast<InterpreterCallFrame*>(alloca(sizeof(InterpreterCallFrame) + (sizeof(Object*) * stack_size)))
 };
 
 #endif

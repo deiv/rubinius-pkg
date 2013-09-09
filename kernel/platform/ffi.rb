@@ -1,6 +1,9 @@
+# -*- encoding: us-ascii -*-
+
 ##
 # A Foreign Function Interface used to bind C libraries to ruby.
 
+module Rubinius
 module FFI
 
   #  Specialised error classes
@@ -48,9 +51,11 @@ module FFI
         return type_size(find_type(type))
       when Rubinius::NativeFunction
         return type_size(TYPE_PTR)
+      when FFI::Enum
+        return type_size(TYPE_ENUM)
       end
 
-      raise PrimitiveFailure, "Unable to find type size for #{type}"
+      raise PrimitiveFailure, "FFI.type_size primitive failed: #{type}"
     end
 
     def size_to_type(size)
@@ -69,16 +74,17 @@ module FFI
     def config_hash(name)
       vals = {}
       section = "rbx.platform.#{name}."
-      Rubinius::Config.section section do |key,value|
+      Rubinius::Config.section section do |key, value|
         vals[key.substring(section.size, key.length)] = value
       end
       vals
     end
 
-  end
+    def errno
+      FFI::Platform::POSIX.errno
+    end
 
-  # Converts a Rubinius Object
-  add_typedef TYPE_OBJECT,  :object
+  end
 
   # Converts a char
   add_typedef TYPE_CHAR,    :char
@@ -131,9 +137,6 @@ module FFI
   # Converts NULL-terminated C strings
   add_typedef TYPE_STRING,  :string
 
-  # Converts the current Rubinius state
-  add_typedef TYPE_STATE,   :state
-
   # Use strptr when you need to free the result of some operation.
   add_typedef TYPE_STRPTR,  :strptr
   add_typedef TYPE_STRPTR,  :string_and_pointer
@@ -148,6 +151,9 @@ module FFI
   add_typedef TYPE_USHORT, :uint16
   add_typedef TYPE_INT,    :int32
   add_typedef TYPE_UINT,   :uint32
+
+  # Converts a varargs argument
+  add_typedef TYPE_VARARGS, :varargs
 
   if Rubinius::L64
     add_typedef TYPE_LONG,  :int64
@@ -182,6 +188,37 @@ module FFI
       attr_reader :size
       attr_reader :implementation
     end
+
+    class StructByValue
+      def initialize(struct)
+        @implementation = struct
+      end
+
+      attr_reader :implementation
+    end
+
+    Struct = StructByValue
+
+    CHAR    = TYPE_CHAR
+    UCHAR   = TYPE_UCHAR
+    BOOL    = TYPE_BOOL
+    SHORT   = TYPE_SHORT
+    USHORT  = TYPE_USHORT
+    INT     = TYPE_INT
+    UINT    = TYPE_UINT
+    LONG    = TYPE_LONG
+    ULONG   = TYPE_ULONG
+    LL      = TYPE_LL
+    ULL     = TYPE_ULL
+    FLOAT   = TYPE_FLOAT
+    DOUBLE  = TYPE_DOUBLE
+    PTR     = TYPE_PTR
+    VOID    = TYPE_VOID
+    STRING  = TYPE_STRING
+    STRPTR  = TYPE_STRPTR
+    CHARARR = TYPE_CHARARR
+    ENUM    = TYPE_ENUM
+    VARARGS = TYPE_VARARGS
   end
 end
 
@@ -192,9 +229,34 @@ module FFI::Platform
   case
   when Rubinius.windows?
     LIBSUFFIX = "dll"
+    IS_WINDOWS = true
+    OS = 'windows'
   when Rubinius.darwin?
     LIBSUFFIX = "dylib"
+    IS_WINDOWS = false
+    OS = 'darwin'
   else
     LIBSUFFIX = "so"
+    IS_WINDOWS = false
+    OS = 'linux'
   end
+
+  ARCH = Rubinius::CPU
+
+  # ruby-ffi compatible
+  LONG_SIZE = Rubinius::SIZEOF_LONG * 8
+  ADDRESS_SIZE = Rubinius::WORDSIZE
+
+  def self.windows?
+    Rubinius.windows?
+  end
+
+  def self.mac?
+    Rubinius.darwin?
+  end
+
+  def self.unix?
+    ! windows?
+  end
+end
 end

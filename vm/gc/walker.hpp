@@ -18,9 +18,12 @@ namespace rubinius {
     virtual ~ObjectWalker();
 
     virtual Object* saw_object(Object*);
+    virtual void scanned_object(Object*) {}
 
     void seed(GCData& data);
     Object* next();
+    size_t stack_size();
+    Object** stack_buf();
   };
 }
 

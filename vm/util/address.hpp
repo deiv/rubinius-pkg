@@ -1,6 +1,22 @@
 #ifndef RBX_ADDRESS_H
 #define RBX_ADDRESS_H
 
+#if defined(i386) || defined(__i386) || defined(__i386__)
+#define IS_X86
+#endif
+
+#ifdef IS_X86
+#define RBX_MEMORY_ALIGN(var) (var)
+#else
+/*
+ * On non X86, we always align on 64 bit boundaries
+ * because we sue 64 bit CAS operations, even on
+ * 32 bit systems. X86 can do this, but for example ARM
+ * can't.
+ */
+#define RBX_MEMORY_ALIGNMENT sizeof(int64_t)
+#define RBX_MEMORY_ALIGN(var) ((var + (RBX_MEMORY_ALIGNMENT - 1)) & ~(RBX_MEMORY_ALIGNMENT - 1))
+#endif
 
 namespace memory {
 
@@ -20,39 +36,42 @@ namespace memory {
     {}
 
     Address(void* addr)
-      : address_(reinterpret_cast<intptr_t>(addr))
+      : address_(reinterpret_cast<uintptr_t>(addr))
     {}
 
     /**
      * Type conversion operator; converts this Address to a void*, allowing
      * the implicit type conversion rules to handle comparisons etc.
      */
-    operator void*() {
+    operator void*() const {
       return reinterpret_cast<void*>(address_);
     }
 
-    Address operator+(int change) {
+    Address operator+(int change) const {
+      change = RBX_MEMORY_ALIGN(change);
       return Address(reinterpret_cast<void*>(address_ + change));
     }
 
     Address operator+=(int change) {
+      change = RBX_MEMORY_ALIGN(change);
       address_ += change;
       return *this;
     }
 
-    size_t operator-(Address change) {
+    size_t operator-(Address change) const {
       return address_ - change.address_;
     }
 
-    Address operator-(int change) {
+    Address operator-(int change) const {
+      change = RBX_MEMORY_ALIGN(change);
       return Address(reinterpret_cast<void*>(address_ - change));
     }
 
-    Address operator&(uintptr_t mask) {
+    Address operator&(uintptr_t mask) const {
       return Address(reinterpret_cast<void*>(address_ & mask));
     }
 
-    bool is_null() {
+    bool is_null() const {
       return address_ == 0;
     }
 
@@ -60,7 +79,7 @@ namespace memory {
       return Address(0);
     }
 
-    intptr_t as_int() {
+    uintptr_t as_int() const {
       return address_;
     }
 

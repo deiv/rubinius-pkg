@@ -20,7 +20,7 @@ describe "Matrix#-" do
     lambda { @a - Matrix[ [1] ] }.should raise_error(Matrix::ErrDimensionMismatch)
   end
 
-  it "raises a ExceptionForMatrix::ErrOperationNotDefined if other is a Numeric Type" do
+  it "raises an ExceptionForMatrix::ErrOperationNotDefined if other is a Numeric Type" do
     lambda { @a - 2            }.should raise_error(Matrix::ErrOperationNotDefined)
     lambda { @a - 1.2          }.should raise_error(Matrix::ErrOperationNotDefined)
     lambda { @a - bignum_value }.should raise_error(Matrix::ErrOperationNotDefined)
@@ -35,7 +35,7 @@ describe "Matrix#-" do
     end
   end
 
-  ruby_bug "rubymine #5307", "1.9.3" do
+  ruby_bug "redmine #5307", "1.9.3" do
     describe "for a subclass of Matrix" do
       it "returns an instance of that subclass" do
         m = MatrixSub.ins

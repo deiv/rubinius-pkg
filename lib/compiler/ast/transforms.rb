@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   module AST
     module Transforms
@@ -242,48 +244,12 @@ module Rubinius
     end
 
     ##
-    # Emits fast VM instructions for certain methods.
-    #
-    class SendFastMath < SendWithArguments
-      transform :default, :fast_math, "VM instructions for math, relational methods"
-
-      Operators = {
-        :+    => :meta_send_op_plus,
-        :-    => :meta_send_op_minus,
-        :==   => :meta_send_op_equal,
-        :===  => :meta_send_op_tequal,
-        :<    => :meta_send_op_lt,
-        :>    => :meta_send_op_gt
-      }
-
-      def self.match?(line, receiver, name, arguments, privately)
-        return false unless op = Operators[name]
-        if match_arguments? arguments, 1
-          node = new line, receiver, name, arguments
-          node.operator = op
-          node
-        end
-      end
-
-      attr_accessor :operator
-
-      def bytecode(g)
-        pos(g)
-
-        @receiver.bytecode(g)
-        @arguments.bytecode(g)
-
-        g.__send__ @operator, g.find_literal(@name)
-      end
-    end
-
-    ##
     # Emits a fast path for #new
     #
     class SendFastNew < SendWithArguments
       transform :default, :fast_new, "Fast SomeClass.new path"
 
-      # FIXME duplicated from kernel/common/compiled_method.rb
+      # FIXME duplicated from kernel/common/compiled_code.rb
       KernelMethodSerial = 47
 
       def self.match?(line, receiver, name, arguments, privately)
@@ -363,47 +329,14 @@ module Rubinius
     end
 
     ##
-    # Maps various methods to VM instructions
-    #
-    class SendInstructionMethod < SendWithArguments
-      transform :default, :fast_system, "VM instructions for certain methods"
-
-      Methods = {
-        :__kind_of__     => :kind_of,
-        :__instance_of__ => :instance_of,
-        :__nil__         => :is_nil,
-      }
-
-      Arguments = {
-        :__kind_of__     => 1,
-        :__instance_of__ => 1,
-        :__nil__         => 0,
-      }
-
-      def self.match?(line, receiver, name, arguments, privately)
-        return false unless rename = Methods[name]
-        if match_arguments? arguments, Arguments[name]
-          new line, receiver, rename, arguments, privately
-        end
-      end
-
-      def bytecode(g)
-        pos(g)
-        @arguments.bytecode(g)
-        @receiver.bytecode(g)
-
-        g.__send__ @name
-      end
-    end
-
-    ##
     # Speeds up certain forms of Type.coerce_to
     #
     class SendFastCoerceTo < SendWithArguments
-      transform :default, :fast_coerce, "Fast Type.coerce_to path"
+      transform :default, :fast_coerce, "Fast Rubinius::Type.coerce_to path"
 
       def self.match?(line, receiver, name, arguments, privately)
-        match_send?(receiver, :Type, name, :coerce_to) and
+        methods = [:coerce_to, :check_convert_type, :try_convert]
+        receiver.kind_of?(TypeConstant) && methods.include?(name) &&
           arguments.body.size == 3
       end
 
@@ -412,69 +345,25 @@ module Rubinius
         var = @arguments.array[0]
         const = @arguments.array[1]
 
-        if var.kind_of? LocalVariableAccess and
-           const.kind_of? ConstantAccess and const.name == :Fixnum
+        if (var.kind_of?(LocalVariableAccess) ||
+            var.kind_of?(InstanceVariableAccess)) and
+           (const.kind_of?(ConstantAccess) ||
+            const.kind_of?(ScopedConstant) ||
+            const.kind_of?(ToplevelConstant))
           done = g.new_label
 
           var.bytecode(g)
           g.dup
-          g.send :__fixnum__, 0
+          const.bytecode(g)
+          g.swap
+          g.kind_of
           g.git done
-
-          g.pop # remove the dup
+          g.pop
           super(g)
 
           done.set!
         else
           super(g)
-        end
-      end
-    end
-
-    ##
-    # Handles loop do ... end
-    #
-    class SendLoop < Send
-      transform :magic, :loop, "loop do ... end"
-
-      def self.match?(line, receiver, name, arguments, privately)
-        if receiver.kind_of? Self and name == :loop
-          new line, receiver, name, privately
-        end
-      end
-
-      def block=(iter)
-        if iter.kind_of? BlockPass
-          @blockarg = iter
-        else
-          @block = iter.body
-        end
-      end
-
-      def bytecode(g)
-        pos(g)
-        if @block
-          g.push_modifiers
-
-          g.break = g.new_label
-          g.next = g.redo = top = g.new_label
-          top.set!
-
-          @block.bytecode(g)
-          g.pop
-
-          g.check_interrupts
-          g.goto top
-
-          g.break.set!
-          g.pop_modifiers
-        elsif @blockarg
-          g.push :self
-          @blockarg.bytecode(g)
-          g.send_with_block :loop, 0, true
-        else
-          g.push :self
-          g.send :loop, 0, true
         end
       end
     end

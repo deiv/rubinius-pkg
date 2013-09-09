@@ -1,7 +1,10 @@
+# -*- encoding: us-ascii -*-
+
 ##
 # Interface to the C errno integer.
 
 module Errno
+  FFI = Rubinius::FFI
 
   ##
   # Raises the appropriate SystemCallError exception with +additional+ as the

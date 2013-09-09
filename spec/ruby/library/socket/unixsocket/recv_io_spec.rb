@@ -6,7 +6,7 @@ describe "UNIXSocket#recv_io" do
   platform_is_not :windows do
     before :each do
       @path = SocketSpecs.socket_path
-      File.unlink(@path) if File.exists?(@path)
+      rm_r @path
 
       @server = UNIXServer.open(@path)
       @client = UNIXSocket.open(@path)
@@ -15,7 +15,7 @@ describe "UNIXSocket#recv_io" do
     after :each do
       @client.close
       @server.close
-      File.unlink(@path) if File.exists?(@path)
+      rm_r @path
     end
 
     it "reads an IO object across the socket" do
@@ -36,6 +36,16 @@ describe "UNIXSocket#recv_io" do
       io = @server.accept.recv_io(File)
 
       io.should be_kind_of(File)
+    end
+
+    it "uses the optional IO class even if it's a BasicSocket" do
+      path = File.expand_path('../../fixtures/send_io.txt', __FILE__)
+      f = File.open(path)
+
+      @client.send_io(f)
+      io = @server.accept.recv_io(UNIXSocket)
+
+      io.should be_kind_of(UNIXSocket)
     end
   end
 end

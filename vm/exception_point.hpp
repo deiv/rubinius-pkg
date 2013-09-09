@@ -14,11 +14,13 @@ namespace rubinius {
 
   public:
     jmp_buf __jump_buffer;
+    const char* file;
+    int line;
 
   public:
     ExceptionPoint(NativeMethodEnvironment* env);
 
-    bool jumped_to() {
+    bool jumped_to() const {
       return jumped_to_;
     }
 
@@ -36,6 +38,6 @@ namespace rubinius {
   };
 }
 
-#define PLACE_EXCEPTION_POINT(ep) set_jump(ep.__jump_buffer)
+#define PLACE_EXCEPTION_POINT(ep) ep.file = __FILE__; ep.line = __LINE__; set_jump(ep.__jump_buffer)
 
 #endif

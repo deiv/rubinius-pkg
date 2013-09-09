@@ -1,4 +1,4 @@
-#include "ruby.h"
+#include "melbourne.hpp"
 #include "var_table19.hpp"
 
 namespace melbourne {
@@ -24,6 +24,18 @@ namespace melbourne {
       if(tbl) {
         if(tbl->tbl) {
           xfree(tbl->tbl);
+        }
+        xfree(tbl);
+      }
+    }
+
+    void vtable_free_all(struct vtable* tbl) {
+      if(tbl) {
+        if(tbl->tbl) {
+          xfree(tbl->tbl);
+        }
+        if(tbl->prev) {
+          vtable_free_all(tbl->prev);
         }
         xfree(tbl);
       }
@@ -55,8 +67,8 @@ namespace melbourne {
     void local_vars_free(struct local_vars* vars) {
       struct local_vars* prev;
       for(struct local_vars* local = vars; local; local = prev) {
-        if(local->args) xfree(local->args);
-        if(local->vars) xfree(local->vars);
+        if(local->args) vtable_free_all(local->args);
+        if(local->vars) vtable_free_all(local->vars);
         prev = local->prev;
         xfree(local);
       }

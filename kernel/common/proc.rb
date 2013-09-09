@@ -1,10 +1,12 @@
+# -*- encoding: us-ascii -*-
+
 class Proc
 
   def self.__from_block__(env)
     Rubinius.primitive :proc_from_env
 
     if Rubinius::Type.object_kind_of? env, Rubinius::BlockEnvironment
-      raise PrimitiveFailure, "Unable to create Proc from BlockEnvironment"
+      raise PrimitiveFailure, "Proc.__from_block__ primitive failed to create Proc from BlockEnvironment"
     else
       begin
         env.to_proc
@@ -14,13 +16,13 @@ class Proc
     end
   end
 
-  # This works because the VM implements &block using push_proc, which
-  # creates a Proc inside the VM.
   def self.new(*args)
     env = nil
 
     Rubinius.asm do
       push_block
+      # assign a pushed block to the above local variable "env"
+      # Note that "env" is indexed at 1, not 0. "args" is indexed at 0.
       set_local 1
     end
 
@@ -37,7 +39,12 @@ class Proc
 
     block = __from_block__(env)
 
-    Rubinius.asm(block, args) do |b,a|
+    if block.class != self
+      block = block.dup
+      Rubinius::Unsafe.set_class(block, self)
+    end
+
+    Rubinius.asm(block, args) do |b, a|
       run b
       run a
       run b
@@ -47,8 +54,9 @@ class Proc
     return block
   end
 
-  # Expose @block because MRI does. Do not expose @bound_method
   attr_accessor :block
+  attr_accessor :bound_method
+  attr_accessor :ruby_method
 
   def binding
     bind = @block.to_binding
@@ -56,19 +64,22 @@ class Proc
     bind
   end
 
-  def inspect
-    "#<#{self.class}:0x#{self.object_id.to_s(16)}@#{@block.file}:#{@block.line}>"
-  end
-
-  alias_method :to_s, :inspect
-
   def ==(other)
     return false unless other.kind_of? self.class
-    @block == other.block
+
+    if @ruby_method
+      @ruby_method == other.ruby_method
+    elsif @bound_method
+      @bound_method == other.bound_method
+    else
+      @block == other.block
+    end
   end
 
   def arity
-    if @bound_method
+    if @ruby_method
+      return @ruby_method.arity
+    elsif @bound_method
       arity = @bound_method.arity
       return arity < 0 ? -1 : arity
     end
@@ -77,32 +88,44 @@ class Proc
   end
 
   def parameters
-    if @bound_method
+    if @ruby_method
+      return @ruby_method.parameters
+    elsif @bound_method
       return @bound_method.parameters
     end
 
-    code = @block.code
+    code = @block.compiled_code
 
-    return [] unless code.respond_to? :local_names
+    params = []
+
+    return params unless code.respond_to? :local_names
 
     m = code.required_args - code.post_args
     o = m + code.total_args - code.required_args
     p = o + code.post_args
     p += 1 if code.splat
 
-    code.local_names.each_with_index.map do |name, i|
+    required_status = self.lambda? ? :req : :opt
+
+    code.local_names.each_with_index do |name, i|
       if i < m
-        [:req, name]
+        params << [required_status, name]
       elsif i < o
-        [:opt, name]
+        params << [:opt, name]
       elsif code.splat == i
-        [:rest, name]
+        if name == :*
+          params << [:rest]
+        else
+          params << [:rest, name]
+        end
       elsif i < p
-        [:req, name]
-      else
-        [:block, name]
+        params << [required_status, name]
+      elsif code.block_index == i
+        params << [:block, name]
       end
     end
+
+    params
   end
 
 
@@ -113,64 +136,34 @@ class Proc
   alias_method :[], :call
   alias_method :yield, :call
 
-  class Method < Proc
-    attr_accessor :bound_method
+  def clone
+    copy = self.class.__allocate__
+    Rubinius.invoke_primitive :object_copy_object, copy, self
+    Rubinius.invoke_primitive :object_copy_singleton_class, copy, self
 
-    def self.__from_method__(meth)
-      obj = allocate()
-      obj.bound_method = meth
-
-      return obj
+    Rubinius.privately do
+      copy.initialize_copy self
     end
 
-    def __yield__(*args, &block)
-      # do a block style unwrap..
-      if args.size == 1 and args.first.kind_of? Array
-        args = args.first
-      end
+    copy.freeze if frozen?
+    copy
+  end
 
-      @bound_method.call(*args, &block)
+  def dup
+    copy = self.class.__allocate__
+    Rubinius.invoke_primitive :object_copy_object, copy, self
+
+    Rubinius.privately do
+      copy.initialize_copy self
     end
+    copy
+  end
 
-    def call(*args, &block)
-      @bound_method.call(*args, &block)
-    end
-    alias_method :[], :call
-
-    def self.new(meth)
-      if meth.kind_of? ::Method
-        return __from_method__(meth)
-      else
-        raise ArgumentError, "tried to create a Proc::Method object without a Method"
-      end
-    end
-
-    def inspect
-      cm = @bound_method.executable
-      if cm.respond_to? :file
-        if cm.lines
-          line = cm.first_line
-        else
-          line = "-1"
-        end
-        file = cm.file
-      else
-        line = "-1"
-        file = "(unknown)"
-      end
-
-      "#<#{self.class}:0x#{self.object_id.to_s(16)} @ #{file}:#{line}>"
-    end
-
-    alias_method :to_s, :inspect
-
-    def ==(other)
-      return false unless other.kind_of? self.class
-      @bound_method == other.bound_method
-    end
-
-    def arity
-      @bound_method.arity
+  def self.from_method(meth)
+    if meth.kind_of? Method
+      return __from_method__(meth)
+    else
+      raise ArgumentError, "tried to create a Proc object without a Method"
     end
   end
 end

@@ -178,4 +178,25 @@ class TestByteArray : public CxxTest::TestSuite, public VMTest {
     TS_ASSERT_THROWS_ASSERT(a->compare_bytes(state, b, zero, neg), const RubyException &e,
         TS_ASSERT(Exception::object_bounds_exceeded_error_p(state, e.exception)));
   }
+
+  void test_locate() {
+    ByteArray* ba = String::create(state, "xyZfoo\nzyx")->data();
+    Fixnum* size = Fixnum::from(ba->size());
+    Fixnum* zero = Fixnum::from(0);
+    Fixnum* three = Fixnum::from(3);
+    Fixnum* seven = Fixnum::from(7);
+    Fixnum* four = Fixnum::from(4);
+    Fixnum* two = Fixnum::from(2);
+
+    String* foo_nl = String::create(state, "foo\n");
+
+    TS_ASSERT_EQUALS(three, ba->locate(state, String::create(state, ""), three, size));
+    TS_ASSERT_EQUALS(cNil, ba->locate(state, String::create(state, "\n\n"), zero, size));
+    TS_ASSERT_EQUALS(seven, ba->locate(state, String::create(state, "\n"), zero, size));
+    TS_ASSERT_EQUALS(cNil, ba->locate(state, foo_nl, four, size));
+    TS_ASSERT_EQUALS(seven, ba->locate(state, foo_nl, two, size));
+    TS_ASSERT_EQUALS(seven, ba->locate(state, foo_nl, three, size));
+    TS_ASSERT_EQUALS(Fixnum::from(10), ba->locate(state,
+                     String::create(state, "yx"), three, size));
+  }
 };

@@ -23,7 +23,7 @@ namespace config {
     void print(bool desc=false);
     ConfigItem* find(const char* key);
 
-    size_t items_size() {
+    size_t items_size() const {
       return items_.size();
     }
 
@@ -60,6 +60,10 @@ namespace config {
 
       set(val);
       return true;
+    }
+
+    virtual bool integer_p() {
+      return false;
     }
 
     const char* name() const {
@@ -104,6 +108,10 @@ namespace config {
 
     virtual void print_value(std::ostream& stream) {
       stream << value;
+    }
+
+    virtual bool integer_p() {
+      return true;
     }
 
     operator long() const {
@@ -163,7 +171,7 @@ namespace config {
     }
 
     virtual void print_value(std::ostream& stream) {
-      if(value.size() == 0) {
+      if(value.empty()) {
         stream << "\"\"";
       } else {
         stream << value;
@@ -287,8 +295,6 @@ namespace config {
     std::vector<Bool*> sub_bools_;
 
   public:
-    bool value;
-
     BoolSet(Configuration* config, const char* name)
       : Bool(config, name)
     {}

@@ -35,7 +35,7 @@ describe "Array#zip" do
           [3,4].each(&b)
         end
       end.new
-      
+
       [1, 2].zip(obj).should == [[1, 3], [2, 4]]
     end
   end
@@ -50,6 +50,6 @@ describe "Array#zip" do
   end
 
   it "does not return subclass instance on Array subclasses" do
-    ArraySpecs::MyArray[1, 2, 3].zip(["a", "b"]).should be_kind_of(Array)
+    ArraySpecs::MyArray[1, 2, 3].zip(["a", "b"]).should be_an_instance_of(Array)
   end
 end

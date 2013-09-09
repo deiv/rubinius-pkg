@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Kernel
   def equal?(other)
     Rubinius.primitive :object_equal
@@ -33,4 +35,13 @@ module Kernel
 
     __send__ message, *args
   end
+
+  def __id__
+    Rubinius.primitive :object_id
+    raise PrimitiveFailure, "Kernel#__id__ primitive failed"
+  end
+
+  def respond_to?(meth, include_private=false)
+    respond_to_prim?(meth, include_private)
+  end.custom_call_site
 end
