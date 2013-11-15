@@ -27,7 +27,8 @@ CONFIGURE       = \
 	dh $@
 
 override_dh_auto_configure:
-	$(CONFIGURE)
+	# /usr/include/double-conversion/utils.h:299:16: error: typedef ‘VerifySizesAreEqual’ locally defined but not used [-Werror=unused-local-typedefs]	
+	export CXXFLAGS="-Wno-error=unused-local-typedefs" && $(CONFIGURE)
 
 override_dh_auto_build:
 	rake build
