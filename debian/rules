@@ -36,6 +36,10 @@ override_dh_auto_build:
 override_dh_auto_install:
 	DESTDIR=$(DESTDIR) rake install
 
+	for program in $$(find debian/rubinius/usr/bin -not -type d -and -not -name rbx); do \
+		mv $$program $$program-rbx; \
+	done
+
 	# install manpage
 	mkdir -p $(DESTDIR)/usr/share/man/man1
 	pod2man --center "" --release "" --name Rubinius --utf8 debian/rubinius.1.pod $(DESTDIR)/usr/share/man/man1/rbx.1
