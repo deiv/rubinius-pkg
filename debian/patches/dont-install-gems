@@ -1,0 +1,17 @@
+Description: Don't install .gem files
+
+Author: David Suárez <david.sephirot@gmail.com>
+Last-Update: 2013-11-16
+
+--- rubinius-2.0.0+gitb2952297.orig/Rakefile
++++ rubinius-2.0.0+gitb2952297/Rakefile
+@@ -188,7 +188,8 @@ end
+ 
+ # See vm.rake for more information
+ desc "Build Rubinius"
+-task :build => %w[build:build gems:install]
++task :build => %w[build:build] # gems:install]
++
+ 
+ desc "Recompile all ruby system files"
+ task :rebuild => %w[clean build]
