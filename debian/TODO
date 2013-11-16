@@ -1,5 +1,16 @@
 lots of lintian warnings
 
 solve the issue with external libraries in vendor/
-  => some of them are in Debian, we should use them instead
-  => some others do not appear to be in Debian
+  libtommath => doesn't support last debian version (non trivial changes)
+  udi86      => does not appear to be in Debianz
+
+tests:
+  call 'rake spec' from debian/rules
+  one fail;
+    1)  Process::Constants has the correct constant values on Linux FAILED
+    Expected false to be true
+
+others:
+  dpkg-source: warning: ignoring deletion of file web/_includes/instructions.markdown
+  dpkg-source: warning: ignoring deletion of file lib/20/openssl/ext/ossl.c.orig
+
