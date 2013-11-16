@@ -9,6 +9,9 @@ if [ "$1" = 'configure' ]; then
     --slave   /usr/share/man/man1/gem.1.gz    gem.1.gz            /usr/share/man/man/rbx.1.gz \
     #--slave   /etc/bash_completion.d/gem      bash_completion_gem /etc/bash_completion.d/rbx
 
+  update-alternatives \
+    --install /usr/bin/rake                   rake                /usr/bin/rbx 10 \
+    --slave   /usr/share/man/man1/rake.1.gz   rake.1.gz           /usr/share/man/man/rb
 
   update-alternatives \
     --install /usr/bin/ruby                   ruby                /usr/bin/rbx 10 \

@@ -6,6 +6,7 @@ if [ "$1" = "remove" ]; then
   RUBYVER='-rbx'
   update-alternatives --remove gem /usr/bin/rbx
   update-alternatives --remove ruby /usr/bin/rbx
+  update-alternatives --remove rake /usr/bin/rbx
 fi
 
 #DEBHELPER#
