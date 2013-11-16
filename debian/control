@@ -3,7 +3,7 @@ Section: ruby
 Priority: optional
 Maintainer: Antonio Terceiro <terceiro@debian.org>
 DM-Upload-Allowed: yes
-Build-Depends: debhelper (>= 7.0.50~), ruby1.9.1, rake, ruby1.9.1-dev, llvm-3.3-dev
+Build-Depends: debhelper (>= 7.0.50~), ruby1.9.1, rake, ruby1.9.1-dev, llvm-3.3-dev, libffi-dev, libdouble-conversion-dev, zlib1g-dev, libyaml-dev
 Standards-Version: 3.9.2
 Vcs-Git: git://git.debian.org/collab-maint/rubinius.git
 Vcs-Browser: http://git.debian.org/?p=collab-maint/rubinius.git;a=summary
@@ -11,7 +11,7 @@ Homepage: http://rubini.us/
 
 Package: rubinius
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}, ruby-common
+Depends: ${shlibs:Depends}, ${misc:Depends}
 Provides: ruby-interpreter
 Description: implementation of the Ruby programming language
  Rubinius includes a bytecode virtual machine, parser, bytecode compiler,
