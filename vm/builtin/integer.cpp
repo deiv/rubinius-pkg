@@ -6,7 +6,6 @@
 #include "object_utils.hpp"
 #include "ontology.hpp"
 #include "configuration.hpp"
-#include "version.h"
 
 namespace rubinius {
 
@@ -23,11 +22,7 @@ namespace rubinius {
     G(integer)->set_object_type(state, IntegerType);
   }
 
-  native_int Integer::slow_to_native() {
-    if(fixnum_p()) {
-      return (force_as<Fixnum>(this))->to_native();
-    }
-
+  native_int Integer::bignum_to_native() {
     return as<Bignum>(this)->to_native();
   }
 
@@ -345,7 +340,7 @@ return_value:
       if(*str == '_') {
         if(CBOOL(strict)) {
           return nil<Integer>();
-        } else if(!LANGUAGE_18_ENABLED) {
+        } else {
           return Fixnum::from(0);
         }
       }
@@ -360,7 +355,6 @@ return_value:
       str++;
     }
 
-    char chr;
     int detected_base = 0;
     const char* str_start = str;
 
@@ -376,7 +370,7 @@ return_value:
     //
     if(*str == '0') {
       str++;
-      switch(chr = *str++) {
+      switch(*str++) {
       case 'b': case 'B':
         detected_base = 2;
         break;

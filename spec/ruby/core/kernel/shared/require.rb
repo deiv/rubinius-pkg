@@ -618,6 +618,9 @@ describe :kernel_require, :shared => true do
 
         t1 = Thread.new do
           Thread.pass until start
+          # Yes, using sleep for synchronization is broken and wrong. See the
+          # comment above. Alternatively, fix Ruby.
+          sleep 0.1
           @object.require(@path2).should be_true
           ScratchPad.recorded << :t1_post
         end
@@ -726,6 +729,18 @@ describe :kernel_require, :shared => true do
 
           ScratchPad.recorded.should == [:con_pre, :con_pre, :con_post, :t2_post, :t1_post]
         end
+      end
+    end
+
+    ruby_version_is "2.0" do
+      it "stores the missing path in a LoadError object" do
+        path = "abcd1234"
+
+        lambda {
+          @object.send(@method, path)
+        }.should(raise_error(LoadError) { |e|
+          e.path.should == path
+        })
       end
     end
   end

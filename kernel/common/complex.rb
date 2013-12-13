@@ -1,5 +1,3 @@
-# -*- encoding: us-ascii -*-
-
 #
 #   complex.rb -
 #   	$Release Version: 0.5 $
@@ -319,6 +317,8 @@ class Complex < Numeric
     end
     ary
   end
+
+  private :marshal_dump
 
   def marshal_load(ary)
     @real, @imag = ary

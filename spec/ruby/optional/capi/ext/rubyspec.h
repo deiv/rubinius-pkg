@@ -66,6 +66,9 @@
 #define HAVE_RB_ARY_STORE                  1
 #define HAVE_RB_ARY_CONCAT                 1
 #define HAVE_RB_ARY_TO_ARY                 1
+#ifdef RUBY_VERSION_IS_1_9
+#define HAVE_RB_ARY_SUBSEQ                 1
+#endif
 #define HAVE_RB_ARY_TO_S                   1
 #define HAVE_RB_ARY_UNSHIFT                1
 #define HAVE_RB_ASSOC_NEW                  1
@@ -80,6 +83,7 @@
 #define HAVE_RBIGNUM_NEGATIVE_P            1
 #define HAVE_RBIGNUM_POSITIVE_P            1
 #define HAVE_RBIGNUM_SIGN                  1
+#define HAVE_RBIGNUM_LEN                   1
 #define HAVE_RB_BIG2DBL                    1
 #define HAVE_RB_BIG2LL                     1
 #define HAVE_RB_BIG2LONG                   1
@@ -171,6 +175,7 @@
 #define HAVE_RB_MENUMERABLE                1
 #define HAVE_RB_MERRNO                     1
 #define HAVE_RB_MKERNEL                    1
+#define HAVE_RB_CDIR                       1
 
 /* Data */
 #define HAVE_DATA_WRAP_STRUCT              1
@@ -288,7 +293,9 @@
 #define HAVE_RB_RS                         1
 #define HAVE_RB_OUTPUT_RS                  1
 #define HAVE_RB_OUTPUT_FS                  1
+#ifdef RUBY_VERSION_IS_1_8_EX_1_9
 #define HAVE_RB_SET_KCODE                  1
+#endif
 
 #define HAVE_RB_LASTLINE_SET               1
 #define HAVE_RB_LASTLINE_GET               1
@@ -399,14 +406,22 @@
 #define HAVE_RB_INTEGER                    1
 #define HAVE_RB_LL2INUM                    1
 #define HAVE_RB_NUM2DBL                    1
+#if SIZEOF_INT < SIZEOF_LONG
 #define HAVE_RB_NUM2INT                    1
-#define HAVE_RB_NUM2LONG                   1
 #define HAVE_RB_NUM2UINT                   1
+#endif
+#define HAVE_RB_NUM2LONG                   1
 #define HAVE_RB_NUM2ULONG                  1
 #define HAVE_RB_NUM_COERCE_BIN             1
 #define HAVE_RB_NUM_COERCE_CMP             1
 #define HAVE_RB_NUM_COERCE_RELOP           1
 #define HAVE_RB_NUM_ZERODIV                1
+
+/* Fixnum */
+#if SIZEOF_INT < SIZEOF_LONG
+#define HAVE_RB_FIX2UINT                   1
+#define HAVE_RB_FIX2INT                    1
+#endif
 
 /* Object */
 #define HAVE_OBJ_TAINT                     1
@@ -576,6 +591,10 @@
 #define HAVE_RB_TIME_NEW                   1
 #ifdef RUBY_VERSION_IS_1_9
 #define HAVE_RB_TIME_NANO_NEW              1
+#define HAVE_RB_TIME_NUM_NEW               1
+#define HAVE_RB_TIME_INTERVAL              1
+#define HAVE_RB_TIME_TIMEVAL               1
+#define HAVE_RB_TIME_TIMESPEC              1
 #endif
 
 /* Util */

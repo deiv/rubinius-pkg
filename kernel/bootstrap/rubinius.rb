@@ -1,5 +1,3 @@
-# -*- encoding: us-ascii -*-
-
 module Rubinius
   def self.watch_signal(sig, ignored)
     Rubinius.primitive :vm_watch_signal
@@ -88,16 +86,6 @@ module Rubinius
     end
   end
 
-  def self.kcode=(str)
-    Rubinius.primitive :vm_set_kcode
-    raise PrimitiveFailure, "Rubinius.kcode= primitive failed"
-  end
-
-  def self.kcode
-    Rubinius.primitive :vm_get_kcode
-    raise PrimitiveFailure, "Rubinius.kcode primitive failed"
-  end
-
   def self.get_user_home(name)
     Rubinius.primitive :vm_get_user_home
     raise PrimitiveFailure, "Rubinius.get_user_home primitive failed"
@@ -155,21 +143,6 @@ module Rubinius
   def self.memory_barrier
     Rubinius.primitive :vm_memory_barrier
     raise PrimitiveFailure, "Rubinius.memory_barrier primitive failed"
-  end
-
-  def self.ruby18?
-    Rubinius.primitive :vm_ruby18_p
-    raise PrimitiveFailure, "Rubinius.ruby18? primitive failed"
-  end
-
-  def self.ruby19?
-    Rubinius.primitive :vm_ruby19_p
-    raise PrimitiveFailure, "Rubinius.ruby19? primitive failed"
-  end
-
-  def self.ruby20?
-    Rubinius.primitive :vm_ruby20_p
-    raise PrimitiveFailure, "Rubinius.ruby20? primitive failed"
   end
 
   def self.windows?

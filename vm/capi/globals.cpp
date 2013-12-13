@@ -3,10 +3,10 @@
 #include "builtin/regexp.hpp"
 #include "builtin/string.hpp"
 #include "builtin/symbol.hpp"
-#include "objectmemory.hpp"
+#include "object_memory.hpp"
 
 #include "capi/capi.hpp"
-#include "capi/18/include/ruby.h"
+#include "capi/ruby.h"
 
 using namespace rubinius;
 using namespace rubinius::capi;
@@ -119,11 +119,5 @@ extern "C" {
     VALUE Globals = rb_const_get(rb_mRubinius, rb_intern("Globals"));
     NativeMethodEnvironment* env = NativeMethodEnvironment::get();
     rb_funcall(Globals, rb_intern("read_only"), 1, env->get_handle(prefixed_by(env->state(), '$', rb_intern(name))));
-  }
-
-  void rb_set_kcode(const char *code) {
-    NativeMethodEnvironment* env = NativeMethodEnvironment::get();
-
-    System::vm_set_kcode(env->state(), String::create(env->state(), code));
   }
 }

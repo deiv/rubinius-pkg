@@ -4,11 +4,11 @@
 #include "builtin/array.hpp"
 #include "builtin/fixnum.hpp"
 #include "builtin/io.hpp"
-#include "objectmemory.hpp"
+#include "object_memory.hpp"
 #include "primitives.hpp"
 
 #include "capi/capi.hpp"
-#include "capi/18/include/ruby.h"
+#include "capi/ruby.h"
 
 #include "windows_compat.h"
 

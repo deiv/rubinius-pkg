@@ -1,5 +1,3 @@
-# -*- encoding: us-ascii -*-
-
 class Array
   attr_accessor :total
   attr_accessor :tuple
@@ -70,6 +68,28 @@ class Array
     end
 
     self
+  end
+
+  # Creates a new Array from the return values of passing
+  # each element in self to the supplied block.
+  def map
+    return to_enum :map unless block_given?
+    out = Array.new size
+
+    i = @start
+    total = i + @total
+    tuple = @tuple
+
+    out_tuple = out.tuple
+
+    j = 0
+    while i < total
+      out_tuple[j] = yield tuple.at(i)
+      i += 1
+      j += 1
+    end
+
+    out
   end
 
   # Replaces each element in self with the return value

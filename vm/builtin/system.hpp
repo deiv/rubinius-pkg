@@ -283,12 +283,6 @@ namespace rubinius {
     // Rubinius.primitive :vm_find_object
     static Object* vm_find_object(STATE, GCToken gct, Array* arg, Object* callable, CallFrame* calling_environment);
 
-    // Rubinius.primitive :vm_set_kcode
-    static Object* vm_set_kcode(STATE, String* what);
-
-    // Rubinius.primitive :vm_get_kcode
-    static Symbol* vm_get_kcode(STATE);
-
     // Rubinius.primitive :vm_const_defined
     static Object* vm_const_defined(STATE, Symbol* sym, CallFrame* calling_environment);
 
@@ -336,15 +330,6 @@ namespace rubinius {
 
     // Rubinius.primitive+ :vm_memory_barrier
     static Object* vm_memory_barrier(STATE);
-
-    // Rubinius.primitive+ :vm_ruby18_p
-    static Object* vm_ruby18_p(STATE);
-
-    // Rubinius.primitive+ :vm_ruby19_p
-    static Object* vm_ruby19_p(STATE);
-
-    // Rubinius.primitive+ :vm_ruby20_p
-    static Object* vm_ruby20_p(STATE);
 
     // Rubinius.primitive+ :vm_windows_p
     static Object* vm_windows_p(STATE);

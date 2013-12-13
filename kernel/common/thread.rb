@@ -1,5 +1,3 @@
-# -*- encoding: us-ascii -*-
-
 #--
 # Be very careful about calling raise in here! Thread has its own
 # raise which, if you're calling raise, you probably don't want. Use
@@ -7,6 +5,11 @@
 #++
 
 class Thread
+  MUTEX_FOR_THREAD_EXCLUSIVE = Mutex.new
+
+  def self.exclusive
+    MUTEX_FOR_THREAD_EXCLUSIVE.synchronize { yield }
+  end
 
   attr_reader :recursive_objects
 

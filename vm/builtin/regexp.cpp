@@ -3,12 +3,12 @@
 
 #include "arguments.hpp"
 #include "builtin/block_environment.hpp"
-#include "builtin/bytearray.hpp"
+#include "builtin/byte_array.hpp"
 #include "builtin/class.hpp"
 #include "builtin/encoding.hpp"
 #include "builtin/exception.hpp"
 #include "builtin/integer.hpp"
-#include "builtin/lookuptable.hpp"
+#include "builtin/lookup_table.hpp"
 #include "builtin/proc.hpp"
 #include "builtin/regexp.hpp"
 #include "builtin/string.hpp"
@@ -18,9 +18,8 @@
 #include "call_frame.hpp"
 #include "configuration.hpp"
 #include "object_utils.hpp"
-#include "objectmemory.hpp"
+#include "object_memory.hpp"
 #include "ontology.hpp"
-#include "version.h"
 
 #define OPTION_IGNORECASE         ONIG_OPTION_IGNORECASE
 #define OPTION_EXTENDED           ONIG_OPTION_EXTEND
@@ -61,36 +60,6 @@ namespace rubinius {
   Encoding* Regexp::encoding(STATE, Encoding* enc) {
     source_->encoding(state, enc);
     return enc;
-  }
-
-  static OnigEncoding get_enc_from_kcode(int kcode) {
-    OnigEncoding r;
-
-    r = ONIG_ENCODING_ASCII;
-    switch (kcode) {
-      case KCODE_NONE:
-        r = ONIG_ENCODING_ASCII;
-        break;
-      case KCODE_EUC:
-        r = ONIG_ENCODING_EUC_JP;
-        break;
-      case KCODE_SJIS:
-        r = ONIG_ENCODING_Shift_JIS;
-        break;
-      case KCODE_UTF8:
-        r = ONIG_ENCODING_UTF_8;
-        break;
-    }
-    return r;
-  }
-
-  int get_kcode_from_enc(OnigEncoding enc) {
-    int r = 0;
-    if(enc == ONIG_ENCODING_ASCII)       r = KCODE_NONE;
-    if(enc == ONIG_ENCODING_EUC_JP)      r = KCODE_EUC;
-    if(enc == ONIG_ENCODING_Shift_JIS)   r = KCODE_SJIS;
-    if(enc == ONIG_ENCODING_UTF_8)       r = KCODE_UTF8;
-    return r;
   }
 
   struct _gather_data {
@@ -217,7 +186,7 @@ namespace rubinius {
 
     if(fixed_encoding_) return onig_source_data(state);
 
-    Encoding* string_enc = string->get_encoding_kcode_fallback(state);
+    Encoding* string_enc = string->encoding(state);
     regex_t* onig_encoded = onig_data_encoded(state, string_enc);
 
     if(onig_encoded) return onig_encoded;
@@ -273,54 +242,38 @@ namespace rubinius {
     OnigOptionType opts = options->to_native();
     Encoding* original_enc = pattern->encoding(state);
 
-    if(LANGUAGE_18_ENABLED) {
-      int kcode = opts & KCODE_MASK;
+    fixed_encoding_ = opts & OPTION_FIXEDENCODING;
+    no_encoding_    = opts & OPTION_NOENCODING;
 
-      pat = (UChar*)pattern->byte_address();
-      end = pat + pattern->byte_size();
+    Encoding* source_enc = original_enc;
 
-      if(kcode == 0) {
-        enc = pattern->get_encoding_kcode_fallback(state)->get_encoding();
-      } else {
-        // Don't attempt to fix the encoding later, it's been specified by the
-        // user.
-        enc = get_enc_from_kcode(kcode);
-        fixed_encoding_ = true;
-      }
-    } else {
-      fixed_encoding_ = opts & OPTION_FIXEDENCODING;
-      no_encoding_    = opts & OPTION_NOENCODING;
-
-      Encoding* source_enc = original_enc;
-
-      switch(opts & KCODE_MASK) {
-      case KCODE_NONE:
-        no_encoding_ = true;
-        break;
-      case KCODE_EUC:
-        source_enc = Encoding::find(state, "EUC-JP");
-        fixed_encoding_ = true;
-        break;
-      case KCODE_SJIS:
-        source_enc = Encoding::find(state, "Windows-31J");
-        fixed_encoding_ = true;
-        break;
-      case KCODE_UTF8:
-        source_enc = Encoding::utf8_encoding(state);
-        fixed_encoding_ = true;
-        break;
-      }
-
-      if(no_encoding_) source_enc = 0;
-      String* converted = pattern->convert_escaped(state, source_enc, fixed_encoding_);
-
-      pat = (UChar*)converted->byte_address();
-      end = pat + converted->byte_size();
-      enc = source_enc->get_encoding();
-
-      pattern = pattern->string_dup(state);
-      pattern->encoding(state, source_enc);
+    switch(opts & KCODE_MASK) {
+    case KCODE_NONE:
+      no_encoding_ = true;
+      break;
+    case KCODE_EUC:
+      source_enc = Encoding::find(state, "EUC-JP");
+      fixed_encoding_ = true;
+      break;
+    case KCODE_SJIS:
+      source_enc = Encoding::find(state, "Windows-31J");
+      fixed_encoding_ = true;
+      break;
+    case KCODE_UTF8:
+      source_enc = Encoding::utf8_encoding(state);
+      fixed_encoding_ = true;
+      break;
     }
+
+    if(no_encoding_) source_enc = 0;
+    String* converted = pattern->convert_escaped(state, source_enc, fixed_encoding_);
+
+    pat = (UChar*)converted->byte_address();
+    end = pat + converted->byte_size();
+    enc = source_enc->get_encoding();
+
+    pattern = pattern->string_dup(state);
+    pattern->encoding(state, source_enc);
 
     regex_t* reg;
 
@@ -378,17 +331,12 @@ namespace rubinius {
 
     int result = ((int)onig_get_options(onig_source_data(state)) & OPTION_MASK);
 
-    if(LANGUAGE_18_ENABLED) {
-      if(fixed_encoding_) {
-        result |= get_kcode_from_enc(onig_get_encoding(onig_source_data(state)));
-      }
-    } else {
-      if(fixed_encoding_) {
-        result |= OPTION_FIXEDENCODING;
-      }
-      if(no_encoding_) {
-        result |= OPTION_NOENCODING;
-      }
+    if(fixed_encoding_) {
+      result |= OPTION_FIXEDENCODING;
+    }
+
+    if(no_encoding_) {
+      result |= OPTION_NOENCODING;
     }
 
     return Fixnum::from(result);
@@ -457,7 +405,7 @@ namespace rubinius {
       Exception::argument_error(state, "Not properly initialized Regexp");
     }
 
-    if(unlikely(!LANGUAGE_18_ENABLED && !CBOOL(string->valid_encoding_p(state)))) {
+    if(unlikely(!CBOOL(string->valid_encoding_p(state)))) {
       std::ostringstream msg;
       msg << "invalid byte sequence in " << string->encoding(state)->name()->to_string(state);
       Exception::argument_error(state, msg.str().c_str());
@@ -542,7 +490,7 @@ namespace rubinius {
       Exception::argument_error(state, "Not properly initialized Regexp");
     }
 
-    if(unlikely(!LANGUAGE_18_ENABLED && !CBOOL(string->valid_encoding_p(state)))) {
+    if(unlikely(!CBOOL(string->valid_encoding_p(state)))) {
       std::ostringstream msg;
       msg << "invalid byte sequence in " << string->encoding(state)->name()->to_string(state);
       Exception::argument_error(state, msg.str().c_str());
@@ -615,7 +563,7 @@ namespace rubinius {
       Exception::argument_error(state, "Not properly initialized Regexp");
     }
 
-    if(unlikely(!LANGUAGE_18_ENABLED && !CBOOL(string->valid_encoding_p(state)))) {
+    if(unlikely(!CBOOL(string->valid_encoding_p(state)))) {
       std::ostringstream msg;
       msg << "invalid byte sequence in " << string->encoding(state)->name()->to_string(state);
       Exception::argument_error(state, msg.str().c_str());
@@ -846,9 +794,7 @@ namespace rubinius {
 
   Object* Regexp::propagate_last_match(STATE, CallFrame* call_frame) {
     Object* obj = call_frame->last_match(state);
-    if(CBOOL(obj)) {
-      Regexp::set_last_match(state, obj, call_frame);
-    }
+    Regexp::set_last_match(state, obj, call_frame);
     return obj;
   }
 

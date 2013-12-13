@@ -3,15 +3,15 @@
 #include "builtin/bignum.hpp"
 #include "builtin/call_site.hpp"
 #include "builtin/class.hpp"
-#include "builtin/compactlookuptable.hpp"
+#include "builtin/compact_lookup_table.hpp"
 #include "builtin/constant_table.hpp"
 #include "builtin/encoding.hpp"
 #include "builtin/exception.hpp"
 #include "builtin/fixnum.hpp"
 #include "builtin/float.hpp"
 #include "builtin/location.hpp"
-#include "builtin/lookuptable.hpp"
-#include "builtin/methodtable.hpp"
+#include "builtin/lookup_table.hpp"
+#include "builtin/method_table.hpp"
 #include "builtin/object.hpp"
 #include "builtin/packed_object.hpp"
 #include "builtin/respond_to_cache.hpp"
@@ -23,10 +23,9 @@
 #include "dispatch.hpp"
 #include "global_cache.hpp"
 #include "lookup_data.hpp"
-#include "objectmemory.hpp"
+#include "object_memory.hpp"
 #include "object_utils.hpp"
 #include "on_stack.hpp"
-#include "version.h"
 
 #include <sstream>
 
@@ -152,7 +151,7 @@ namespace rubinius {
   Object* Object::freeze(STATE) {
     if(reference_p()) {
       set_frozen();
-    } else if(!LANGUAGE_18_ENABLED) {
+    } else {
       LookupTable* tbl = try_as<LookupTable>(G(external_ivars)->fetch(state, this));
 
       if(!tbl) {
@@ -168,7 +167,11 @@ namespace rubinius {
   Object* Object::frozen_p(STATE) {
     if(reference_p()) {
       return RBOOL(is_frozen_p());
-    } else if(!LANGUAGE_18_ENABLED) {
+    } else if(try_as<Symbol>(this)) {
+      return cTrue;
+    } else if(try_as<Fixnum>(this)) {
+      return cTrue;
+    } else {
       LookupTable* tbl = try_as<LookupTable>(G(external_ivars)->fetch(state, this));
       return RBOOL(tbl && tbl->is_frozen_p());
     }
@@ -177,12 +180,7 @@ namespace rubinius {
 
   void Object::check_frozen(STATE) {
     if(CBOOL(frozen_p(state))) {
-      const char* reason = "can't modify frozen object";
-      if(LANGUAGE_18_ENABLED) {
-        Exception::type_error(state, reason);
-      } else {
-        Exception::runtime_error(state, reason);
-      }
+      Exception::frozen_error(state, this);
     }
   }
 
@@ -424,10 +422,8 @@ namespace rubinius {
       other->taint(state);
     }
 
-    if(!LANGUAGE_18_ENABLED) {
-      if(is_untrusted_p()) {
-        other->untrust(state);
-      }
+    if(is_untrusted_p()) {
+      other->untrust(state);
     }
   }
 
@@ -551,7 +547,11 @@ namespace rubinius {
     // source, not this object to have correct visibility checks
     // for protected.
     Dispatch dis(sym);
-    LookupData lookup(call_frame->self(), this->lookup_begin(state), min_visibility);
+    Object* scope = this;
+    if(!call_frame->native_method_p()) {
+      scope = call_frame->self();
+    }
+    LookupData lookup(scope, this->lookup_begin(state), min_visibility);
 
     return dis.send(state, call_frame, lookup, args);
   }
@@ -836,7 +836,7 @@ namespace rubinius {
     Object* responds = respond_to(state, name, priv);
     Object* self = this;
 
-    if(!CBOOL(responds) && !LANGUAGE_18_ENABLED) {
+    if(!CBOOL(responds)) {
       LookupData lookup(self, self->lookup_begin(state), G(sym_private));
       Symbol* missing = G(sym_respond_to_missing);
       Dispatch dis(missing);
