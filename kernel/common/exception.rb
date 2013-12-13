@@ -1,5 +1,3 @@
-# -*- encoding: us-ascii -*-
-
 class Exception
 
   attr_accessor :locations
@@ -10,6 +8,20 @@ class Exception
     @locations = nil
     @backtrace = nil
     @custom_backtrace = nil
+  end
+
+  def ==(other)
+    other.instance_of?(__class__) &&
+      message == other.message &&
+      backtrace == other.backtrace
+  end
+
+  def to_s
+    if @reason_message
+      @reason_message.to_s
+    else
+      self.class.to_s
+    end
   end
 
   # This is here rather than in yaml.rb because it contains "private"
@@ -53,6 +65,7 @@ class Exception
     message_lines = message.to_s.split("\n")
 
     io.puts header
+    io.puts
     io.puts "    #{message_lines.shift} (#{self.class})"
 
     message_lines.each do |line|
@@ -61,12 +74,14 @@ class Exception
 
     if @custom_backtrace
       io.puts "\nUser defined backtrace:"
+      io.puts
       @custom_backtrace.each do |line|
         io.puts "    #{line}"
       end
     end
 
     io.puts "\nBacktrace:"
+    io.puts
     io.puts awesome_backtrace.show("\n", color)
 
     extra = @parent
@@ -75,12 +90,14 @@ class Exception
 
       if @custom_backtrace
         io.puts "\nUser defined backtrace:"
+        io.puts
         @custom_backtrace.each do |line|
           io.puts "    #{line}"
         end
       end
 
       io.puts "\nBacktrace:"
+      io.puts
       io.puts extra.awesome_backtrace.show
 
       extra = extra.parent
@@ -96,7 +113,21 @@ class Exception
       if hidden_bt = Rubinius::Backtrace.detect_backtrace(bt)
         @backtrace = hidden_bt
       else
-        @custom_backtrace = bt
+        type_error = TypeError.new "backtrace must be Array of String"
+        case bt
+        when Array
+          if bt.all? { |s| s.kind_of? String }
+            @custom_backtrace = bt
+          else
+            raise type_error
+          end
+        when String
+          @custom_backtrace = [bt]
+        when nil
+          @custom_backtrace = nil
+        else
+          raise type_error
+        end
       end
     end
   end
@@ -238,6 +269,8 @@ class RegexpError < StandardError
 end
 
 class LoadError < ScriptError
+  attr_accessor :path
+
   class InvalidExtensionError < LoadError
   end
 
@@ -403,6 +436,50 @@ class SystemCallError < StandardError
     msg << " - #{StringValue(message)}" if message
     super(msg)
   end
+end
+
+class KeyError < IndexError
+end
+
+class SignalException < Exception
+
+  attr_reader :signo
+  attr_reader :signm
+
+  def initialize(signo = nil, signm = nil)
+    # MRI overrides this behavior just for SignalException itself
+    # but not for anything that inherits from it, therefore we
+    # need this ugly check to make sure it works as intented.
+    return super(signo) unless self.class == SignalException
+    if signo.is_a? Integer
+      unless @signm = Signal::Numbers[signo]
+        raise ArgumentError, "invalid signal number #{signo}"
+      end
+      @signo = signo
+      @signm = signm || "SIG#{@signm}"
+    elsif signo
+      if signm
+        raise ArgumentError, "wrong number of arguments (2 for 1)"
+      end
+      signm = signo
+      if signo.kind_of?(Symbol)
+        signm = signm.to_s
+      else
+        signm = StringValue(signm)
+      end
+      signm = signm[3..-1] if signm.prefix? "SIG"
+      unless @signo = Signal::Names[signm]
+        raise ArgumentError, "invalid signal name #{signm}"
+      end
+      @signm = "SIG#{signm}"
+    end
+    super(@signm)
+  end
+end
+
+class StopIteration
+  attr_accessor :result
+  private :result=
 end
 
 ##

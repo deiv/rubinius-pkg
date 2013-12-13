@@ -1,5 +1,3 @@
-# -*- encoding: us-ascii -*-
-
 ##
 # Mixin used to identify classes which have no memory storage.
 
@@ -22,14 +20,6 @@ module ImmediateValue
     []
   end
   private :protected_singleton_methods
-
-  def taint
-    self
-  end
-
-  def tainted?
-    false
-  end
 
   def dup
     raise TypeError, "can't dup #{self.class.name}"

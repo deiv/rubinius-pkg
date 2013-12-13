@@ -1,20 +1,20 @@
 // TODO: resolve after importing Oniguruma from MRI
 #include <stddef.h>
-#include "capi/19/include/ruby/oniguruma.h"
-#include "capi/19/include/ruby/transcoder.h"
-#include "capi/19/include/ruby/regenc.h"
+#include "oniguruma.h"
+#include "transcoder.h"
+#include "regenc.h"
 
 #include "builtin/array.hpp"
 #include "builtin/encoding.hpp"
-#include "builtin/nativemethod.hpp"
+#include "builtin/native_method.hpp"
 #include "builtin/regexp.hpp"
 #include "builtin/string.hpp"
 #include "builtin/symbol.hpp"
 
 #include "capi/capi.hpp"
 
-#include "capi/19/include/ruby/ruby.h"
-#include "capi/19/include/ruby/encoding.h"
+#include "capi/ruby.h"
+#include "capi/ruby/encoding.h"
 
 using namespace rubinius;
 using namespace rubinius::capi;

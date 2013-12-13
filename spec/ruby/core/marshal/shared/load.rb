@@ -213,20 +213,51 @@ describe :marshal_load, :shared => true do
     y.tainted?.should be_false
   end
 
-  it "returns a tainted object if source is tainted" do
-    x = Object.new
-    x.taint
-    s = Marshal.dump(x)
-    y = Marshal.send(@method, s)
-    y.tainted?.should be_true
+  describe "when source is tainted" do
+    it "returns a tainted object" do
+      x = Object.new
+      x.taint
+      s = Marshal.dump(x)
+      y = Marshal.send(@method, s)
+      y.tainted?.should be_true
 
-    # note that round-trip via Marshal does not preserve
-    # the taintedness at each level of the nested structure
-    y = Marshal.send(@method, Marshal.dump([[x]]))
-    y.tainted?.should be_true
-    y.first.tainted?.should be_true
-    y.first.first.tainted?.should be_true
+      # note that round-trip via Marshal does not preserve
+      # the taintedness at each level of the nested structure
+      y = Marshal.send(@method, Marshal.dump([[x]]))
+      y.tainted?.should be_true
+      y.first.tainted?.should be_true
+      y.first.first.tainted?.should be_true
+    end
 
+    ruby_version_is "2.1" do
+      it "does not taint Symbols" do
+        x = [:x]
+        y = Marshal.send(@method, Marshal.dump(x).taint)
+        y.tainted?.should be_true
+        y.first.tainted?.should be_false
+      end
+
+      it "does not taint Fixnums" do
+        x = [1]
+        y = Marshal.send(@method, Marshal.dump(x).taint)
+        y.tainted?.should be_true
+        y.first.tainted?.should be_false
+      end
+
+      it "does not taint Bignums" do
+        x = [bignum_value]
+        y = Marshal.send(@method, Marshal.dump(x).taint)
+        y.tainted?.should be_true
+        y.first.tainted?.should be_false
+      end
+
+      it "does not taint Floats" do
+        x = [1.2]
+        y = Marshal.send(@method, Marshal.dump(x).taint)
+        y.tainted?.should be_true
+        y.first.tainted?.should be_false
+      end
+    end
   end
 
   it "preserves taintedness of nested structure" do
@@ -379,7 +410,7 @@ describe :marshal_load, :shared => true do
       end
 
       it "loads a String as ASCII-8BIT if no encoding is specified at the end" do
-        str = "\xC3\xB8"
+        str = "\xC3\xB8".force_encoding("ASCII-8BIT")
         data = "\x04\b\"\a\xC3\xB8".force_encoding("UTF-8")
         result = Marshal.load(data)
         result.encoding.should == Encoding::ASCII_8BIT
@@ -675,12 +706,24 @@ describe :marshal_load, :shared => true do
       Marshal.load(Marshal.dump(t)).instance_variable_get(:@foo).should == 'bar'
     end
 
+    it "loads Time objects stored as links" do
+      t = Time.new
+
+      t1, t2 = Marshal.load(Marshal.dump([t, t]))
+      t1.should equal t2
+    end
+
     ruby_version_is "2.0" do
       it "loads the zone" do
         with_timezone 'AST', 3 do
           t = Time.local(2012, 1, 1)
           Marshal.load(Marshal.dump(t)).zone.should == t.zone
         end
+      end
+
+      it "loads nanoseconds" do
+        t = Time.now
+        Marshal.load(Marshal.dump(t)).nsec.should == t.nsec
       end
     end
   end

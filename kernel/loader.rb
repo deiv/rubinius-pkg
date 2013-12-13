@@ -1,9 +1,4 @@
-# -*- encoding: us-ascii -*-
-
 TOPLEVEL_BINDING = binding()
-
-# Default kcode
-Rubinius.kcode = "ASCII"
 
 module Rubinius
   class Loader
@@ -15,7 +10,7 @@ module Rubinius
       @evals        = []
       @script       = nil
       @debugging    = false
-      @run_irb      = true
+      @repl         = true
       @printed_version = false
       @input_loop   = false
       @input_loop_print = false
@@ -23,8 +18,8 @@ module Rubinius
       @simple_options = false
       @early_option_stop = false
       @check_syntax = false
-
-      @enable_gems = !Rubinius.ruby18?
+      @load_profiler = false
+      @enable_gems = true
       @load_gemfile = false
 
       version = RUBY_VERSION.split(".").first(2).join(".")
@@ -59,15 +54,15 @@ module Rubinius
       @stage = "setting up system load path"
 
       @main_lib = Rubinius::LIB_PATH
-
       @main_lib_bin = File.join @main_lib, "bin"
-      Rubinius.const_set :PARSER_EXT_PATH, "#{@main_lib}/ext/melbourne/rbx/melbourne20"
 
       # This conforms more closely to MRI. It is necessary to support
       # paths that mkmf adds when compiling and installing native exts.
       additions = [
+        Rubinius::SITE_PATH,
+        "#{Rubinius::SITE_PATH}/#{RUBY_VERSION}",
+        "#{Rubinius::SITE_PATH}/#{Rubinius::CPU}-#{Rubinius::OS}",
         Rubinius::VENDOR_PATH,
-        "#{@main_lib}/#{Rubinius::RUBY_LIB_VERSION}",
         @main_lib,
       ]
       additions.uniq!
@@ -241,7 +236,7 @@ module Rubinius
 
       options.doc "\nRuby options"
       options.on "-", "Read and evaluate code from STDIN" do
-        @run_irb = false
+        @repl = false
         set_program_name "-"
         stdin = STDIN.dup
         script = STDIN.read
@@ -260,7 +255,7 @@ module Rubinius
       end
 
       options.on "-c", "Only check the syntax" do
-        @run_irb = false
+        @repl = false
         @check_syntax = true
       end
 
@@ -273,14 +268,12 @@ module Rubinius
         $DEBUG = true
       end
 
-      unless Rubinius.ruby18?
-        options.on "--disable-gems", "Do not automatically load rubygems on startup" do
-          @enable_gems = false
-        end
+      options.on "--disable-gems", "Do not automatically load rubygems on startup" do
+        @enable_gems = false
       end
 
       options.on "-e", "CODE", "Compile and execute CODE" do |code|
-        @run_irb = false
+        @repl = false
         set_program_name "(eval)"
         @evals << code
       end
@@ -294,7 +287,7 @@ module Rubinius
       end
 
       options.on "-h", "--help", "Display this help" do
-        @run_irb = false
+        @repl = false
         puts options
         done
       end
@@ -309,32 +302,15 @@ module Rubinius
         @load_paths << dir
       end
 
-      if Rubinius.ruby18?
-        options.on "-K", "[code]", "Set $KCODE" do |k|
-          case k
-          when 'a', 'A', 'n', 'N', nil
-            $KCODE = "NONE"
-          when 'e', 'E'
-            $KCODE = "EUC"
-          when 's', 'S'
-            $KCODE = "SJIS"
-          when 'u', 'U'
-            $KCODE = "UTF8"
-          else
-            $KCODE = "NONE"
-          end
-        end
-      else
-        options.on "-K", "Ignored $KCODE option for compatibility"
-        options.on "-U", "Set Encoding.default_internal to UTF-8" do
-          set_default_internal_encoding('UTF-8')
-        end
+      options.on "-K", "Ignored $KCODE option for compatibility"
+      options.on "-U", "Set Encoding.default_internal to UTF-8" do
+        set_default_internal_encoding('UTF-8')
+      end
 
-        options.on "-E", "ENC", "Set external:internal character encoding to ENC" do |enc|
-          ext, int = enc.split(":")
-          Encoding.default_external = ext if ext and !ext.empty?
-          set_default_internal_encoding(int) if int and !int.empty?
-        end
+      options.on "-E", "ENC", "Set external:internal character encoding to ENC" do |enc|
+        ext, int = enc.split(":")
+        Encoding.default_external = ext if ext and !ext.empty?
+        set_default_internal_encoding(int) if int and !int.empty?
       end
 
       options.on "-n", "Wrap running code in 'while(gets()) ...'" do
@@ -360,7 +336,7 @@ module Rubinius
       options.on("-S", "SCRIPT",
                  "Run SCRIPT using PATH environment variable to find it") do |script|
         options.stop_parsing
-        @run_irb = false
+        @repl = false
 
         # Load a gemfile now if we need to so that -S can see binstubs
         # internal to the Gemfile
@@ -389,7 +365,7 @@ module Rubinius
       end
 
       options.on "-v", "Display the version and set $VERBOSE to true" do
-        @run_irb = false
+        @repl = false
         $VERBOSE = true
 
         unless @printed_version
@@ -419,7 +395,7 @@ module Rubinius
       end
 
       options.on "--version", "Display the version" do
-        @run_irb = false
+        @repl = false
         puts Rubinius.version
       end
 
@@ -482,7 +458,7 @@ VM Options
       end
 
       if Rubinius::Config['profile'] || Rubinius::Config['jit.profile']
-        require 'profile'
+        @load_profiler = true
       end
 
       if @check_syntax
@@ -545,6 +521,22 @@ VM Options
       end
     end
 
+    def run_compiled
+      return unless ENV["RBX_RUN_COMPILED"]
+
+      begin
+        ARGV.each do |script|
+          CodeLoader.require_compiled script
+        end
+      rescue Object => e
+        STDERR.puts "Unable to run compiled file: #{script}"
+        e.render
+        exit 1
+      end
+
+      exit 0
+    end
+
     def load_compiler
       @stage = "loading the compiler"
 
@@ -578,17 +570,24 @@ to rebuild the compiler.
     def rubygems
       @stage = "loading Rubygems"
 
-      require "rubygems" if @enable_gems
+      CodeLoader.load_rubygems if @enable_gems
     end
 
     def gemfile
       @stage = "loading Gemfile"
 
       if @load_gemfile
-        require 'rubygems'
+        CodeLoader.load_rubygems
         require 'bundler/setup'
         @load_gemfile = false
       end
+    end
+
+    def profiler
+      return unless @load_profiler
+      @stage = "loading profiler"
+
+      require 'profile'
     end
 
     # Require any -r arguments
@@ -602,8 +601,10 @@ to rebuild the compiler.
     def evals
       return if @evals.empty?
 
-      @run_irb = false
+      @repl = false
       @stage = "evaluating command line code"
+
+      Dir.chdir(@directory) if @directory
 
       if @input_loop
         while gets
@@ -620,7 +621,7 @@ to rebuild the compiler.
     def script
       return unless @script and @evals.empty?
 
-      @run_irb = false
+      @repl = false
 
       handle_simple_options(ARGV) if @simple_options
 
@@ -650,16 +651,7 @@ to rebuild the compiler.
 
     #Check Ruby syntax of source
     def check_syntax
-      case
-      when Rubinius.ruby18?
-        parser = Rubinius::Melbourne
-      when Rubinius.ruby19?
-        parser = Rubinius::Melbourne19
-      when Rubinius.ruby20?
-        parser = Rubinius::Melbourne20
-      else
-        raise "no parser available for this ruby version"
-      end
+      parser = Rubinius::ToolSet::Runtime::Melbourne
 
       if @script
         if File.exists?(@script)
@@ -696,26 +688,16 @@ to rebuild the compiler.
     end
 
     # Run IRB unless we were passed -e, -S arguments or a script to run.
-    def irb
-      return unless @run_irb
+    def repl
+      return unless @repl
 
       @stage = "running IRB"
 
+      # Check if a different REPL is set.
+      repl = ENV["RBX_REPL"] || "irb"
+
       if Terminal
-        repr = ENV['RBX_REPR'] || "bin/irb"
-        set_program_name repr
-        prog = File.join @main_lib, repr
-        begin
-          # HACK: this was load but load raises LoadError
-          # with prog == "lib/bin/irb". However, require works.
-          # Investigate when we have specs running.
-          require prog
-        rescue LoadError => e
-          STDERR.puts "Unable to load REPL named '#{repr}'"
-          STDERR.puts e.message
-          puts e.awesome_backtrace.show
-          exit 1
-        end
+        load File.join(Rubinius::GEMS_PATH, "bin", repl)
       else
         set_program_name "(eval)"
         CodeLoader.execute_script "p #{STDIN.read}"
@@ -834,18 +816,20 @@ to rebuild the compiler.
       preamble
       system_load_path
       signals
+      run_compiled
       load_compiler
       preload
       detect_alias
       options
       load_paths
-      debugger
       rubygems
       gemfile
+      debugger
+      profiler
       requires
       evals
       script
-      irb
+      repl
 
     rescue SystemExit => e
       @exit_code = e.status
@@ -857,13 +841,14 @@ to rebuild the compiler.
       show_syntax_error(e)
 
       STDERR.puts "\nBacktrace:"
+      STDERR.puts
       STDERR.puts e.awesome_backtrace.show
       epilogue
     rescue Interrupt => e
       @exit_code = 1
 
       write_last_error(e)
-      e.render "An exception occurred #{@stage}"
+      e.render "An exception occurred #{@stage}:"
       epilogue
     rescue SignalException => e
       Signal.trap(e.signo, "SIG_DFL")
@@ -873,7 +858,7 @@ to rebuild the compiler.
       @exit_code = 1
 
       write_last_error(e)
-      e.render "An exception occurred #{@stage}"
+      e.render "An exception occurred #{@stage}:"
       epilogue
     else
       # We do this, run epilogue both in the rescue blocks and also here,
@@ -881,19 +866,6 @@ to rebuild the compiler.
       epilogue
     ensure
       done
-    end
-
-    # Creates an instance of the Loader and runs it. We catch any uncaught
-    # exceptions here and report them before exiting.
-    def self.main
-      begin
-        new.main
-      rescue Object => exc
-        STDERR.puts "\n====================================="
-        STDERR.puts "Exception occurred during top-level exception output! (THIS IS BAD)"
-        STDERR.puts
-        STDERR.puts "Exception: #{exc.inspect} (#{exc.class})"
-      end
     end
   end
 end

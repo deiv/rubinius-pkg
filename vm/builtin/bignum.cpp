@@ -7,12 +7,11 @@
 #include "builtin/fixnum.hpp"
 #include "builtin/float.hpp"
 #include "builtin/string.hpp"
-#include "builtin/bytearray.hpp"
+#include "builtin/byte_array.hpp"
 #include "configuration.hpp"
 #include "missing/math.h"
 #include "object_utils.hpp"
 #include "ontology.hpp"
-#include "version.h"
 
 #define BASIC_CLASS(blah) G(blah)
 #define NEW_STRUCT(obj, str, kls, kind) \
@@ -218,6 +217,7 @@ namespace rubinius {
   Bignum* Bignum::create(STATE) {
     Bignum* o = state->new_object_dirty<Bignum>(G(bignum));
     mp_init_managed(state, o->mp_val());
+    o->set_frozen();
     return o;
   }
 
@@ -591,10 +591,7 @@ namespace rubinius {
   }
 
   Integer* Bignum::bit_and(STATE, Float* b) {
-    if(!LANGUAGE_18_ENABLED) {
-      Exception::type_error(state, "can't convert Float into Integer for bitwise arithmetic");
-    }
-    return bit_and(state, Bignum::from_double(state, b->val));
+    return force_as<Integer>(Primitives::failure());
   }
 
   Integer* Bignum::bit_or(STATE, Integer* b) {
@@ -610,10 +607,7 @@ namespace rubinius {
   }
 
   Integer* Bignum::bit_or(STATE, Float* b) {
-    if(!LANGUAGE_18_ENABLED) {
-      Exception::type_error(state, "can't convert Float into Integer for bitwise arithmetic");
-    }
-    return bit_or(state, Bignum::from_double(state, b->val));
+    return force_as<Integer>(Primitives::failure());
   }
 
   Integer* Bignum::bit_xor(STATE, Integer* b) {
@@ -628,10 +622,7 @@ namespace rubinius {
   }
 
   Integer* Bignum::bit_xor(STATE, Float* b) {
-    if(!LANGUAGE_18_ENABLED) {
-      Exception::type_error(state, "can't convert Float into Integer for bitwise arithmetic");
-    }
-    return bit_xor(state, Bignum::from_double(state, b->val));
+    return force_as<Integer>(Primitives::failure());
   }
 
   Integer* Bignum::invert(STATE) {
@@ -741,7 +732,7 @@ namespace rubinius {
 
     native_int exp = exponent->to_native();
 
-    if(!LANGUAGE_18_ENABLED && exp < 0) {
+    if(exp < 0) {
       return Primitives::failure();
     }
 
@@ -755,7 +746,7 @@ namespace rubinius {
   }
 
   Object* Bignum::pow(STATE, Bignum *exponent) {
-    if(!LANGUAGE_18_ENABLED && CBOOL(exponent->lt(state, Fixnum::from(0)))) {
+    if(CBOOL(exponent->lt(state, Fixnum::from(0)))) {
       return Primitives::failure();
     }
 

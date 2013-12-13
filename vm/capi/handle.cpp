@@ -1,11 +1,11 @@
-#include "builtin/nativemethod.hpp"
-#include "objectmemory.hpp"
+#include "builtin/native_method.hpp"
+#include "object_memory.hpp"
 #include "gc/baker.hpp"
 #include "util/allocator.hpp"
 #include "capi/capi.hpp"
 #include "capi/handle.hpp"
 #include "capi/handles.hpp"
-#include "capi/18/include/ruby.h"
+#include "capi/ruby.h"
 
 namespace rubinius {
   namespace capi {

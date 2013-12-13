@@ -1,5 +1,3 @@
-# -*- encoding: us-ascii -*-
-
 module Rubinius
   class Fiber
     def self.create(callable)
@@ -40,3 +38,5 @@ module Rubinius
     end
   end
 end
+
+Fiber = Rubinius::Fiber

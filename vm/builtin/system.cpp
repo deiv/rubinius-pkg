@@ -4,15 +4,15 @@
 #include "builtin/block_environment.hpp"
 #include "builtin/channel.hpp"
 #include "builtin/class.hpp"
-#include "builtin/compactlookuptable.hpp"
-#include "builtin/constantscope.hpp"
+#include "builtin/compact_lookup_table.hpp"
+#include "builtin/constant_scope.hpp"
 #include "builtin/exception.hpp"
 #include "builtin/fixnum.hpp"
 #include "builtin/float.hpp"
 #include "builtin/io.hpp"
 #include "builtin/location.hpp"
-#include "builtin/lookuptable.hpp"
-#include "builtin/methodtable.hpp"
+#include "builtin/lookup_table.hpp"
+#include "builtin/method_table.hpp"
 #include "builtin/thread.hpp"
 #include "builtin/tuple.hpp"
 #include "builtin/string.hpp"
@@ -29,7 +29,7 @@
 #include "helpers.hpp"
 #include "instruments/tooling.hpp"
 #include "lookup_data.hpp"
-#include "objectmemory.hpp"
+#include "object_memory.hpp"
 #include "object_utils.hpp"
 #include "on_stack.hpp"
 #include "signal.hpp"
@@ -37,7 +37,6 @@
 #include "util/sha1.h"
 #include "util/timing.h"
 #include "paths.h"
-#include "version.h"
 
 #include "agent.hpp"
 
@@ -302,7 +301,10 @@ namespace rubinius {
 
     OnStack<1> os(state, str);
 
-    if(pipe(fds) != 0) return Primitives::failure();
+    if(pipe(fds) != 0) {
+      Exception::errno_error(state, "error setting up pipes", errno, "pipe(2)");
+      return 0;
+    }
 
     {
       // TODO: Make this guard unnecessary
@@ -317,7 +319,8 @@ namespace rubinius {
     if(pid == -1) {
       close(fds[0]);
       close(fds[1]);
-      return Primitives::failure();
+      Exception::errno_error(state, "error forking", errno, "fork(2)");
+      return 0;
     }
 
     // child
@@ -782,10 +785,6 @@ namespace rubinius {
     return (double)tv->tv_sec + ((double)tv->tv_usec / 1000000.0);
   }
 
-  static inline double to_dbl(long sec, long msec) {
-    return (double)sec + ((double)msec / 1000000.0);
-  }
-
   Array* System::vm_times(STATE) {
 #ifdef RBX_WINDOWS
     // TODO: Windows
@@ -1118,12 +1117,14 @@ namespace rubinius {
 
   Object* System::vm_set_class(STATE, Object* obj, Class* cls) {
     if(!obj->reference_p()) return Primitives::failure();
-    if(obj->type_id() != cls->type_info()->type)
+    if(obj->type_id() != cls->type_info()->type) {
       return Primitives::failure();
+    }
 
     if(kind_of<PackedObject>(obj)) {
-      if(obj->klass()->packed_size() != cls->packed_size())
+      if(obj->klass()->packed_size() != cls->packed_size()) {
         return Primitives::failure();
+      }
     }
 
     obj->klass(state, cls);
@@ -1175,47 +1176,6 @@ namespace rubinius {
     return cNil;
   }
 
-  Symbol* System::vm_get_kcode(STATE) {
-    switch(state->shared().kcode_page()) {
-    case kcode::eEUC:
-      return state->symbol("EUC");
-    case kcode::eSJIS:
-      return state->symbol("SJIS");
-    case kcode::eUTF8:
-      return state->symbol("UTF8");
-    default:
-      return state->symbol("NONE");
-    }
-  }
-
-  Object* System::vm_set_kcode(STATE, String* what) {
-    if(what->byte_size() < 1) {
-      kcode::set(state, kcode::eAscii);
-    } else {
-      const char* str = what->c_str(state);
-
-      switch(str[0]) {
-      case 'E':
-      case 'e':
-        kcode::set(state, kcode::eEUC);
-        break;
-      case 'S':
-      case 's':
-        kcode::set(state, kcode::eSJIS);
-        break;
-      case 'U':
-      case 'u':
-        kcode::set(state, kcode::eUTF8);
-        break;
-      default:
-        kcode::set(state, kcode::eAscii);
-        break;
-      }
-    }
-
-    return vm_get_kcode(state);
-  }
-
   Object* System::vm_const_defined(STATE, Symbol* sym,
                                    CallFrame* calling_environment)
   {
@@ -1223,7 +1183,7 @@ namespace rubinius {
 
     Object* res = Helpers::const_get(state, calling_environment, sym, &reason);
 
-    if(reason != vFound || (!LANGUAGE_18_ENABLED && kind_of<Autoload>(res))) {
+    if(reason != vFound) {
       return Primitives::failure();
     }
 
@@ -1256,7 +1216,7 @@ namespace rubinius {
     Dispatch dis(sym);
 
     Object* responds = RBOOL(dis.resolve(state, sym, lookup));
-    if(!CBOOL(responds) && !LANGUAGE_18_ENABLED) {
+    if(!CBOOL(responds)) {
       LookupData lookup(obj, obj->lookup_begin(state), G(sym_private));
       Symbol* name = G(sym_respond_to_missing);
       Dispatch dis(name);
@@ -1443,18 +1403,6 @@ retry:
   Object* System::vm_memory_barrier(STATE) {
     atomic::memory_barrier();
     return cNil;
-  }
-
-  Object* System::vm_ruby18_p(STATE) {
-    return RBOOL(LANGUAGE_18_ENABLED);
-  }
-
-  Object* System::vm_ruby19_p(STATE) {
-    return RBOOL(LANGUAGE_19_ENABLED);
-  }
-
-  Object* System::vm_ruby20_p(STATE) {
-    return RBOOL(LANGUAGE_20_ENABLED);
   }
 
   Object* System::vm_windows_p(STATE) {

@@ -1,9 +1,12 @@
-# -*- encoding: us-ascii -*-
-
 class Symbol
   def self.===(obj)
     Rubinius.primitive :symbol_s_eqq
     super
+  end
+
+  def encoding
+    Rubinius.primitive :symbol_encoding
+    raise PrimitiveFailure, "Symbol#encoding primitive failed"
   end
 
   def index

@@ -11,7 +11,7 @@
 #include "object_utils.hpp"
 #include "ontology.hpp"
 #include "util/local_buffer.hpp"
-#include "version.h"
+#include "missing/string.h"
 
 #include <double-conversion.h>
 #include <ieee.h>
@@ -42,6 +42,7 @@ namespace rubinius {
   Float* Float::create(STATE, double val) {
     Float* flt = state->new_object_dirty<Float>(G(floatpoint));
     flt->val = val;
+    flt->set_frozen();
     return flt;
   }
 
@@ -75,9 +76,7 @@ namespace rubinius {
         }
 
         // And they return 0.0 in Ruby 1.9.
-        if(!LANGUAGE_18_ENABLED) {
-          return Float::create(state, 0.0);
-        }
+        return Float::create(state, 0.0);
       }
 
       str++;
@@ -120,12 +119,7 @@ namespace rubinius {
 
     // Check for the hex prefix.
     if(p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
-      if(CBOOL(strict)) {
-        // Only allow hex in Ruby > 1.8.
-        if(LANGUAGE_18_ENABLED) {
-          return nil<Float>();
-        }
-      } else {
+      if(!CBOOL(strict)) {
         // Disallow hex values when not in strict mode.
         return Float::create(state, 0.0);
       }
@@ -216,7 +210,7 @@ namespace rubinius {
   }
 
   Object* Float::fpow(STATE, Float* other) {
-    if(!LANGUAGE_18_ENABLED && this->val < 0 && other->val != round(other->val)) {
+    if(this->val < 0 && other->val != round(other->val)) {
       return Primitives::failure();
     }
     return Float::create(state, pow(this->val, other->val));
@@ -235,10 +229,8 @@ namespace rubinius {
   }
 
   Float* Float::mod(STATE, Float* other) {
-    if(!LANGUAGE_18_ENABLED) {
-      if(other->val == 0.0) {
-        Exception::zero_division_error(state, "divided by 0");
-      }
+    if(other->val == 0.0) {
+      Exception::zero_division_error(state, "divided by 0");
     }
 
     double res = fmod(this->val, other->val);
@@ -254,10 +246,8 @@ namespace rubinius {
   }
 
   Array* Float::divmod(STATE, Float* other) {
-    if(!LANGUAGE_18_ENABLED) {
-      if(other->val == 0.0) {
-        Exception::zero_division_error(state, "divided by 0");
-      }
+    if(other->val == 0.0) {
+      Exception::zero_division_error(state, "divided by 0");
     }
 
     Array* ary = Array::create(state, 2);

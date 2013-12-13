@@ -1,5 +1,3 @@
-# -*- encoding: us-ascii -*-
-
 ##
 # Method objects are essentially detached, freely passed-around methods. The
 # Method is a copy of the method on the object at the time of extraction, so
@@ -28,6 +26,23 @@ class Method
   attr_reader :receiver
   attr_reader :defined_in
   attr_reader :executable
+
+  def name
+    @name
+  end
+
+  ##
+  # Method objects are equal if they have the same body and are bound to the
+  # same object.
+
+  def ==(other)
+    other.class == Method &&
+      @receiver.equal?(other.receiver) &&
+      (@executable == other.executable ||
+       Rubinius::MethodEquality.method_equal_to_delegated_method_receiver?(self, other))
+  end
+
+  alias_method :eql?, :==
 
   ##
   # Indication of how many arguments this method takes. It is defined so that
@@ -172,6 +187,18 @@ class UnboundMethod
   attr_reader :executable
   attr_reader :defined_in
 
+  def name
+    @name
+  end
+
+  ##
+  # Convenience method for #binding to the given receiver object and calling
+  # it with the optionally supplied arguments.
+
+  def call_on_instance(obj, *args, &block)
+    @executable.invoke(@name, @defined_in, obj, args, block)
+  end
+
   ##
   # UnboundMethod objects are equal if and only if they refer to the same
   # method. One may be an alias for the other or both for a common one. Both
@@ -215,22 +242,6 @@ class UnboundMethod
     end
 
     Method.new receiver, @defined_in, @executable, @name
-  end
-
-  ##
-  # Convenience method for #binding to the given receiver object and calling
-  # it with the optionally supplied arguments.
-
-  def call_on_instance(obj, *args, &block)
-    unless Rubinius::Type.object_kind_of? obj, @defined_in
-      if Rubinius::Type.singleton_class_object(@defined_in)
-        raise TypeError, "illegal attempt to rebind a singleton method to another object"
-      end
-
-      raise TypeError, "Must be bound to an object of kind #{@defined_in}"
-    end
-
-    @executable.invoke(@name, @defined_in, obj, args, block)
   end
 
   ##

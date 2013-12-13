@@ -1,5 +1,3 @@
-# -*- encoding: us-ascii -*-
-
 module Math
   module_function \
     :acos,
@@ -9,14 +7,17 @@ module Math
     :atan,
     :atan2,
     :atanh,
+    :cbrt,
     :cos,
     :cosh,
     :erf,
     :erfc,
     :exp,
     :frexp,
+    :gamma,
     :hypot,
     :ldexp,
+    :lgamma,
     :log,
     :log10,
     :log2,

@@ -30,8 +30,8 @@ describe "Module#define_method when given an UnboundMethod" do
     klass.new.should have_method(:another_test_method)
   end
 
-  ruby_bug "redmine:2117", "1.8.7" do
-    it "defines a method on a singleton class" do
+  describe "defining a method on a singleton class" do
+    before do
       klass = Class.new
       class << klass
         def test_method
@@ -41,7 +41,44 @@ describe "Module#define_method when given an UnboundMethod" do
       child = Class.new(klass)
       sc = class << child; self; end
       sc.send :define_method, :another_test_method, klass.method(:test_method).unbind
-      child.another_test_method.should == :foo
+
+      @class = child
+    end
+
+    ruby_version_is "1.8" ... "1.9" do
+      it "raises TypeError when calling the method" do
+        lambda { @class.another_test_method }.should raise_error(TypeError)
+      end
+    end
+
+    ruby_version_is "1.9" do
+      it "doesn't raise TypeError when calling the method" do
+        @class.another_test_method.should == :foo
+      end
+    end
+  end
+end
+
+describe "Module#define_method when name is :initialize" do
+  ruby_version_is "1.9" do
+    describe "passed a block" do
+      it "sets visibility to private when method name is :initialize" do
+        klass = Class.new do
+          define_method(:initialize) { }
+        end
+        klass.should have_private_instance_method(:initialize)
+      end
+    end
+
+    describe "given an UnboundMethod" do
+      it "sets the visibility to private when method is named :initialize" do
+        klass = Class.new do
+          def test_method
+          end
+          define_method(:initialize, instance_method(:test_method))
+        end
+        klass.should have_private_instance_method(:initialize)
+      end
     end
   end
 end
@@ -96,6 +133,16 @@ describe "Module#define_method" do
     lambda {
       Class.new { define_method(:test) }
     }.should raise_error(ArgumentError)
+  end
+
+  it "does not change the arity check style of the original proc" do
+    class DefineMethodSpecClass
+      prc = Proc.new { || true }
+      method = define_method("proc_style_test", &prc)
+    end
+
+    obj = DefineMethodSpecClass.new
+    lambda { obj.proc_style_test :arg }.should raise_error(ArgumentError)
   end
 
   ruby_version_is ""..."1.9" do
@@ -159,25 +206,54 @@ describe "Module#define_method" do
     Module.should have_private_instance_method(:define_method)
   end
 
-  it "returns a Proc" do
-    class DefineMethodSpecClass
-      method = define_method("return_test") { || true }
-      method.is_a?(Proc).should be_true
-      # check if it is a lambda:
-      lambda {
-        method.call :too_many_arguments
-      }.should raise_error(ArgumentError)
+  ruby_version_is ""..."2.1" do
+    it "returns a Proc" do
+      class DefineMethodSpecClass
+        method = define_method("return_test") { || true }
+        method.is_a?(Proc).should be_true
+        # check if it is a lambda:
+        lambda {
+          method.call :too_many_arguments
+        }.should raise_error(ArgumentError)
+      end
     end
   end
 
-  it "does not change the arity check style of the original proc" do
-    class DefineMethodSpecClass
-      prc = Proc.new { || true }
-      method = define_method("proc_style_test", &prc)
-      prc.call(:too_many_arguments).should be_true
-      lambda {
-        method.call :too_many_arguments
-      }.should raise_error(ArgumentError)
+  ruby_version_is "2.1" do
+    it "returns its symbol" do
+      class DefineMethodSpecClass
+        method = define_method("return_test") { || true }
+        method.should == :return_test
+      end
+    end
+  end
+
+  describe "method body is an UnboundMethod" do
+    before do
+      @lazy_class_def = lambda {
+        LazyClass = Class.new do
+          define_method :bar, ModuleSpecs::UnboundMethodTest.instance_method(:foo)
+        end
+      }
+    end
+
+    ruby_version_is "1.8" ... "1.9" do
+      it "raises a TypeError when calling a method from a different object" do
+        obj = @lazy_class_def.call.new
+        lambda { obj.bar }.should raise_error(TypeError)
+      end
+    end
+
+    ruby_version_is "1.9" ... "2.0" do
+      it "raises a TypeError when defining a method from a different object" do
+        lambda { @lazy_class_def.call }.should raise_error(TypeError)
+      end
+    end
+
+    ruby_version_is "2.0" do
+      it "allows methods defined on a different object" do
+        @lazy_class_def.call.new.bar.should == 'bar'
+      end
     end
   end
 end
