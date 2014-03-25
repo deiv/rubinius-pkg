@@ -171,6 +171,28 @@ class IO
       end
     end
 
+    PEEK_AHEAD_LIMIT = 16
+
+    def read_to_char_boundary(io, str)
+      str.force_encoding(io.external_encoding || Encoding.default_external)
+      return IO.read_encode(io, str) if str.valid_encoding?
+
+      peek_ahead = 0
+      while size > 0 and peek_ahead < PEEK_AHEAD_LIMIT
+        str.force_encoding Encoding::ASCII_8BIT
+        str << @storage[@start]
+        @start += 1
+        peek_ahead += 1
+
+        str.force_encoding(io.external_encoding || Encoding.default_external)
+        if str.valid_encoding?
+          return IO.read_encode io, str
+        end
+      end
+
+      IO.read_encode io, str
+    end
+
     ##
     # Returns one Fixnum as the start byte.
     def getbyte(io)
@@ -641,6 +663,8 @@ class IO
       ret |= RDWR
     when ?b
       ret |= BINARY
+    when ?t
+      ret &= ~BINARY
     when ?:
       warn("encoding options not supported in 1.8")
       return ret
@@ -656,6 +680,8 @@ class IO
       ret |= RDWR
     when ?b
       ret |= BINARY
+    when ?t
+      ret &= ~BINARY
     when ?:
       warn("encoding options not supported in 1.8")
       return ret
@@ -1239,7 +1265,7 @@ class IO
           if wanted < available
             str << @buffer.shift(wanted)
 
-            str = IO.read_encode(@io, str)
+            str = @buffer.read_to_char_boundary(@io, str)
             str.taint
 
             $. = @io.increment_lineno
@@ -1290,7 +1316,7 @@ class IO
         if wanted < available
           str << @buffer.shift(wanted)
 
-          str = IO.read_encode(@io, str)
+          str = @buffer.read_to_char_boundary(@io, str)
           str.taint
 
           $. = @io.increment_lineno

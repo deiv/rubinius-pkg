@@ -133,6 +133,16 @@ extern "C" {
 #define EXTERN RUBY_EXTERN  /* deprecated */
 #endif
 
+/*
+Added to fix https://github.com/rubinius/rubinius/issues/2840. The original
+definition comes from some Makefile file that, looking at the directory it was
+in, should only be used for win32. Alas, apparently MRI makes it available and
+uses it so we have to also define these aliases.
+*/
+#define rb_pid_t int
+#define rb_gid_t int
+#define rb_uid_t int
+
 void* XMALLOC(size_t bytes);
 void  XFREE(void* ptr);
 void* XREALLOC(void* ptr, size_t bytes);
@@ -494,6 +504,8 @@ unsigned long rb_fix2uint(VALUE);
 #define FIX2UINT(x)       ((unsigned int)FIX2ULONG(x))
 
 #endif
+
+VALUE rb_int_positive_pow(long x, unsigned long y);
 
 /** Get a handle for the Symbol object represented by ID. */
 #define ID2SYM(id)        (id)
@@ -1312,10 +1324,35 @@ struct RTypedData {
   void    rb_io_check_closed(rb_io_t* io);
   void    rb_io_check_readable(rb_io_t* io);
   void    rb_io_check_writable(rb_io_t* io);
+  VALUE   rb_io_check_io(VALUE io);
 
   FILE *  rb_io_stdio_file(rb_io_t *fptr);
 
+/* Imported from MRI for rb_integer_pack and rb_integer_unpack: */
+/* "MS" in MSWORD and MSBYTE means "most significant" */
+/* "LS" in LSWORD and LSBYTE means "least significant" */
+#define INTEGER_PACK_MSWORD_FIRST       0x01
+#define INTEGER_PACK_LSWORD_FIRST       0x02
+#define INTEGER_PACK_MSBYTE_FIRST       0x10
+#define INTEGER_PACK_LSBYTE_FIRST       0x20
+#define INTEGER_PACK_NATIVE_BYTE_ORDER  0x40
+#define INTEGER_PACK_2COMP              0x80
+#define INTEGER_PACK_FORCE_GENERIC_IMPLEMENTATION 0x400
+/* For rb_integer_unpack: */
+#define INTEGER_PACK_FORCE_BIGNUM       0x100
+#define INTEGER_PACK_NEGATIVE           0x200
+/* Combinations: */
+#define INTEGER_PACK_LITTLE_ENDIAN \
+    (INTEGER_PACK_LSWORD_FIRST | INTEGER_PACK_LSBYTE_FIRST)
+#define INTEGER_PACK_BIG_ENDIAN \
+    (INTEGER_PACK_MSWORD_FIRST | INTEGER_PACK_MSBYTE_FIRST)
+
+  int     rb_integer_pack(VALUE value, void *words, size_t numwords, size_t wordsize,
+                          size_t nails, int flags);
+
   void    rb_update_max_fd(int fd);
+  void    rb_fd_fix_cloexec(int fd);
+#define HAVE_RB_FD_FIX_CLOEXEC 1
 
   void    rb_thread_wait_fd(int fd);
   void    rb_thread_fd_writable(int fd);
@@ -1383,6 +1420,8 @@ struct RTypedData {
   /** Convert string to an ID */
   ID      rb_intern(const char* string);
   ID      rb_intern2(const char* string, long len);
+  ID      rb_intern_str(VALUE string);
+#define HAVE_RB_INTERN_STR 1
 
   /** Coerce x and y and perform 'x func y' */
   VALUE rb_num_coerce_bin(VALUE x, VALUE y, ID func);

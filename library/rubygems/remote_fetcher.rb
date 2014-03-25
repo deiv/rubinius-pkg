@@ -78,7 +78,6 @@ class Gem::RemoteFetcher
   end
 
   ##
-  #
   # Given a source at +uri+, calculate what hostname to actually
   # connect to query the data for it.
 
@@ -91,7 +90,7 @@ class Gem::RemoteFetcher
     rescue Resolv::ResolvError
       uri
     else
-      URI.parse "#{res.target}#{uri.path}"
+      URI.parse "#{uri.scheme}://#{res.target}#{uri.path}"
     end
   end
 
@@ -107,7 +106,7 @@ class Gem::RemoteFetcher
 
     return if found.empty?
 
-    spec, source = found.sort_by { |(s,_)| s.version }.last
+    spec, source = found.max_by { |(s,_)| s.version }
 
     download spec, source.uri.to_s
   end
@@ -132,11 +131,19 @@ class Gem::RemoteFetcher
 
     FileUtils.mkdir_p cache_dir rescue nil unless File.exist? cache_dir
 
-   # Always escape URI's to deal with potential spaces and such
-    unless URI::Generic === source_uri
-      source_uri = URI.parse(URI.const_defined?(:DEFAULT_PARSER) ?
-                             URI::DEFAULT_PARSER.escape(source_uri.to_s) :
-                             URI.escape(source_uri.to_s))
+    # Always escape URI's to deal with potential spaces and such
+    # It should also be considered that source_uri may already be
+    # a valid URI with escaped characters. e.g. "{DESede}" is encoded
+    # as "%7BDESede%7D". If this is escaped again the percentage
+    # symbols will be escaped.
+    unless source_uri.is_a?(URI::Generic)
+      begin
+        source_uri = URI.parse(source_uri)
+      rescue
+        source_uri = URI.parse(URI.const_defined?(:DEFAULT_PARSER) ?
+                               URI::DEFAULT_PARSER.escape(source_uri.to_s) :
+                               URI.escape(source_uri.to_s))
+      end
     end
 
     scheme = source_uri.scheme
@@ -286,19 +293,20 @@ class Gem::RemoteFetcher
   def cache_update_path uri, path = nil, update = true
     mtime = path && File.stat(path).mtime rescue nil
 
-    if mtime && Net::HTTPNotModified === fetch_path(uri, mtime, true)
-      Gem.read_binary(path)
-    else
-      data = fetch_path(uri)
+    data = fetch_path(uri, mtime)
 
-      if update and path then
-        open(path, 'wb') do |io|
-          io.write data
-        end
-      end
-
-      data
+    if data == nil # indicates the server returned 304 Not Modified
+      return Gem.read_binary(path)
     end
+
+    if update and path
+      open(path, 'wb') do |io|
+        io.flock(File::LOCK_EX)
+        io.write data
+      end
+    end
+
+    data
   end
 
   ##

@@ -315,6 +315,7 @@ namespace rubinius {
 
     // Let all the builtin classes initialize themselves. this
     // typically means creating a Ruby class.
+    BasicObject::init(state);
     CompactLookupTable::init(state);
     ByteArray::init(state);
     String::init(state);
@@ -468,13 +469,19 @@ namespace rubinius {
       G(rubinius)->set_const(state, "SITE_PATH", String::create(state, path.c_str()));
       path = prefix + RBX_VENDOR_PATH;
       G(rubinius)->set_const(state, "VENDOR_PATH", String::create(state, path.c_str()));
-      path = prefix + RBX_GEMS_PATH;
-      G(rubinius)->set_const(state, "GEMS_PATH", String::create(state, path.c_str()));
+
+      if(char* gems_path = getenv("RBX_GEMS_PATH")) {
+        G(rubinius)->set_const(state, "GEMS_PATH", String::create(state, gems_path));
+      } else {
+        path = prefix + RBX_GEMS_PATH;
+        G(rubinius)->set_const(state, "GEMS_PATH", String::create(state, path.c_str()));
+      }
 
       path = prefix + RBX_HDR_PATH;
       G(rubinius)->set_const(state, "HDR_PATH", String::create(state, path.c_str()));
     }
 
+    G(rubinius)->set_const(state, "PROGRAM_NAME", String::create(state, RBX_PROGRAM_NAME));
     G(rubinius)->set_const(state, "RUBY_VERSION", String::create(state, RBX_RUBY_VERSION));
     G(rubinius)->set_const(state, "VERSION", String::create(state, RBX_VERSION));
     G(rubinius)->set_const(state, "LIB_VERSION", String::create(state, RBX_LIB_VERSION));

@@ -161,7 +161,7 @@ namespace :build do
                               "--enable-optimized --disable-assertions "\
                               " --enable-targets=host,cpp"
           sh %[sh -c "#{File.expand_path("./configure")} #{llvm_config_flags}"]
-          sh make
+          sh Rubinius::BUILD_CONFIG[:build_make]
         end
       end
     end
@@ -243,7 +243,7 @@ if jobs = ENV['JOBS']
     STDERR.puts "Illegal number of parallel jobs: #{jobs}. Setting to 1."
     @parallel_jobs = 1
   end
-elsif File.exists? ".be_gentle"
+elsif File.exist? ".be_gentle"
   @parallel_jobs = 1
 else
   @parallel_jobs = nil
@@ -346,6 +346,7 @@ namespace :vm do
       'vm/test/runner.cpp',
       'vm/test/runner.o',
       VM_EXE,
+      BUILD_CONFIG[:program_name],
       'bin/rbx',
       'bin/ruby',
       'bin/rake',
@@ -354,7 +355,6 @@ namespace :vm do
       'bin/irb',
       'bin/gem',
       'vm/.deps',
-      'staging'
     ].exclude("vm/gen/config.h", "vm/gen/paths.h")
 
     files.each do |filename|

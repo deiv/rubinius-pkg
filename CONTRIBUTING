@@ -1,7 +1,7 @@
 We want to start off by saying thank you for using Rubinius. This project is a
 labor of love, and we appreciate all of the users that catch bugs, make
-performance improvements, and help with documentation.  Every contribution is
-meaningful, so thank you for participating.  That being said, here are a few
+performance improvements, and help with documentation. Every contribution is
+meaningful, so thank you for participating. That being said, here are a few
 guidelines that we ask you to follow so we can successfully address your issue.
 
 1. Submitting Issues
@@ -15,6 +15,14 @@ Please include the following:
   add a failing spec, that's great!
 * Please include the simplest possible reproduction you can. This last point is
   vital to fixing issues.
+
+Regarding the formatting of the README:
+
+The Rubinius team will not merge pull requests that change the formatting of
+the README to Markdown. The intent of the README is to give a basic
+understanding of the project in a platform-independent format that renders
+well on all devices, as a plain text document. Please see #859 & #1007 for
+the specific reasoning.
 
 2. Running Specs
 
@@ -62,7 +70,7 @@ We love these!
 * Include benchmarks before and after the change. Please include your hardware
   specs, namely CPU speed, # of cores, speed of hard drive (if SSD, then SSD is
   fine) and amount of RAM.
-* ALWAYS RUN THE FULL SPEC SUITE! rake will ensure you didn't accidentally
+* ALWAYS RUN THE FULL SPEC SUITE! 'rake' will ensure you didn't accidentally
   break anything.
 
 For more details on how to contribute, please see Contributing to Rubinius
