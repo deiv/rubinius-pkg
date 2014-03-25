@@ -1262,7 +1262,7 @@ class Array
     rng = Kernel unless rng and rng.respond_to? :rand
 
     unless count
-      random = Rubinius::Type.coerce_to rng.rand, Fixnum, :to_int
+      random = Rubinius::Type.coerce_to rng.rand(size), Fixnum, :to_int
       raise RangeError, "random value must be >= 0" if random < 0
       raise RangeError, "random value must be less than Array size" unless random < size
 
@@ -1273,7 +1273,7 @@ class Array
     result = Array.new self
 
     count.times do |i|
-      random = Rubinius::Type.coerce_to rng.rand, Fixnum, :to_int
+      random = Rubinius::Type.coerce_to rng.rand(size), Fixnum, :to_int
       raise RangeError, "random value must be >= 0" if random < 0
       raise RangeError, "random value must be less than Array size" unless random < size
 
@@ -1559,7 +1559,7 @@ class Array
     new_size = @total - n
     return [] if new_size <= 0
 
-    new_range n, new_size
+    new_range @start + n, new_size
   end
 
   def sort(&block)

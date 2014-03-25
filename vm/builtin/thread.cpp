@@ -46,10 +46,11 @@ namespace rubinius {
   }
 
   Thread* Thread::create(STATE, VM* target, Object* self, Run runner,
-                         bool main_thread, bool system_thread)
+                         bool system_thread)
   {
-    Thread* thr = state->new_object<Thread>(G(thread));
+    Thread* thr = state->vm()->new_object_mature<Thread>(G(thread));
 
+    thr->pin();
     thr->thread_id(state, Fixnum::from(target->thread_id()));
     thr->sleep(state, cFalse);
     thr->control_channel(state, nil<Channel>());
@@ -81,9 +82,7 @@ namespace rubinius {
 
   Thread* Thread::allocate(STATE, Object* self) {
     VM* vm = state->shared().new_vm();
-    Thread* thread = Thread::create(state, vm, self, send_run);
-
-    return thread;
+    return Thread::create(state, vm, self, send_run);
   }
 
   Thread* Thread::current(STATE) {
@@ -91,12 +90,15 @@ namespace rubinius {
   }
 
   Object* Thread::unlock_locks(STATE, GCToken gct, CallFrame* calling_environment) {
-    LockedObjects& los = vm_->locked_objects();
+    Thread* self = this;
+    OnStack<1> os(state, self);
+
+    LockedObjects& los = self->vm_->locked_objects();
     for(LockedObjects::iterator i = los.begin();
         i != los.end();
         ++i) {
       ObjectHeader* locked = *i;
-      if(locked != this) {
+      if(locked != self) {
         locked->unlock_for_terminate(state, gct, calling_environment);
       }
     }
@@ -197,7 +199,7 @@ namespace rubinius {
     OnStack<1> os(state, self);
 
     self->init_lock_.lock();
-    int error = pthread_create(&vm_->os_thread(), &attrs, in_new_thread, (void*)vm_);
+    int error = pthread_create(&self->vm_->os_thread(), &attrs, in_new_thread, (void*)self->vm_);
     if(error) {
       return error;
     }
@@ -244,7 +246,6 @@ namespace rubinius {
     GCTokenImpl gct;
 
     // Lock the thread object and unlock it at __run__ in the ruby land.
-    vm->thread->hard_lock(state, gct, 0);
     vm->thread->alive(state, cTrue);
     vm->thread->init_lock_.unlock();
 
@@ -252,6 +253,7 @@ namespace rubinius {
     // gc_dependent may lock when it detects GC is happening. Also the parent
     // thread is locked until init_lock_ is unlocked by this child thread.
     state->gc_dependent(gct, 0);
+    vm->thread->hard_lock(state, gct, 0);
 
     vm->shared.tool_broker()->thread_start(state);
     Object* ret = vm->thread->runner_(state);
@@ -277,13 +279,13 @@ namespace rubinius {
     vm->thread->init_lock_.lock();
     NativeMethod::cleanup_thread(state);
 
-    vm->thread->alive(state, cFalse);
-    vm->thread->cleanup();
+    vm->thread->stopped();
     vm->thread->init_lock_.unlock();
 
-    vm->shared.gc_independent(state, 0);
     vm->shared.clear_critical(state);
+    SharedState& shared = vm->shared;
 
+    vm->thread->vm_ = NULL;
     VM::discard(state, vm);
 
     if(cDebugThreading) {
@@ -291,6 +293,7 @@ namespace rubinius {
     }
 
     RUBINIUS_THREAD_STOP(thread_name.c_str(), vm->thread_id(), 0);
+    shared.gc_independent();
     return 0;
   }
 
@@ -431,7 +434,8 @@ namespace rubinius {
     }
   }
 
-  void Thread::cleanup() {
+  void Thread::stopped() {
+    alive_ = cFalse;
     vm_ = NULL;
   }
 

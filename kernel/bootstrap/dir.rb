@@ -4,9 +4,18 @@ class Dir
     raise PrimitiveFailure, "Dir.allocate primitive failed"
   end
 
-  def initialize(path)
+  def initialize(path, options=undefined)
     path = Rubinius::Type.coerce_to_path path
-    Rubinius.invoke_primitive :dir_open, self, path
+
+    if options.equal? undefined
+      enc = nil
+    else
+      options = Rubinius::Type.coerce_to options, Hash, :to_hash
+      enc = options[:encoding]
+      enc = Rubinius::Type.coerce_to_encoding enc if enc
+    end
+
+    Rubinius.invoke_primitive :dir_open, self, path, enc
   end
 
   private :initialize
@@ -22,8 +31,11 @@ class Dir
   end
 
   def read
-    Rubinius.primitive :dir_read
-    raise PrimitiveFailure, "Dir#read primitive failed"
+    entry = Rubinius.invoke_primitive :dir_read, self
+    return unless entry
+
+    enc = Encoding.default_internal
+    enc ? entry.encode(enc) : entry
   end
 
   def control(kind, pos)

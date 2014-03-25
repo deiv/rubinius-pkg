@@ -142,7 +142,7 @@ namespace rubinius {
     SYNC_TL;
 
     Array* threads = Array::create(state, 0);
-    for(std::list<ManagedThread*>::iterator i = threads_.begin();
+    for(ThreadList::iterator i = threads_.begin();
         i != threads_.end();
         ++i) {
       if(VM* vm = (*i)->as_vm()) {
@@ -165,6 +165,21 @@ namespace rubinius {
     return agent_;
   }
 
+  void SharedState::reset_threads(STATE) {
+    VM* current = state->vm();
+    for(ThreadList::iterator i = threads_.begin();
+           i != threads_.end();
+           ++i) {
+      if(VM* vm = (*i)->as_vm()) {
+        if(vm == current) continue;
+        Thread* thread = vm->thread.get();
+        thread->stopped();
+      }
+    }
+    threads_.clear();
+    threads_.push_back(current);
+  }
+
   void SharedState::reinit(STATE) {
     // For now, we disable inline debugging here. This makes inspecting
     // it much less confusing.
@@ -172,8 +187,8 @@ namespace rubinius {
     config.jit_inline_debug.set("no");
 
     env_->set_root_vm(state->vm());
-    threads_.clear();
-    threads_.push_back(state->vm());
+
+    reset_threads(state);
 
     // Reinit the locks for this object
     lock_init(state->vm());
@@ -227,6 +242,10 @@ namespace rubinius {
 
   void SharedState::gc_independent(THREAD) {
     world_->become_independent(state);
+  }
+
+  void SharedState::gc_independent() {
+    world_->become_independent();
   }
 
   const unsigned int* SharedState::object_memory_mark_address() const {
@@ -377,5 +396,6 @@ namespace rubinius {
 #define CAPI_BLACK_LIST(name) capi_black_list_.insert(std::string("Init_" # name))
   void SharedState::initialize_capi_black_list() {
     CAPI_BLACK_LIST(nkf);
+    CAPI_BLACK_LIST(nokogiri);
   }
 }

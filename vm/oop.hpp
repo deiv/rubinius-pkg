@@ -54,7 +54,7 @@ namespace rubinius {
  * various object types and are used to define predicates. Use the predicates
  * (ie reference_p(), fixnum_p(), symbol_p()) directly.
  */
-#define __REFERENCE_P__(v) (((intptr_t)(v) & TAG_REF_MASK) == TAG_REF)
+#define __REFERENCE_P__(v) ((v) && (((intptr_t)(v) & TAG_REF_MASK) == TAG_REF))
 #define __FIXNUM_P__(v)    (((intptr_t)(v) & TAG_FIXNUM_MASK) == TAG_FIXNUM)
 #define __SYMBOL_P__(v)    (((intptr_t)(v) & TAG_SYMBOL_MASK) == TAG_SYMBOL)
 
@@ -268,7 +268,7 @@ Object* const cUndef = reinterpret_cast<Object*>(0x22L);
     LockStatus lock_mutex(STATE, GCToken gct, CallFrame* call_frame, ObjectHeader* obj, size_t us, bool interrupt);
     LockStatus lock_mutex_timed(STATE, GCToken gct, CallFrame* call_frame, ObjectHeader* obj, const struct timespec* ts, bool interrupt);
     LockStatus try_lock_mutex(STATE, GCToken gct, CallFrame* call_frame, ObjectHeader* obj);
-    bool locked_mutex_p(STATE, GCToken gct, CallFrame* call_frame);
+    bool locked_mutex_p(STATE, GCToken gct, CallFrame* call_frame, ObjectHeader* obj);
     LockStatus unlock_mutex(STATE, GCToken gct, CallFrame* call_frame, ObjectHeader* obj);
     void unlock_mutex_for_terminate(STATE, GCToken gct, CallFrame* call_frame, ObjectHeader* obj);
 
@@ -572,7 +572,7 @@ Object* const cUndef = reinterpret_cast<Object*>(0x22L);
 
     LockStatus lock(STATE, GCToken gct, CallFrame* call_frame, size_t us=0, bool interrupt=true);
     LockStatus try_lock(STATE, GCToken gct, CallFrame* call_frame);
-    bool locked_p(STATE, GCToken gct, CallFrame* call_frame) const;
+    bool locked_p(STATE, GCToken gct, CallFrame* call_frame);
     LockStatus unlock(STATE, GCToken gct, CallFrame* call_frame);
     void unlock_for_terminate(STATE, GCToken gct, CallFrame* call_frame);
 

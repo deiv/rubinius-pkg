@@ -414,7 +414,13 @@ class Time
   end
 
   def zone
-    to_a[9]
+    zone = to_a[9]
+
+    if zone && Encoding.default_internal
+      zone.encode Encoding.default_internal
+    else
+      zone
+    end
   end
 
   def gmt?

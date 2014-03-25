@@ -258,7 +258,7 @@ namespace rubinius {
 
     if (zone_->nil_p()) {
       if(offset_->nil_p() && tm.tm_zone) {
-        zone(state, String::create(state, tm.tm_zone));
+        zone(state, locale_string(state, tm.tm_zone));
       } else {
         zone(state, nil<String>());
       }
@@ -305,14 +305,14 @@ namespace rubinius {
                   off);
       if(chars) {
         result = String::create(state, malloc_str, chars);
+        result->encoding(state, format->encoding());
       }
 
       free(malloc_str);
     } else {
       result = String::create(state, stack_str, chars);
+      result->encoding(state, format->encoding());
     }
-
-    result->encoding(state, format->encoding());
 
     return result;
   }
@@ -325,9 +325,18 @@ namespace rubinius {
     localtime64_r(&seconds_, &tm);
 
     if(tm.tm_zone) {
-      return String::create(state, tm.tm_zone);
+      return locale_string(state, tm.tm_zone);
     } else {
       return nil<String>();
     }
+  }
+
+  String* Time::locale_string(STATE, const char* data) {
+    String* str = String::create(state, data);
+    Encoding* locale = Encoding::find(state, "locale");
+    if(!locale->nil_p()) {
+      str->encoding(state, locale);
+    }
+    return str;
   }
 }

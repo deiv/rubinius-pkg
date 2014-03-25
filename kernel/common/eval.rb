@@ -56,7 +56,7 @@ class BasicObject
                                 ::Rubinius::CompiledCode.of_sender,
                                 constant_scope)
 
-      c = ::Rubinius::ToolSet::Runtime::Compiler
+      c = ::Rubinius::ToolSets::Runtime::Compiler
       be = c.construct_block string, binding, filename, line
 
       be.call_on_instance(self)
@@ -121,14 +121,14 @@ module Kernel
 
       if dyn = scope.dynamic_locals
         dyn.keys.each do |name|
-          locals << name.to_s unless locals.include?(name.to_s)
+          locals << name unless locals.include?(name)
         end
       end
 
       scope = scope.parent
     end
 
-    Rubinius::Type.convert_to_names(locals)
+    locals
   end
   module_function :local_variables
 
@@ -139,7 +139,7 @@ module Kernel
       Rubinius::VariableScope.of_sender,
       Rubinius::CompiledCode.of_sender,
       Rubinius::ConstantScope.of_sender,
-      self,
+      Rubinius::VariableScope.of_sender.self,
       Rubinius::Location.of_closest_ruby_method
     )
   end
@@ -170,7 +170,7 @@ module Kernel
     existing_scope = binding.constant_scope
     binding.constant_scope = existing_scope.dup
 
-    c = Rubinius::ToolSet::Runtime::Compiler
+    c = Rubinius::ToolSets::Runtime::Compiler
     be = c.construct_block string, binding, filename, lineno
 
     result = be.call_on_instance(binding.self)
@@ -215,7 +215,7 @@ class Module
                             Rubinius::CompiledCode.of_sender,
                             cs)
 
-    c = Rubinius::ToolSet::Runtime::Compiler
+    c = Rubinius::ToolSets::Runtime::Compiler
     be = c.construct_block string, binding, filename, line
 
     be.call_under self, cs, true, self

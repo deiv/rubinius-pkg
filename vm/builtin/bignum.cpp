@@ -13,18 +13,15 @@
 #include "object_utils.hpp"
 #include "ontology.hpp"
 
-#define BASIC_CLASS(blah) G(blah)
-#define NEW_STRUCT(obj, str, kls, kind) \
-  obj = (typeof(obj))Bignum::create(state); \
-  str = (kind *)(obj->mp_val())
-#define DATA_STRUCT(obj, type) ((type)(obj->mp_val()))
+#define NEW_STRUCT(obj, str) \
+  obj = Bignum::create(state); \
+  str = (obj->mp_val())
 
 #define NMP mp_int *n; Bignum* n_obj; \
-  NEW_STRUCT(n_obj, n, BASIC_CLASS(bignum), mp_int);
+  NEW_STRUCT(n_obj, n);
 
 #define MMP mp_int *m; Bignum* m_obj; \
-  NEW_STRUCT(m_obj, m, BASIC_CLASS(bignum), mp_int);
-
+  NEW_STRUCT(m_obj, m);
 
 #define BDIGIT_DBL long long
 #define DIGIT_RADIX (1UL << DIGIT_BIT)
@@ -32,54 +29,6 @@
 #define XST ((void*)state)
 
 namespace rubinius {
-
-  /*
-   * LibTomMath actually stores stuff internally in longs.
-   * The problem with it's API is that it's int based, so
-   * this will create problems on 64 bit platforms if
-   * everything is cut down to 32 bits. Hence the existence
-   * of the mp_set_long, mp_init_set_long and mp_get_long
-   * functions here.
-   */
-  static int mp_set_long MPA(mp_int* a, unsigned long b) {
-    mp_zero(a);
-
-    while(b > MP_DIGIT_MAX) {
-      a->dp[0] |= (b >> DIGIT_BIT);
-      a->used += 1;
-      int err = mp_mul_2d(MPST, a, DIGIT_BIT, a);
-      if(err != MP_OKAY) {
-        return err;
-      }
-
-      b &= MP_MASK;
-    }
-
-    a->dp[0] |= b;
-    a->used += 1;
-
-    mp_clamp(a);
-    return MP_OKAY;
-  }
-
-  static unsigned long mp_get_long(mp_int* a) {
-      int i;
-      unsigned long res;
-
-      if(a->used == 0) return 0;
-
-      /* get number of digits of the lsb we have to read */
-      i = MIN(a->used,(int)((sizeof(unsigned long)*CHAR_BIT+DIGIT_BIT-1)/DIGIT_BIT))-1;
-
-      /* get most significant digit of result */
-      res = DIGIT(a,i);
-
-      while(--i >= 0) {
-        res = (res << DIGIT_BIT) | DIGIT(a,i);
-      }
-
-      return res;
-  }
 
   static void twos_complement MPA(mp_int* a) {
     int i = a->used;
@@ -736,10 +685,6 @@ namespace rubinius {
       return Primitives::failure();
     }
 
-    if(exp < 0) {
-      return this->to_float(state)->fpow(state, exponent);
-    }
-
     mp_expt_d(XST, mp_val(), exp, n);
 
     return Bignum::normalize(state, n_obj);
@@ -1014,81 +959,6 @@ namespace rubinius {
     return str;
   }
 
-  Integer* Bignum::from_string_detect(STATE, const char *str) {
-    const char *s;
-    int radix;
-    int sign;
-    mp_int n;
-    mp_init(&n);
-
-    s = str;
-    sign = 1;
-
-    while(isspace(*s)) { s++; }
-
-    if(*s == '+') {
-      s++;
-    } else if(*s == '-') {
-      sign = 0;
-      s++;
-    }
-
-    radix = 10;
-    if(*s == '0') {
-      switch(s[1]) {
-      case 'x': case 'X':
-        radix = 16; s += 2;
-        break;
-      case 'b': case 'B':
-        radix = 2; s += 2;
-        break;
-      case 'o': case 'O':
-        radix = 8; s += 2;
-        break;
-      case 'd': case 'D':
-        radix = 10; s += 2;
-        break;
-      default:
-        radix = 8; s += 1;
-      }
-    }
-
-    mp_read_radix(XST, &n, s, radix);
-
-    if(!sign) {
-      n.sign = MP_NEG;
-    }
-
-    Integer* res = Bignum::from(state, &n);
-
-    mp_clear(&n);
-
-    return res;
-  }
-
-  Integer* Bignum::from_string(STATE, const char *str, size_t radix) {
-    char *endptr = NULL;
-    long l;
-
-    errno = 0;
-    l = strtol(str, &endptr, radix);
-
-    if(endptr != str && errno == 0 &&
-       l >= FIXNUM_MIN && l <= FIXNUM_MAX) {
-      return Fixnum::from(l);
-    }
-
-    mp_int n;
-    mp_init(&n);
-    mp_read_radix(XST, &n, str, radix);
-
-    Integer* res = Bignum::from(state, &n);
-
-    mp_clear(&n);
-
-    return res;
-  }
-
   void Bignum::into_string(STATE, size_t radix, char *buf, size_t sz) {
     int k;
     mp_toradix_nd(XST, mp_val(), buf, radix, sz, &k);
@@ -1311,8 +1181,7 @@ namespace rubinius {
     mp_int* n = big->mp_val();
     assert(MANAGED(n));
 
-    Object* tmp = mark.call(static_cast<Object*>(n->managed));
-    if(tmp && tmp != n->managed) {
+    if(Object* tmp = mark.call(static_cast<Object*>(n->managed))) {
       n->managed = reinterpret_cast<void*>(tmp);
       ByteArray* ba = force_as<ByteArray>(tmp);
       n->dp = OPT_CAST(mp_digit)ba->raw_bytes();

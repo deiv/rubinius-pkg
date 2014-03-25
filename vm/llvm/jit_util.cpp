@@ -280,6 +280,7 @@ extern "C" {
     }
     va_end(ap);
 
+    assert(closest);
     MachineCode* mcode = closest->compiled_code->machine_code();
     GCTokenImpl gct;
     return BlockEnvironment::under_call_frame(state, gct, code, mcode, closest);
@@ -305,7 +306,9 @@ extern "C" {
   }
 
   Object* rbx_cast_array(STATE, CallFrame* call_frame, Object* top) {
-    if(Tuple* tup = try_as<Tuple>(top)) {
+    if(top->nil_p()) {
+      return Array::create_dirty(state, 0);
+    } else if(Tuple* tup = try_as<Tuple>(top)) {
       return Array::from_tuple(state, tup);
     } else if(kind_of<Array>(top)) {
       return top;

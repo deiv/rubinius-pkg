@@ -5,6 +5,7 @@
 
 #include "oop.hpp"
 #include "builtin/object.hpp"
+#include "shared_state.hpp"
 
 namespace rubinius {
 
@@ -32,7 +33,7 @@ namespace rubinius {
     capi::Handles* handles_;
     std::list<capi::Handle*>* cached_handles_;
     GlobalCache* global_cache_;
-    std::list<ManagedThread*>* threads_;
+    ThreadList* threads_;
     std::list<capi::GlobalHandle*>* global_handle_locations_;
 #ifdef ENABLE_LLVM
     LLVMState* llvm_state_;
@@ -45,30 +46,11 @@ namespace rubinius {
   public:
     GCData(VM*);
 
-    GCData(Roots& r,
-           capi::Handles* handles = NULL, std::list<capi::Handle*>* cached_handles = NULL,
-           GlobalCache *cache = NULL, std::list<ManagedThread*>* ths = NULL,
-           std::list<capi::GlobalHandle*>* global_handle_locations = NULL)
-      : roots_(r)
-      , handles_(handles)
-      , cached_handles_(cached_handles)
-      , global_cache_(cache)
-      , threads_(ths)
-      , global_handle_locations_(global_handle_locations)
-#ifdef ENABLE_LLVM
-      , llvm_state_(0)
-#endif
-      , young_bytes_allocated_(0)
-      , mature_bytes_allocated_(0)
-      , code_bytes_allocated_(0)
-      , symbol_bytes_allocated_(0)
-    {}
-
     Roots& roots() {
       return roots_;
     }
 
-    std::list<ManagedThread*>* threads() {
+    ThreadList* threads() {
       return threads_;
     }
 

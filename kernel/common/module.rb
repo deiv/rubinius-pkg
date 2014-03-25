@@ -126,10 +126,6 @@ class Module
   def constants(all=undefined)
     tbl = Rubinius::LookupTable.new
 
-    # When calling `constants` on "normal" classes the result does not include
-    # their own class name. BasicObject is a special case in this regard.
-    tbl[:BasicObject] = true if self == BasicObject
-
     @constant_table.each do |name, constant, visibility|
       tbl[name] = true unless visibility == :private
     end
@@ -153,7 +149,7 @@ class Module
       end
     end
 
-    Rubinius::Type.convert_to_names tbl.keys
+    tbl.keys
   end
 
   def private_constant(*names)
@@ -302,10 +298,7 @@ class Module
 
     raise PrimitiveFailure, "Module#__class_variables__ primitive failed"
   end
-
-  def class_variables
-    Rubinius::Type.convert_to_names(__class_variables__)
-  end
+  alias_method :class_variables, :__class_variables__
 
   def name
     Rubinius::Type.module_name self
@@ -447,7 +440,7 @@ class Module
       end
     end
 
-    Rubinius::Type.convert_to_names ary
+    ary
   end
 
   def public_instance_methods(all=true)
@@ -484,7 +477,7 @@ class Module
       end
     end
 
-    Rubinius::Type.convert_to_names ary
+    ary
   end
 
   private :filter_methods
@@ -836,7 +829,7 @@ class Module
   end
 
   def dynamic_method(name, file="(dynamic)", line=1)
-    g = Rubinius::ToolSet::Runtime::Generator.new
+    g = Rubinius::ToolSets::Runtime::Generator.new
     g.name = name.to_sym
     g.file = file.to_sym
     g.set_line Integer(line)

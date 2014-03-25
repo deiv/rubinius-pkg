@@ -549,7 +549,7 @@ step2:
     return eLockError;
   }
 
-  bool ObjectHeader::locked_p(STATE, GCToken gct, CallFrame* call_frame) const {
+  bool ObjectHeader::locked_p(STATE, GCToken gct, CallFrame* call_frame) {
     HeaderWord orig = header;
 
     switch(orig.f.meaning) {
@@ -561,7 +561,7 @@ step2:
       return false;
     case eAuxWordInflated:
       InflatedHeader* ih = ObjectHeader::header_to_inflated_header(state, orig);
-      return ih->locked_mutex_p(state, gct, call_frame);
+      return ih->locked_mutex_p(state, gct, call_frame, this);
     }
 
     rubinius::bug("Invalid header meaning");
@@ -578,11 +578,6 @@ step2:
       case eAuxWordEmpty:
       case eAuxWordObjID:
       case eAuxWordHandle:
-        // Um. well geez. We don't have this object locked.
-        if(state->shared().config.thread_debug) {
-          std::cerr << "[THREAD] Attempted to unlock an unlocked object.\n";
-        }
-
         if(cDebugThreading) {
           std::cerr << "[LOCK " << state->vm()->thread_id() << " attempted to unlock an unlocked header]\n";
         }
@@ -598,13 +593,6 @@ step2:
               << "]\n";
           }
 
-          if(state->shared().config.thread_debug) {
-            std::cerr
-              << "[THREAD] Attempted to unlock an object locked by other thread."
-              << "locker=" << locker_tid
-              << ", current=" << state->vm()->thread_id()
-              << "\n";
-          }
           return eLockError;
         }
 
@@ -933,8 +921,10 @@ step2:
     return locked ? eLocked : eUnlocked;
   }
 
-  bool InflatedHeader::locked_mutex_p(STATE, GCToken gct, CallFrame* call_frame) {
+  bool InflatedHeader::locked_mutex_p(STATE, GCToken gct, CallFrame* call_frame, ObjectHeader* obj) {
     // Gain exclusive access to the insides of the InflatedHeader.
+    OnStack<1> os(state, obj);
+
     GCLockGuard lg(state, gct, call_frame, mutex_);
 
     return owner_id_ != 0;

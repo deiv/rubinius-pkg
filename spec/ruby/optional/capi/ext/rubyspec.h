@@ -7,6 +7,10 @@
 
 #include "rubyspec_version.h"
 
+#if RUBY_VERSION_MAJOR >=2 && RUBY_VERSION_MINOR >= 1
+#define RUBY_VERSION_IS_2_1
+#endif
+
 #if RUBY_VERSION_MAJOR >= 2
 #define RUBY_VERSION_IS_2_0
 #endif
@@ -311,9 +315,15 @@
 #define HAVE_RB_HASH_NEW                   1
 #define HAVE_RB_HASH_SIZE                  1
 
+/* Integer */
+#ifdef RUBY_VERSION_IS_2_1
+#define HAVE_RB_INTEGER_PACK               1
+#endif
+
 /* IO */
 #define HAVE_GET_OPEN_FILE                 1
 #define HAVE_RB_IO_ADDSTR                  1
+#define HAVE_RB_IO_CHECK_IO                1
 #define HAVE_RB_IO_CHECK_CLOSED            1
 #define HAVE_RB_IO_CHECK_READABLE          1
 #define HAVE_RB_IO_CHECK_WRITABLE          1
@@ -337,6 +347,10 @@
 #define HAVE_RB_MUTEX_UNLOCK               1
 #define HAVE_RB_MUTEX_SLEEP                1
 #define HAVE_RB_MUTEX_SYNCHRONIZE          1
+#endif
+
+#ifdef RUBY_VERSION_IS_2_0
+#define HAVE_RB_FD_FIX_CLOEXEC             1
 #endif
 
 /* Kernel */
@@ -566,6 +580,7 @@
 #define HAVE_RB_ID2NAME                    1
 #ifdef RUBY_VERSION_IS_1_9
 #define HAVE_RB_ID2STR                     1
+#define HAVE_RB_INTERN_STR                 1
 #endif
 #define HAVE_RB_INTERN                     1
 #define HAVE_RB_IS_CLASS_ID                1

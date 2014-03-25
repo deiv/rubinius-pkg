@@ -1,15 +1,17 @@
 def bootstrap_rubinius(cmd)
-  ENV["RBX_BOOTSTRAP_LOAD_PATH"] = "1"
-  sh cmd
+  gems_path = File.expand_path "../", BUILD_CONFIG[:bootstrap_gems_dir]
+  ENV["RBX_GEMS_PATH"] = gems_path
+  sh "#{BUILD_CONFIG[:build_exe]} #{cmd}"
 ensure
-  ENV.delete "RBX_BOOTSTRAP_LOAD_PATH"
+  ENV.delete "RBX_GEMS_PATH"
 end
 
 namespace :gems do
   desc 'Install the pre-installed gems'
   task :install do
-    ENV['GEM_HOME'] = ENV['GEM_PATH'] = nil
-    cmd = "#{BUILD_CONFIG[:build_exe]} #{BUILD_CONFIG[:sourcedir]}/rakelib/preinstall_gems.rb"
+    clean_environment
+
+    cmd = "#{BUILD_CONFIG[:sourcedir]}/rakelib/preinstall_gems.rb"
 
     Dir.chdir "vendor/cache" do
       bootstrap_rubinius cmd
@@ -33,8 +35,10 @@ namespace :gems do
   end
 
   task :extensions do
-    gems_dir = "#{BUILD_CONFIG[:build_prefix]}#{BUILD_CONFIG[:runtimedir]}/gems"
-    build_gem_extconf = "#{BUILD_CONFIG[:build_exe]} extconf.rb"
+    clean_environment
+
+    gems_dir = BUILD_CONFIG[:bootstrap_gems_dir]
+    build_gem_extconf = "extconf.rb"
 
     # Build the gems needed to run mkmf.rb
     names = FileList["#{gems_dir}/rubysl-{etc,fcntl}*/**/extconf.rb"]
@@ -56,15 +60,15 @@ namespace :gems do
 
       ext_name = "#{File.basename(File.dirname(name))}.#{$dlext}"
       dest_path = File.join m[1], "lib", File.dirname(m[3])
-      next if File.exists? File.join(dest_path, ext_name)
+      next if File.exist? File.join(dest_path, ext_name)
 
       Dir.chdir File.dirname(name) do
         puts "Building #{m[1]}..."
 
-        bootstrap_rubinius build_gem_extconf unless File.exists? "Makefile"
+        bootstrap_rubinius build_gem_extconf unless File.exist? "Makefile"
         sh "#{BUILD_CONFIG[:build_make]}", :verbose => $verbose
 
-        if File.exists? ext_name
+        if File.exist? ext_name
           FileUtils.mkdir_p dest_path
           FileUtils.cp ext_name, dest_path
         end

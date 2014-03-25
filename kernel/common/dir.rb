@@ -8,7 +8,7 @@ class Dir
   FFI = Rubinius::FFI
 
   def self.open(path, options=undefined)
-    dir = new path
+    dir = new path, options
     if block_given?
       begin
         value = yield dir
@@ -25,7 +25,7 @@ class Dir
   def self.entries(path, options=undefined)
     ret = []
 
-    open(path) do |dir|
+    open(path, options) do |dir|
       while s = dir.read
         ret << s
       end
@@ -55,24 +55,6 @@ class Dir
 
     glob patterns
   end
-
-  #   files = []
-  #   index = 0
-
-  #   patterns.each do |pat|
-  #     enc = Rubinius::Type.ascii_compatible_encoding pat
-
-  #     Dir::Glob.glob pat, 0, files
-
-  #     total = files.size
-  #     while index < total
-  #       Rubinius::Type.encode_string files[index], enc
-  #       index += 1
-  #     end
-  #   end
-
-  #   files
-  # end
 
   def self.glob(pattern, flags=0, &block)
     if pattern.kind_of? Array

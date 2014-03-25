@@ -163,6 +163,26 @@ module Kernel
   alias_method :__callee__, :__method__
   module_function :__callee__
 
+  def __dir__
+    scope = Rubinius::ConstantScope.of_sender
+    script = scope.current_script
+    basepath = script.file_path
+    fullpath = nil
+
+    return nil unless basepath
+
+    fullpath = if script.data_path
+      script.data_path
+    else
+      Rubinius.privately do
+        File.basic_realpath(basepath)
+      end
+    end
+
+    File.dirname fullpath
+  end
+  module_function :__dir__
+
   def =~(other)
     nil
   end
@@ -280,7 +300,7 @@ module Kernel
   module_function :gets
 
   def global_variables
-    Rubinius::Type.convert_to_names Rubinius::Globals.variables
+    Rubinius::Globals.variables
   end
   module_function :global_variables
 
@@ -382,7 +402,7 @@ module Kernel
       ary << sym if sym.is_ivar?
     end
 
-    Rubinius::Type.convert_to_names ary
+    ary
   end
 
   def instance_variable_defined?(name)
@@ -559,7 +579,7 @@ module Kernel
       methods.concat m.method_table.private_names
     end
 
-    Rubinius::Type.convert_to_names methods
+    methods
   end
   private :private_singleton_methods
 
@@ -586,7 +606,7 @@ module Kernel
       methods.concat m.method_table.protected_names
     end
 
-    Rubinius::Type.convert_to_names methods
+    methods
   end
   private :protected_singleton_methods
 
@@ -625,7 +645,7 @@ module Kernel
       methods.concat m.method_table.public_names
     end
 
-    Rubinius::Type.convert_to_names methods
+    methods
   end
   private :public_singleton_methods
 
@@ -780,8 +800,10 @@ module Kernel
   end
   module_function :test
 
-  def to_enum(method=:each, *args)
-    Enumerator.new(self, method, *args)
+  def to_enum(method=:each, *args, &block)
+    Enumerator.new(self, method, *args).tap do |enum|
+      Rubinius.privately { enum.size = block } if block_given?
+    end
   end
   alias_method :enum_for, :to_enum
 
@@ -820,7 +842,7 @@ module Kernel
       end
     end
 
-    Rubinius::Type.convert_to_names methods.uniq
+    methods.uniq
   end
 
   def syscall(*args)
@@ -832,13 +854,39 @@ module Kernel
     Rubinius::Type.infect("#<#{self.class}:0x#{self.__id__.to_s(16)}>", self)
   end
 
-  def trace_var(*args)
-    raise NotImplementedError
+  def trace_var(name, cmd = nil, &block)
+    if !cmd && !block
+      raise(
+        ArgumentError,
+        'The 2nd argument should be a Proc/String, alternatively use a block'
+      )
+    end
+
+    # We have to use a custom proc since set_hook passes in both the variable
+    # name and value.
+    set = proc do |_, value|
+      if cmd.is_a?(String)
+        eval(cmd)
+
+      # In MRI if one passes both a proc in `cmd` and a block the latter will
+      # be ignored.
+      elsif cmd.is_a?(Proc)
+        cmd.call(value)
+
+      elsif block
+        block.call(value)
+      end
+    end
+
+    Rubinius::Globals.set_hook(name, :[], set)
   end
   module_function :trace_var
 
-  def untrace_var(*args)
-    raise NotImplementedError
+  # In MRI one can specify a 2nd argument to remove a specific tracer.
+  # Rubinius::Globals however only supports one hook per variable, hence the
+  # 2nd dummy argument.
+  def untrace_var(name, *args)
+    Rubinius::Globals.remove_hook(name)
   end
   module_function :untrace_var
 
