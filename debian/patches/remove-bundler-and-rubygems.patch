@@ -1,0 +1,33 @@
+Description: Removes bundler and rubygems depends
+
+Author: David Suárez <david.sephirot@gmail.com>
+Last-Update: 2014-05-04
+
+--- a/Rakefile
++++ b/Rakefile
+@@ -1,4 +1,4 @@
+-require 'bundler/setup'
++#require 'bundler/setup'
+ require 'redcard'
+ require './rakelib/configure'
+ require './rakelib/build_signature'
+--- a/configure
++++ b/configure
+@@ -1,7 +1,7 @@
+ #!/usr/bin/env ruby
+ 
+ require 'rubygems'
+-require 'bundler/setup'
++#require 'bundler/setup'
+ require './rakelib/configure'
+ require './rakelib/release'
+ require './rakelib/build_signature'
+@@ -12,7 +12,7 @@ require 'stringio'
+ require 'date'
+ require 'digest/md5'
+ require 'net/http'
+-require 'gems'
++#require 'gems'
+ require 'redcard'
+ 
+ module Rubinius

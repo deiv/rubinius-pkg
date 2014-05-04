@@ -1,2 +1,3 @@
 use-external-libs.patch
 dont-install-gems-while-build-task.patch
+remove-bundler-and-rubygems.patch
