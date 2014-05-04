@@ -30,6 +30,28 @@ CONFIGURE = \
     --preserve-prefix \
     --release-build
 
+# generated files that didn't get removed by clean
+UNCLEANED_FILES = \
+  config.rb \
+  configure.log \
+  .build_ruby \
+  .build_signature \
+  vm/gen/config.h \
+  vm/gen/paths.h \
+  vm/include/capi/gen/rbx_config.h \
+  vm/include/capi/gen/rbx_release.h \
+  vm/include/capi/ruby/config.h \
+  vm/test/ruby.h \
+  library/rubinius/build_config.rb \
+  vendor/oniguruma/config.h
+
+UNCLEANED_DIRS = usr/ staging/ runtime/ bootstrap/
+
+UNCLEANED_TESTS_FILES = \
+ spec/ruby/optional/capi/ext/rubyspec_version.h
+
+UNCLEANED_TESTS_DIRS = .rbx/
+
 %:
 	dh $@
 
@@ -57,12 +79,25 @@ override_dh_auto_install:
 
 override_dh_auto_clean: override_dh_auto_configure
 	dh_auto_clean
+	$(RAKE) clean
 	$(RAKE) distclean
-	$(RM) vendor/*.data
-	for dir in vendor/* lib/tooling/profiler; do (cd $$dir ; make clean || true; make distclean || true); done
+	
+	$(RM) -R $(UNCLEANED_DIRS)
+	$(RM) $(UNCLEANED_FILES)
+	
+	$(RM) -R $(UNCLEANED_TESTS_DIRS)
+	$(RM) $(UNCLEANED_TESTS_FILES)
+	cd spec && find -iname "*.o" -or -iname "*.so" -or -iname "*.sig"  \
+	  | grep -v "ruby/fixtures/code/load_fixture.so" \
+	  | grep -v "ruby/fixtures/code/load_fixture.ext.so" \
+	  | grep -v "ruby/fixtures/code/a/load_fixture.so" \
+	  | xargs $(RM)
+	
+	# vendor files
+	for dir in vendor/libtommath vendor/udis86 vendor/oniguruma; do (cd $$dir ; make clean || true; make distclean || true); done
+	$(RM) vendor/libtommath.data vendor/udis86.data
 
 override_dh_clean:
-	dh_clean --exclude=vendor/libgdtoa/makefile.orig
 	$(RM) config.rb
 
 # vim: ts=8 sw=8 noexpandtab
