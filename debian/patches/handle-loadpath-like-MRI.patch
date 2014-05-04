@@ -1,0 +1,67 @@
+Description: Handle ruby load path like MRI
+
+Author: David Suárez <david.sephirot@gmail.com>
+Last-Update: 2014-05-04
+
+--- a/kernel/loader.rb
++++ b/kernel/loader.rb
+@@ -58,13 +58,21 @@ module Rubinius
+ 
+       # This conforms more closely to MRI. It is necessary to support
+       # paths that mkmf adds when compiling and installing native exts.
+-      additions = [
+-        Rubinius::SITE_PATH,
+-        "#{Rubinius::SITE_PATH}/#{RUBY_VERSION}",
+-        "#{Rubinius::SITE_PATH}/#{Rubinius::CPU}-#{Rubinius::OS}",
+-        Rubinius::VENDOR_PATH,
+-        @main_lib,
+-      ]
++      additions = []
++      #  Rubinius::SITE_PATH,
++      #  "#{Rubinius::SITE_PATH}/#{RUBY_VERSION}",
++      #  "#{Rubinius::SITE_PATH}/#{Rubinius::CPU}-#{Rubinius::OS}",
++      #  Rubinius::VENDOR_PATH,
++      #  @main_lib,
++      #]
++      additions << "#{Rubinius::SITE_PATH}/rbx-#{Rubinius::LIB_VERSION}" # sitelibdir
++      additions << "#{Rubinius::SITE_PATH}/rbx-#{Rubinius::LIB_VERSION}/#{Rubinius::CPU}-#{Rubinius::OS}" # sitearchdir
++      additions << Rubinius::SITE_PATH # sitedir
++      additions << "#{Rubinius::VENDOR_PATH}/rbx-#{Rubinius::LIB_VERSION}" # vendorlibdir
++      additions << "#{Rubinius::VENDOR_PATH}/rbx-#{Rubinius::LIB_VERSION}/#{Rubinius::CPU}-#{Rubinius::OS}" # vendorarchdir
++      additions << Rubinius::VENDOR_PATH # vendordir
++      additions << @main_lib # rubylibdir
++
+       additions.uniq!
+ 
+       $LOAD_PATH.unshift(*additions)
+--- a/configure
++++ b/configure
+@@ -254,8 +254,8 @@ class Configure
+       @libdir     = dir + "/library"
+       @runtimedir = dir + "/runtime"
+       @kerneldir  = dir + "/kernel"
+-      @sitedir    = dir + "/site"
+-      @vendordir  = dir + "/vendor"
++      #@sitedir    = dir + "/site"
++      #@vendordir  = dir + "/vendor"
+     end
+ 
+     @bindir       = @prefixdir + "/bin" unless @bindir
+--- a/library/rbconfig.rb
++++ b/library/rbconfig.rb
+@@ -46,8 +46,14 @@ module RbConfig
+   sitelibdir                   = sitedir
+   arch                         = "#{Rubinius::CPU}-#{Rubinius::OS}"
+ 
++  libname                      = "rbx-#{Rubinius::LIB_VERSION}"
+   CONFIG["sitedir"]            = sitedir
+-  CONFIG["sitelibdir"]         = sitelibdir
++  CONFIG["sitelibdir"]         = "#{sitedir}/#{libname}"
++  CONFIG["sitearchdir"]        = "#{sitelibdir}/#{arch}"
++  CONFIG["vendordir"]          = Rubinius::VENDOR_PATH
++  CONFIG["vendorlibdir"]       = "#{CONFIG["vendordir"]}/#{libname}"
++  CONFIG["vendorarchdir"]      = "#{CONFIG["vendorlibdir"]}/#{arch}"
++
+   CONFIG["arch"]               = arch
+   CONFIG["sitearch"]           = arch
+   CONFIG["rubylibdir"]         = sitelibdir
