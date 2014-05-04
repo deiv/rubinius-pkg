@@ -1,27 +1,34 @@
 #!/usr/bin/make -f
 
-DESTDIR		= $(CURDIR)/debian/rubinius
-BIN_DIR		= /usr/bin
-MAN_DIR		= /usr/share/man/man1
-INC_DIR		= /usr/include/rubinius
-LIB_DIR		= /usr/lib
-GEM_DIR		= /var/lib/gems/rubinius
-LLVM_CONFIG	= /usr/bin/llvm-config-3.3
+DESTDIR         = $(CURDIR)/debian/rubinius
+BIN_DIR         = /usr/bin
+LIB_DI          = /usr/lib/ruby
+APP_DIR         = /usr/lib/rubinius
+VENDOR_DIR      = /usr/lib/ruby/vendor_ruby
+SITE_DIR        = /usr/local/lib/site_ruby
+GEM_DIR         = /var/lib/gems/rubinius
+MAN_DIR         = /usr/share/man/man1
+INC_DIR         = /usr/include/rubinius
+LLVM_CONFIG     = /usr/bin/llvm-config-3.3
+RUBY            = ruby2.1
+RAKE            = rake2.1
+GEM             = gem2.1
 
-CONFIGURE       = \
-  ./configure \
-    --llvm-config=/usr/bin/llvm-config-3.3 \
-    --libdir=/usr/lib \
-    --bindir=/usr/bin \
-    --mandir=/usr/share/man/man1 \
-    --includedir=/usr/include/rubinius \
-    --vendordir=/usr/lib/ruby/vendor_ruby \
-    --sitedir=/usr/local/lib/site_ruby \
-    --gemsdir=/var/lib/gems/rubinius \
-    --appdir=/usr/lib/rubinius \
-    --enable-version=19
-#    --disable-extra-programs
-#   --disable-preinstalled-gems \
+CONFIGURE = \
+  $(RUBY) ./configure \
+    --llvm-config=$(LLVM_CONFIG) \
+    --libdir=$(LIB_DIR) \
+    --bindir=$(BIN_DIR) \
+    --mandir=$(MAN_DIR) \
+    --includedir=$(INC_DIR) \
+    --vendordir=$(VENDOR_DIR) \
+    --sitedir=$(SITE_DIR) \
+    --gemsdir=$(GEM_DIR) \
+    --appdir=$(APP_DIR) \
+    --rake $(RAKE) \
+    --gem $(GEM) \
+    --preserve-prefix \
+    --release-build
 
 %:
 	dh $@
@@ -31,10 +38,10 @@ override_dh_auto_configure:
 	export CXXFLAGS="-Wno-error=unused-local-typedefs" && $(CONFIGURE)
 
 override_dh_auto_build:
-	rake build
+	$(RAKE) build
 
 override_dh_auto_install:
-	DESTDIR=$(DESTDIR) rake install
+	DESTDIR=$(DESTDIR) $(RAKE) install
 
 	for program in $$(find debian/rubinius/usr/bin -not -type d -and -not -name rbx); do \
 		mv $$program $$program-rbx; \
@@ -50,7 +57,7 @@ override_dh_auto_install:
 
 override_dh_auto_clean: override_dh_auto_configure
 	dh_auto_clean
-	rake distclean
+	$(RAKE) distclean
 	$(RM) vendor/*.data
 	for dir in vendor/* lib/tooling/profiler; do (cd $$dir ; make clean || true; make distclean || true); done
 
