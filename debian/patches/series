@@ -1,2 +1,2 @@
-001-use-system-libs
-dont-install-gems
+use-external-libs.patch
+dont-install-gems-while-build-task.patch
