@@ -3,7 +3,23 @@ Section: ruby
 Priority: optional
 Maintainer: Antonio Terceiro <terceiro@debian.org>
 DM-Upload-Allowed: yes
-Build-Depends: debhelper (>= 7.0.50~), ruby1.9.1, rake, ruby1.9.1-dev, llvm-3.3-dev, bison, libssl-dev, libffi-dev, libdouble-conversion-dev, zlib1g-dev, libyaml-dev
+Build-Depends: bison,
+               debhelper (>= 7.0.50~),
+               libdouble-conversion-dev,
+               libffi-dev,
+               libssl-dev,
+               libyaml-dev,
+               llvm-3.3-dev,
+               rake,
+               ruby2.1,
+               ruby2.1-dev,
+               zlib1g-dev,
+               ruby-daedalus-core,
+               ruby-rubinius-bridge,
+               ruby-rubinius-toolset,
+               ruby-rubinius-processor,
+               ruby-rubinius-compiler,
+               ruby-rubinius-ast
 Standards-Version: 3.9.2
 Vcs-Git: git://git.debian.org/collab-maint/rubinius.git
 Vcs-Browser: http://git.debian.org/?p=collab-maint/rubinius.git;a=summary
@@ -11,7 +27,7 @@ Homepage: http://rubini.us/
 
 Package: rubinius
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}
+Depends: ${misc:Depends}, ${shlibs:Depends}
 Provides: ruby-interpreter
 Description: implementation of the Ruby programming language
  Rubinius includes a bytecode virtual machine, parser, bytecode compiler,
@@ -21,7 +37,7 @@ Description: implementation of the Ruby programming language
 Package: rubinius-doc
 Section: doc
 Architecture: all
-Depends: ${misc:Depends}, rubinius
+Depends: rubinius, ${misc:Depends}
 Description: Rubinius documentation
  This package contains the Rubinius documentation. Once this package in
  installed, run `rbx docs` to have a browser window open at the index of the
