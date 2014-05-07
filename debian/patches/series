@@ -2,3 +2,4 @@ use-external-libs.patch
 dont-install-gems-while-build-task.patch
 remove-bundler-and-rubygems.patch
 handle-loadpath-like-MRI.patch
+load-rubinius-runtime-first.patch

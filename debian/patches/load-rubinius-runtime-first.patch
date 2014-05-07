@@ -1,0 +1,19 @@
+Description: Load Rubinius runtime gems before anything else
+ This prevents that the incorrect (Rubinius build tools) libraries were
+ loaded instead of the internal Rubinius one (eg: if the Rubinius build
+ tools were installed for MRI).
+
+Author: David Suárez <david.sephirot@gmail.com>
+Last-Update: 2014-05-04
+
+--- rubinius-2.2.6.orig/kernel/delta/code_loader.rb
++++ rubinius-2.2.6/kernel/delta/code_loader.rb
+@@ -128,7 +128,7 @@ module Rubinius
+       def load_compiler
+         begin
+           Dir["#{Rubinius::RUNTIME_PATH}/gems/**/lib"].each do |dir|
+-            $LOAD_PATH.unshift dir
++            $LOAD_PATH << dir
+           end
+ 
+           require_compiled "rubinius/toolset"
