@@ -85,12 +85,10 @@ module Rubinius
     def self.each_ancestor(mod)
       sup = mod
       while sup
-        unless singleton_class_object(sup)
-          if object_kind_of?(sup, IncludedModule)
-            yield sup.module
-          else
-            yield sup if sup == sup.origin
-          end
+        if object_kind_of?(sup, IncludedModule)
+          yield sup.module
+        else
+          yield sup if sup == sup.origin
         end
         sup = sup.direct_superclass
       end
@@ -130,7 +128,7 @@ module Rubinius
       Rubinius.invoke_primitive(:string_check_null_safe, string)
     end
 
-    def self.const_lookup(mod, name, inherit)
+    def self.const_lookup(mod, name, inherit, resolve)
       parts = name.split '::'
 
       if name.start_with? '::'
@@ -139,45 +137,52 @@ module Rubinius
       end
 
       parts.each do |part|
-        mod = const_get mod, part, inherit
+        mod = const_get mod, part, inherit, resolve
       end
 
       mod
     end
 
-    def self.const_get(mod, name, inherit=true)
+    def self.const_get(mod, name, inherit=true, resolve=true)
       unless object_kind_of? name, Symbol
         name = StringValue(name)
-        return const_lookup mod, name, inherit if name.index '::' and name.size > 2
+        if name.index '::' and name.size > 2
+          return const_lookup mod, name, inherit, resolve
+        end
       end
 
       name = coerce_to_constant_name name
-
       current, constant = mod, undefined
 
-      while current
+      while current and object_kind_of? current, Module
         if bucket = current.constant_table.lookup(name)
           constant = bucket.constant
-          constant = constant.call(current) if constant.kind_of?(Autoload)
+          if resolve and object_kind_of? constant, Autoload
+            constant = constant.call(current)
+          end
+
           return constant
         end
 
         unless inherit
-          return mod.const_missing(name)
+          return resolve ? mod.const_missing(name) : undefined
         end
 
         current = current.direct_superclass
       end
 
-      if instance_of?(Module)
+      if object_instance_of? mod, Module
         if bucket = Object.constant_table.lookup(name)
           constant = bucket.constant
-          constant = constant.call(current) if constant.kind_of?(Autoload)
+          if resolve and object_kind_of? constant, Autoload
+            constant = constant.call(current)
+          end
+
           return constant
         end
       end
 
-      mod.const_missing(name)
+      resolve ? mod.const_missing(name) : undefined
     end
 
     def self.const_exists?(mod, name, inherit = true)
@@ -338,6 +343,12 @@ module Rubinius
 
       obj = obj.to_str if obj.respond_to?(:to_str)
       coerce_to(obj, Symbol, :to_sym)
+    end
+
+    def self.coerce_to_reflection_name(obj)
+      return obj if object_kind_of? obj, Symbol
+      return obj if object_kind_of? obj, String
+      coerce_to obj, String, :to_str
     end
 
     def self.ivar_validate(name)

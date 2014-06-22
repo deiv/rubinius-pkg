@@ -219,8 +219,8 @@ namespace rubinius {
     // BasicObject's SingletonClass instance has Class for a superclass
     SingletonClass::attach(state, basicobject, cls);
 
-    // Object's SingletonClass instance has Class for a superclass
-    Class* sc = SingletonClass::attach(state, object, cls);
+    // Object's SingletonClass instance has BasicObject's SingletonClass instance for a superclass
+    Class* sc = SingletonClass::attach(state, object, basicobject->klass());
 
     // Module's metaclass's superclass is Object's metaclass
     sc = SingletonClass::attach(state, G(module), sc);
@@ -487,6 +487,7 @@ namespace rubinius {
     G(rubinius)->set_const(state, "LIB_VERSION", String::create(state, RBX_LIB_VERSION));
     G(rubinius)->set_const(state, "BUILD_REV", String::create(state, RBX_BUILD_REV));
     G(rubinius)->set_const(state, "RELEASE_DATE", String::create(state, RBX_RELEASE_DATE));
+    G(rubinius)->set_const(state, "DEBUG_BUILD", RBOOL(RBX_DEBUG_BUILD));
     G(rubinius)->set_const(state, "LDSHARED", String::create(state, RBX_LDSHARED));
     G(rubinius)->set_const(state, "LDSHAREDXX", String::create(state, RBX_LDSHAREDXX));
 
