@@ -1049,6 +1049,9 @@ struct RTypedData {
   /** Returns the superclass of a class. */
   VALUE   rb_class_superclass(VALUE klass);
 
+  /** Returns the first superclass of an object that isn't a singleton or intermediate. */
+  VALUE   rb_class_real(VALUE object);
+
   /** Returns the Class object contained in the klass field of object
    * (ie, a singleton class if it's there) */
   VALUE   CLASS_OF(VALUE object);
@@ -2046,7 +2049,6 @@ struct RTypedData {
   /** Retrieve the nth match for the given MatchData */
   VALUE   rb_reg_nth_match(long nth, VALUE match_data);
 
-#define rb_thread_create(func, arg) capi_thread_create(func, arg, #func, __FILE__)
   /** Lock functions used by Onigmo */
   void    capi_reg_lock();
   void    capi_reg_unlock();

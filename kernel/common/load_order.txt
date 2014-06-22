@@ -1,5 +1,4 @@
 basic_object.rbc
-mirror.rbc
 string_mirror.rbc
 class.rbc
 autoload.rbc
@@ -24,7 +23,6 @@ backtrace.rbc
 comparable.rbc
 numeric.rbc
 ctype.rbc
-precision.rbc
 integer.rbc
 bignum.rbc
 block_environment.rbc
